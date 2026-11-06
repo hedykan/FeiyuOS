@@ -35,6 +35,8 @@ void flush();
 void tick();  // main loop: writes buffers older than 5 s
 std::size_t size(const String& path);                        // 0 when missing
 String read_range(const String& path, std::size_t offset, std::size_t max_bytes);
+// [offset, offset + length) of a binary file into `out`; false when the file is shorter.
+bool read_range_bytes(const String& path, std::size_t offset, std::size_t length, std::vector<uint8_t>& out);
 // Whole binary file into `out`; false when missing or larger than max_bytes.
 bool read_bytes(const String& path, std::vector<uint8_t>& out, std::size_t max_bytes);
 bool rename(const String& from, const String& to);           // replaces `to`

@@ -15,6 +15,7 @@ namespace vat::wifi {
 namespace {
 
 std::vector<Network> last_scan;
+bool scan_failed = false;
 
 // `ssid` becomes the primary network and stays in the saved list; the primary
 // it replaces is kept too (see wifi_saved.h).
@@ -36,8 +37,18 @@ bool remember(const String& ssid, const String& password) {
 
 String signal_word(int rssi) { return rssi > -60 ? "强" : rssi > -75 ? "中" : "弱"; }
 
+bool last_scan_failed() { return scan_failed; }
+
 std::vector<Network> scan(std::size_t max) {
-    const int count = WiFi.scanNetworks(false, false);
+    // Not connected, the driver keeps retrying the old network and a scan
+    // started meanwhile fails: stop the retries first, then try twice.
+    if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false, false);
+    int count = WiFi.scanNetworks(false, false);
+    if (count == WIFI_SCAN_FAILED) {
+        delay(500);
+        count = WiFi.scanNetworks(false, false);
+    }
+    scan_failed = count == WIFI_SCAN_FAILED;
     std::vector<Network> found;
     if (count <= 0) {
         WiFi.scanDelete();
@@ -61,8 +72,11 @@ std::vector<Network> scan(std::size_t max) {
 
 String scan_text() {
     const auto networks = scan();
-    if (networks.empty()) return "附近没有可见的 WiFi";
-    String text = "附近 " + String(networks.size()) + " 个 WiFi：\n";
+    if (networks.empty()) {
+        return last_scan_failed() ? String("WiFi 搜索失败（正忙于重连），过几秒再试")
+                                  : String("附近没有可见的 2.4 GHz WiFi（5 GHz 网络设备看不到）");
+    }
+    String text = "附近 " + String(networks.size()) + " 个 WiFi（只显示 2.4 GHz）：\n";
     int n = 0;
     for (const auto& network : networks) {
         text += String(++n) + ". " + network.ssid + "  信号" + signal_word(network.rssi) +

@@ -312,10 +312,18 @@ bool connect_station(const String& ssid, const String& password, uint32_t timeou
     wifi_state = WifiState::Connecting;
     WiFi.mode(WIFI_STA);
     WiFi.setHostname("vat-cardputer");
+    // Still on another network: leave it first.  Otherwise status() stays
+    // WL_CONNECTED and the old connection passes for the new one.
+    if (WiFi.status() == WL_CONNECTED && WiFi.SSID() != ssid) {
+        WiFi.disconnect(false, false);
+        const unsigned long until = millis() + 3000;
+        while (WiFi.status() == WL_CONNECTED && millis() < until) delay(50);
+    }
     WiFi.begin(ssid.c_str(), password.c_str());
     const unsigned long deadline = millis() + timeout_ms;
-    while (WiFi.status() != WL_CONNECTED && millis() < deadline) delay(100);
-    if (WiFi.status() == WL_CONNECTED) {
+    const auto on_it = [&ssid] { return WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid; };
+    while (!on_it() && millis() < deadline) delay(100);
+    if (on_it()) {
         WiFi.setSleep(false);
         reserve_blocks();
         wifi_state = WifiState::Connected;

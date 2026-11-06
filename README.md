@@ -45,4 +45,4 @@ API keys, Wi-Fi passwords and the SSH key are stored in plain text on the device
 
 ## License
 
-Released under the [MIT License](LICENSE). Third-party libraries, models and services retain their own licenses and terms. The corner mascot art in `assets/mascot/` is fan art and not covered by the MIT License; see its [NOTICE](assets/mascot/NOTICE.md).
+Released under the [MIT License](LICENSE). Third-party libraries, models and services retain their own licenses and terms. The IR decoder in `firmware/standalone_agent/src/third_party/irext/` and the air-conditioner codes in `assets/irdb/` come from [IRext](https://github.com/irext) (MIT). The corner mascot art in `assets/mascot/` is fan art and not covered by the MIT License; see its [NOTICE](assets/mascot/NOTICE.md).

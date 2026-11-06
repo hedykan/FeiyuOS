@@ -234,10 +234,14 @@ void draw_page() {
                                      String(current ? "当前 " : "") + wifi::signal_word(n.rssi) + (n.secured ? " 加密" : " 开放"),
                                      current ? kAccent : kText});
                 }
-                lines.push_back({"手动输入网络名…", "", kMuted});
+                lines.push_back({"手动输入网络名（仅 2.4 GHz）…", "", kMuted});
                 list(g, lines);
             }
-            footer(g, "; . 选择  Enter 连接  Fn+R 重搜  ` 返回");
+            if (scanned && networks.empty()) {
+                footer(g, wifi::last_scan_failed() ? "搜索失败，Fn+R 重搜  ` 返回" : "没搜到 2.4 GHz WiFi  Fn+R 重搜");
+            } else {
+                footer(g, "; . 选择  Enter 连接  Fn+R 重搜  ` 返回");
+            }
             break;
         }
         case View::Form: {

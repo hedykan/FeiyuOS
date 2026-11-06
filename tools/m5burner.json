@@ -1,0 +1,7 @@
+{
+  "name": "FeiyuOS for Cardputer Adv",
+  "description": "肥鱼 OS：跑在 Cardputer Adv 上的 AI 小操作系统，无需宿主机——不用连电脑、不用树莓派，连上 Wi-Fi 后录音、识别、执行都由设备自己完成。\n\n按住 Enter 说一句话，大肥鱼（DeepSeek）调度设备能力：位置天气路线、联网搜索、红外遥控、屏幕显示、SSH 连主机；还能把几件事组合成小程序，定时或开机自动运行。\n\n设置可以用手机：设置页选「手机设置（扫码）」，手机扫码连上设备热点，自动弹出设置页，Wi-Fi 和各种 Key 都在手机上填，不用在小键盘上敲。\n\n常用按键\n· 按住 Enter：说话，松开发送\n· Y / N / A：执行 / 取消 / 本任务后续都执行\n· ; 和 .：在时间线上下移动；/ 打开详情；, 回到最新\n· `（Esc）：取消当前任务\n· Btn0：切换 Agent / SSH\n· Fn+W：设置（Wi-Fi、Key、SSH 主机、手机扫码设置）\n· Fn+H：帮助\n· Fn+Del：清空对话记忆\n\n须知：只支持 Cardputer Adv。固件不含任何 Key，首次开机自动进入设置页，填写 Wi-Fi（仅 2.4 GHz）、语音识别 Key（通义千问）和 DeepSeek Key。右下角吉祥物：把 GitHub Release 里的 mascot.bin 放到 TF 卡 /vat/assets/。\n\n源码、完整说明和更新记录：https://github.com/hedykan/FeiyuOS",
+  "category": "cardputer",
+  "author": "hedykan",
+  "github": "https://github.com/hedykan/FeiyuOS"
+}

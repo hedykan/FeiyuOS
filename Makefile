@@ -6,7 +6,7 @@ BUILD_DIR := build/$(BUILD_NAME)
 DEVICE ?= http://vat.local
 PHASES ?= auto
 
-.PHONY: build upload flash wait-ready host-test mascot mascot-upload monitor clean e2e serial-log serial-stop probe-hardware probe-sd libs-status libs-custom libs-stock
+.PHONY: build upload flash wait-ready host-test mascot mascot-upload irdb-upload release m5burner monitor clean e2e serial-log serial-stop probe-hardware probe-sd libs-status libs-custom libs-stock
 
 build:
 	arduino-cli compile -b '$(FQBN)' --build-path '$(BUILD_DIR)' '$(SKETCH)'
@@ -26,16 +26,18 @@ wait-ready:
 # cJSON comes from the same ESP-IDF tree as the custom libraries.
 CJSON_DIR ?= ../../esp-libbuild/lib-builder/esp-idf/components/json/cJSON
 HOST_SRC := firmware/standalone_agent/src
-HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/prog_engine.cpp
+HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/prog_engine.cpp $(HOST_SRC)/ac_core.cpp
+IREXT_C := $(wildcard $(HOST_SRC)/third_party/irext/*.c)
 host-test:
 	mkdir -p build/host
 	cc -O1 -c '$(CJSON_DIR)/cJSON.c' -o build/host/cJSON.o
+	cd build/host && cc -O1 -c $(addprefix $(CURDIR)/,$(IREXT_C))
 	c++ -std=c++17 -O1 -Wall -Wextra -Werror -Itests/host/shim -I'$(HOST_SRC)' -I'$(CJSON_DIR)' \
-		tests/host/host_test.cpp $(HOST_UNITS) build/host/cJSON.o -o build/host/host_test
+		tests/host/host_test.cpp $(HOST_UNITS) build/host/cJSON.o $(patsubst %.c,build/host/%.o,$(notdir $(IREXT_C))) -o build/host/host_test
 	build/host/host_test tests/host/fixtures
 	python3 tools/check_usage.py
 
-# Corner mascot: pack assets/mascot (not in the public release) and copy it to
+# Corner mascot: pack assets/mascot and copy it to
 # the card; the firmware shows it when /vat/assets/mascot.bin exists.
 mascot:
 	mkdir -p build
@@ -43,6 +45,29 @@ mascot:
 
 mascot-upload: mascot
 	curl -sS -F "file=@build/mascot.bin" '$(DEVICE)/api/upload?path=/vat/assets/mascot.bin'
+
+# Air-conditioner IR codes (IRext, MIT): assets/irdb/ac.irdb, packed by
+# tools/pack_irdb.py from the IRext database; the firmware reads it from the card.
+irdb-upload:
+	curl -sS -F "file=@assets/irdb/ac.irdb" '$(DEVICE)/api/upload?path=/vat/ir/ac.irdb'
+
+# Release images (GitHub Release assets).  A separate build directory, with
+# source paths mapped so __FILE__ in library asserts does not carry the build
+# machine's home directory; tools/release_images.sh checks the images.
+VERSION ?= $(shell git describe --tags --abbrev=0)
+PREFIX_MAP := -fmacro-prefix-map=$(HOME)/=~/ -fmacro-prefix-map=$(CURDIR)/=./
+release:
+	arduino-cli compile -b '$(FQBN)' --build-path build/release/build \
+		--build-property 'compiler.c.extra_flags=$(PREFIX_MAP)' \
+		--build-property 'compiler.cpp.extra_flags=$(PREFIX_MAP)' '$(SKETCH)'
+	tools/release_images.sh build/release/build 'build/release/$(VERSION)' '$(VERSION)'
+
+# Upload the release image to M5Burner, kept private: get a share code with
+# node tools/m5burner.mjs share, test it, then publish on.  Log in once with
+# node tools/m5burner.mjs login.
+m5burner:
+	python3 tools/m5burner_cover.py assets/mascot 'build/release/$(VERSION)/m5burner_cover.png'
+	node tools/m5burner.mjs upload '$(VERSION)' 'build/release/$(VERSION)/feiyuos-$(VERSION)-cardputer-adv.bin' 'build/release/$(VERSION)/m5burner_cover.png'
 
 monitor:
 	arduino-cli monitor -p '$(PORT)' --config baudrate=115200

@@ -534,7 +534,7 @@ void job(uint32_t job_id, const String& text) {
         label = json_str(saved, "label");
         host.trigger_json = json_str(saved, "trigger_json");
         host.trigger_approved = json_str(saved, "trigger_approved");
-        error = saved ? run->restore(host, json_str(saved, "state")) : String("运行记录不见了");
+        error = saved ? run->restore(host, json_str(saved, "state")) : String("这次运行已取消");
         cJSON_Delete(saved);
     }
 
@@ -784,10 +784,39 @@ String users_of(const String& name) {
     return users;
 }
 
+String cancel_run(int id) {
+    cJSON* run = id > 0 ? read_json(run_path(id).c_str(), 16384) : nullptr;
+    if (!run) return "ERROR: 没有等待中的运行 #" + String(id) + "（read prog://runs 查看编号）";
+    const String resume = json_str(run, "resume");
+    const String label = json_str(run, "label");
+    cJSON_Delete(run);
+    if (!resume.isEmpty()) registry::unwatch(resume);
+    storage::remove(run_path(id));
+    note_recent("取消「" + label + "」的等待");
+    return "已取消「" + label + "」这次运行（#" + String(id) + "），程序和触发都保留";
+}
+
+// Waiting runs of program `name` (started by hand or by `exec`).
+std::vector<int> waiting_runs_of(const String& name) {
+    std::vector<int> ids;
+    cJSON* list = cJSON_Parse(storage::list_dir(kRunDir).c_str());
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, list) {
+        const int id = json_str(item, "name").toInt();
+        if (id <= 0) continue;
+        cJSON* run = read_json(run_path(id).c_str(), 16384);
+        if (json_str(run, "label") == name) ids.push_back(id);
+        cJSON_Delete(run);
+    }
+    cJSON_Delete(list);
+    return ids;
+}
+
 String remove(const String& name) {
     if (!storage::exists(program_path(name))) return "ERROR: 没有程序「" + name + "」";
     const String users = users_of(name);
     if (!users.isEmpty()) return "ERROR: 「" + name + "」还被 " + users + " 使用，先删除或修改它们";
+    for (const int id : waiting_runs_of(name)) cancel_run(id);
     storage::remove(program_path(name));
     set_approvals(name, {});
     forget_stat(name);

@@ -197,6 +197,7 @@ void wifi_saved() {
 }  // namespace
 
 #include "prog_test.cpp"
+#include "ac_test.cpp"
 
 int main(int argc, char** argv) {
     if (argc > 1) fixture_dir = argv[1];
@@ -205,6 +206,7 @@ int main(int argc, char** argv) {
     place_format();
     wifi_saved();
     prog_engine();
+    ac_core();
     std::printf("%s: %d checks, %d failed\n", failures ? "FAILED" : "ok", checks, failures);
     return failures ? 1 : 0;
 }

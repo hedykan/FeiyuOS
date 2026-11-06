@@ -15,6 +15,9 @@ String list_text();
 String show(const String& name);
 String unused_text();
 String runs_text();
+// Stops a run waiting in a `wait`: drops its timer and its saved state; the
+// program stays.  `id` as listed by runs_text.
+String cancel_run(int id);
 String save(const String& name, const String& content, bool approved);
 String remove(const String& name);
 String cleanup();

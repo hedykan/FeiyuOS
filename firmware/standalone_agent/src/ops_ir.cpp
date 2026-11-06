@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "common.h"
+#include "ops_ac.h"
 #include "storage.h"
 
 namespace vat::ir {
@@ -78,13 +79,6 @@ int set_index(const String& brand) {
     return -1;
 }
 
-String safe_name(String name) {
-    name.trim();
-    name.replace("/", "_");
-    name.replace("..", "_");
-    return name;
-}
-
 String profile_path(const String& name) { return "/vat/things/ir/" + safe_name(name) + ".json"; }
 
 cJSON* load(const String& name) {
@@ -108,15 +102,6 @@ void put_number(cJSON* object, const char* key, double value) {
 
 bool save(const String& name, cJSON* profile) { return storage::write_text(profile_path(name), json_print(profile)); }
 
-String now_text() {
-    const time_t now = time(nullptr);
-    struct tm tm;
-    localtime_r(&now, &tm);
-    char text[20];
-    strftime(text, sizeof(text), "%Y-%m-%d %H:%M", &tm);
-    return text;
-}
-
 // Sends with code set `index`; records it as the attempt awaiting an answer.
 String attempt(const String& name, cJSON* profile, int index, const String& action) {
     const CodeSet& set = kSets[index];
@@ -131,6 +116,30 @@ String attempt(const String& name, cJSON* profile, int index, const String& acti
 }
 
 }  // namespace
+
+String safe_name(String name) {
+    name.trim();
+    name.replace("/", "_");
+    name.replace("..", "_");
+    return name;
+}
+
+cJSON* load_profile(const String& name) { return load(name); }
+bool save_profile(const String& name, cJSON* profile) { return save(name, profile); }
+
+String now_text() {
+    const time_t now = time(nullptr);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char text[20];
+    strftime(text, sizeof(text), "%Y-%m-%d %H:%M", &tm);
+    return text;
+}
+
+void transmit_pulses(const uint16_t* pulses, std::size_t count, uint8_t khz) {
+    ensure_started();
+    IrSender.sendRaw(pulses, static_cast<uint_fast16_t>(count), khz);
+}
 
 String brands_text() {
     String text = "内置红外码（电视）：";
@@ -240,6 +249,11 @@ String list_text() {
         if (!file.endsWith(".json")) continue;
         const String name = file.substring(0, file.length() - 5);
         cJSON* profile = load(name);
+        if (json_str(profile, "kind") == "ac") {
+            text += String(++n) + ". " + name + "  " + ac::summary(profile) + "\n";
+            cJSON_Delete(profile);
+            continue;
+        }
         const cJSON* set = cJSON_GetObjectItemCaseSensitive(profile, "code_set");
         text += String(++n) + ". " + name + "  " +
                 (cJSON_IsNumber(set) ? String(kSets[set->valueint].label) + "（已验证）" : String("未验证")) +

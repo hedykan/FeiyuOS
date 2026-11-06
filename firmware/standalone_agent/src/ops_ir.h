@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <cJSON.h>
 
 // IR emitter on G44 (transmit only, no learning).  Codes come from a small
 // built-in table of common TV protocols; whether one worked is only known to
@@ -21,5 +22,12 @@ String confirm(const String& name, bool worked);
 String send_raw(const String& spec);
 String list_text();
 String brands_text();
+
+// Shared with ops_ac (air conditioners): one emitter, one profile directory.
+void transmit_pulses(const uint16_t* pulses, std::size_t count, uint8_t khz);  // µs, mark first
+String safe_name(String name);
+cJSON* load_profile(const String& name);  // an object with "name" when there is none yet
+bool save_profile(const String& name, cJSON* profile);
+String now_text();
 
 }  // namespace vat::ir

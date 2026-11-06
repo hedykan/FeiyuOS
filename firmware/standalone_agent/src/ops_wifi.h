@@ -18,6 +18,9 @@ struct Network {
 // Visible networks, strongest first, one entry per name, at most `max`.
 // Blocks for the scan (about 2-4 s).
 std::vector<Network> scan(std::size_t max = 12);
+// The last scan did not run (the radio was busy reconnecting), as opposed to
+// finding nothing.  Only 2.4 GHz networks are ever visible.
+bool last_scan_failed();
 // The same as numbered text: "2. CMCC-mstU  信号中  加密  当前连接".
 String scan_text();
 String signal_word(int rssi);  // 强 / 中 / 弱

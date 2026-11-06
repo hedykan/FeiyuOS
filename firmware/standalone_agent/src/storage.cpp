@@ -708,6 +708,19 @@ String read_range(const String& path, std::size_t offset, std::size_t max_bytes)
     return content;
 }
 
+bool read_range_bytes(const String& path, std::size_t offset, std::size_t length, std::vector<uint8_t>& out) {
+    flush_for(path);
+    const Timed timed("read_range_bytes", path);
+    out.clear();
+    if (!active) return false;
+    File file = active->open(path, FILE_READ);
+    if (!file || file.isDirectory() || offset + length > file.size() || !file.seek(offset)) return false;
+    out.resize(length);
+    const std::size_t n = file.read(out.data(), length);
+    file.close();
+    return n == length;
+}
+
 bool read_bytes(const String& path, std::vector<uint8_t>& out, std::size_t max_bytes) {
     flush_for(path);
     const Timed timed("read_bytes", path);

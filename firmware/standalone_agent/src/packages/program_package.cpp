@@ -29,7 +29,7 @@ constexpr char kUsage[] =
     "write target=trigger://new，content 为 JSON，含 when 与 run：when 是事件字符串，如 time://every/07:00（每天）、"
     "time://weekday/09:00、time://at/18:30（一次）、time://in/10m（一次）、device://boot（开机），不要用 cron；run 是一个步骤，"
     "写法同上，如键 exec 值 prog://早安。只做一件事时直接建触发，run 里写那个动作；多件事先写程序再建触发运行它。查看 "
-    "read trigger://list；停用 write trigger://编号/pause；删除 write prog://名字/delete 或 trigger://编号/delete；清理先 "
+    "read trigger://list；停用 write trigger://编号/pause；取消正在等待的一次运行（程序保留）write prog://runs/编号/cancel，编号见 read prog://runs；删除 write prog://名字/delete 或 trigger://编号/delete；清理先 "
     "read prog://unused 再 write prog://cleanup。";
 
 // read prog://help: the whole language with examples (read on demand, so it
@@ -94,7 +94,7 @@ write prog://我出门了  content={"name":"我出门了","steps":[
  {"exec":"prog://走去?to=公司"}]}
 
 管理：read prog://list；read prog://早安（大纲）；read trigger://list；write trigger://3/pause；write trigger://3/resume；
-write prog://番茄钟/delete；read prog://unused；write prog://cleanup；read prog://runs（等待中与最近的运行）。
+write prog://番茄钟/delete；read prog://unused；write prog://cleanup；read prog://runs（等待中与最近的运行）；write prog://runs/2/cancel（取消等待中的那次，程序保留）。
 )HELP";
 
 const char* const kReserved[] = {"list", "help", "unused", "runs", "cleanup"};
@@ -145,6 +145,7 @@ public:
             return !path.endsWith("/delete");  // pause / resume
         }
         split(target, strlen("prog://"), path, query);
+        if (path.startsWith("runs/")) return true;  // cancel a waiting run: what was asked, nothing is lost
         if (path == "cleanup" || path.endsWith("/delete")) return false;
         if (path.endsWith("/run")) return true;
         return !programs::needs_confirm(json_str(arguments, "content"));
@@ -192,6 +193,10 @@ public:
             return programs::show(path);
         }
         if (path == "cleanup") return programs::cleanup();
+        if (path.startsWith("runs/")) {
+            if (!path.endsWith("/cancel")) return "ERROR: 取消等待中的运行用 write prog://runs/编号/cancel";
+            return programs::cancel_run(path.substring(5, path.length() - 7).toInt());
+        }
         if (path.endsWith("/delete")) return programs::remove(path.substring(0, path.length() - 7));
         if (reserved(path)) return "ERROR: 程序名不能是 list、help、unused、runs、cleanup";
         if (path.indexOf('/') >= 0) return "ERROR: 保存用 write prog://名字，删除用 prog://名字/delete";
@@ -212,6 +217,7 @@ public:
             {"trigger://new", "program：write 新建触发，content 为 {when, run}"},
             {"trigger://list", "program：read 列出触发"},
             {"prog://runs", "program：read 等待中与最近的运行"},
+            {"prog://runs/编号/cancel", "program：write 取消一次等待中的运行（程序和触发保留）"},
         };
         for (const auto& item : items) {
             if (!add_resource(list, remaining, item[0], item[1])) return;
