@@ -1,0 +1,211 @@
+[
+  {
+    "id": "connect_dev",
+    "text": "连接 SSH 配置开发机。",
+    "transcript_contains": ["连接", "开发机"],
+    "expect": {
+      "call_names": ["session"],
+      "arguments": [{"action": "connect", "target": "ssh://开发机"}]
+    }
+  },
+  {
+    "id": "read_hostname",
+    "text": "读取开发机上的 /etc/hostname 文件。",
+    "transcript_contains": ["开发机", "hostname"],
+    "expect": {
+      "call_names": ["read"],
+      "arguments": [{"target": "ssh://开发机/etc/hostname"}]
+    }
+  },
+  {
+    "id": "git_status",
+    "text": "在开发机执行 git status。",
+    "transcript_contains": ["开发机", "git"],
+    "expect": {
+      "call_names": ["exec"],
+      "arguments": [{
+        "target": "ssh://开发机",
+        "program": "git",
+        "args": ["status"],
+        "confirm_required": false
+      }]
+    }
+  },
+  {
+    "id": "current_codex_draft",
+    "text": "在当前 Codex 里输入检查项目状态，但不要发送。",
+    "transcript_contains": ["检查项目状态", "不要发送"],
+    "expect": {
+      "call_names": ["input"],
+      "arguments": [{
+        "target": "tui://current",
+        "text": "检查项目状态",
+        "submit": false
+      }]
+    }
+  },
+  {
+    "id": "write_remote_note",
+    "text": "把你好写入开发机的 /tmp/note.txt，覆盖原内容。",
+    "transcript_contains": ["开发机", "note"],
+    "expect": {
+      "call_names": ["write"],
+      "arguments": [{
+        "target": "ssh://开发机/tmp/note.txt",
+        "content": "你好",
+        "mode": "overwrite",
+        "confirm_required": true
+      }]
+    }
+  },
+  {
+    "id": "terminal_submit",
+    "text": "在当前终端输入继续并发送。",
+    "transcript_contains": ["当前终端", "继续", "发送"],
+    "expect": {
+      "call_names": ["input"],
+      "arguments": [{
+        "target": "tui://current",
+        "text": "继续",
+        "submit": true
+      }]
+    }
+  },
+  {
+    "id": "observe_terminal",
+    "text": "查看当前终端的输出。",
+    "transcript_contains": ["当前终端", "输出"],
+    "expect": {
+      "call_names": ["observe"],
+      "arguments": [{"target": "tui://current"}]
+    }
+  },
+  {
+    "id": "start_codex_agent",
+    "text": "让 Codex 在 voice-agent-terminal 项目里检查当前状态。",
+    "transcript_contains": ["Codex", "当前状态"],
+    "expect": {
+      "call_names": ["session"],
+      "arguments": [{
+        "action": "start_agent",
+        "provider": "codex",
+        "project": "voice-agent-terminal"
+      }]
+    }
+  },
+  {
+    "id": "disk_usage",
+    "text": "在开发机查看磁盘使用情况，用 df -h。",
+    "transcript_contains": ["开发机", "磁盘"],
+    "expect": {"call_names": ["exec"], "arguments": [{"target": "ssh://开发机", "program": "df", "args": ["-h"], "confirm_required": false}]}
+  },
+  {
+    "id": "docker_logs",
+    "text": "在生产机查看 api 容器最后五十行日志，用 docker logs。",
+    "transcript_contains": ["生产机", "容器", "日志"],
+    "expect": {"call_names": ["exec"], "arguments": [{"target": "ssh://生产机", "program": "docker", "args": ["logs", "--tail", "50", "api"], "confirm_required": false}]}
+  },
+  {
+    "id": "service_status",
+    "text": "在生产机查看 nginx 服务状态。",
+    "transcript_contains": ["生产机", "服务状态"],
+    "expect": {"call_names": ["exec"], "arguments": [{"target": "ssh://生产机", "program": "systemctl", "args": ["status", "nginx"], "confirm_required": false}]}
+  },
+  {
+    "id": "service_logs",
+    "text": "在生产机用 journalctl 查看 nginx 最近五十行日志。",
+    "transcript_contains": ["生产机", "日志"],
+    "expect": {"call_names": ["exec"], "arguments": [{"target": "ssh://生产机", "program": "journalctl", "args": ["-u", "nginx", "-n", "50"], "confirm_required": false}]}
+  },
+  {
+    "id": "restart_nginx",
+    "text": "在生产机执行 sudo systemctl restart nginx。",
+    "transcript_contains": ["生产机", "restart"],
+    "expect": {"call_names": ["exec"], "arguments": [{"target": "ssh://生产机", "program": "sudo", "args": ["systemctl", "restart", "nginx"], "confirm_required": true}]}
+  },
+  {
+    "id": "terminal_ctrl_c",
+    "text": "给当前终端发送 Control C。",
+    "transcript_contains": ["当前终端"],
+    "expect": {"call_names": ["input"], "arguments": [{"target": "tui://current", "keys": ["CTRL_C"], "submit": false}]}
+  },
+  {
+    "id": "tmux_create",
+    "text": "在开发机创建名为 work 的 tmux 会话。",
+    "transcript_contains": ["开发机", "tm"],
+    "expect": {"call_names": ["session"], "arguments": [{"action": "create", "target": "tmux://开发机/work"}]}
+  },
+  {
+    "id": "tmux_attach",
+    "text": "连接到开发机的 work tmux 会话。",
+    "transcript_contains": ["开发机", "tm"],
+    "expect": {"call_names": ["session"], "arguments": [{"action": "attach", "target": "tmux://开发机/work"}]}
+  },
+  {
+    "id": "start_claude_agent",
+    "text": "让 Claude 在 backend 项目里分析测试失败原因。",
+    "transcript_contains": ["Claude", "测试失败"],
+    "expect": {"call_names": ["session"], "arguments": [{"action": "start_agent", "provider": "claude", "project": "backend"}]}
+  },
+  {
+    "id": "interrupt_agent",
+    "text": "中断当前远程 Agent。",
+    "transcript_contains": ["中断", "远程"],
+    "expect": {"call_names": ["session"], "arguments": [{"action": "interrupt", "target": "agent://current"}]}
+  },
+  {
+    "id": "read_temperature_sensor",
+    "text": "读取书桌温度传感器的当前温度。",
+    "transcript_contains": ["书桌", "温度"],
+    "expect": {
+      "call_names": ["read"],
+      "arguments": [{"target": "sensor://书桌/temperature"}]
+    }
+  },
+  {
+    "id": "turn_on_light",
+    "text": "打开房间的一号灯。",
+    "transcript_contains": ["房间", "一号灯"],
+    "expect": {
+      "call_names": ["write"],
+      "arguments": [{
+        "target": "device://房间/light-1/power",
+        "content": "on",
+        "mode": "overwrite",
+        "confirm_required": true
+      }]
+    }
+  },
+  {
+    "id": "unlock_front_door",
+    "text": "解锁前门门锁。",
+    "transcript_contains": ["解锁", "前门"],
+    "expect": {
+      "call_names": ["write"],
+      "arguments": [{
+        "target": "device://前门/lock",
+        "content": "unlock",
+        "mode": "overwrite",
+        "confirm_required": true
+      }]
+    }
+  },
+  {
+    "id": "disconnect_dev",
+    "text": "断开开发机的连接。",
+    "transcript_contains": ["断开", "开发机"],
+    "expect": {
+      "call_names": ["session"],
+      "arguments": [{
+        "action": "disconnect",
+        "target": "ssh://开发机"
+      }]
+    }
+  },
+  {
+    "id": "ambiguous_temperature",
+    "text": "读取温度。",
+    "transcript_contains": ["读取", "温度"],
+    "expect": {"no_tool": true}
+  }
+]

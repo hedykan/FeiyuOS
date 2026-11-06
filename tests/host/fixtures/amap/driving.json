@@ -1,0 +1,98 @@
+{
+ "status": "1",
+ "info": "OK",
+ "infocode": "10000",
+ "count": "1",
+ "route": {
+  "origin": "116.397455,39.909187",
+  "destination": "116.397029,39.917839",
+  "taxi_cost": "13",
+  "paths": [
+   {
+    "distance": "1512",
+    "restriction": "0",
+    "cost": {
+     "duration": "486",
+     "tolls": "0",
+     "toll_distance": "0",
+     "traffic_lights": "0"
+    },
+    "steps": [
+     {
+      "instruction": "向北行驶396米左转",
+      "orientation": "北",
+      "step_distance": "396",
+      "cost": {
+       "duration": "93",
+       "tolls": "0",
+       "toll_distance": "0",
+       "toll_road": "",
+       "traffic_lights": "0"
+      }
+     },
+     {
+      "instruction": "沿东华门路向西行驶80米右转",
+      "orientation": "西",
+      "road_name": "东华门路",
+      "step_distance": "80",
+      "cost": {
+       "duration": "50",
+       "tolls": "0",
+       "toll_distance": "0",
+       "toll_road": "",
+       "traffic_lights": "0"
+      }
+     },
+     {
+      "instruction": "向西北行驶538米右转",
+      "orientation": "西北",
+      "step_distance": "538",
+      "cost": {
+       "duration": "151",
+       "tolls": "0",
+       "toll_distance": "0",
+       "toll_road": "",
+       "traffic_lights": "0"
+      }
+     },
+     {
+      "instruction": "向东行驶66米左转",
+      "orientation": "东",
+      "step_distance": "66",
+      "cost": {
+       "duration": "33",
+       "tolls": "0",
+       "toll_distance": "0",
+       "toll_road": "",
+       "traffic_lights": "0"
+      }
+     },
+     {
+      "instruction": "向北行驶241米右转",
+      "orientation": "北",
+      "step_distance": "241",
+      "cost": {
+       "duration": "66",
+       "tolls": "0",
+       "toll_distance": "0",
+       "toll_road": "",
+       "traffic_lights": "0"
+      }
+     },
+     {
+      "instruction": "向东行驶191米到达目的地",
+      "orientation": "东",
+      "step_distance": "191",
+      "cost": {
+       "duration": "93",
+       "tolls": "0",
+       "toll_distance": "0",
+       "toll_road": "",
+       "traffic_lights": "0"
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

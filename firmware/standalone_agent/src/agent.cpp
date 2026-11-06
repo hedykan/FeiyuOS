@@ -1,0 +1,618 @@
+#include "agent.h"
+
+#include <algorithm>
+#include <vector>
+
+#include "agent_prompt.h"
+#include "common.h"
+#include "config.h"
+#include "context.h"
+#include "net.h"
+#include "ops_ssh.h"
+#include "policy.h"
+#include "registry.h"
+#include "storage.h"
+
+namespace vat::agent {
+namespace {
+
+constexpr int kMaxDiscoverCalls = 2;
+constexpr std::size_t kDiscoverResultBytes = 2000;  // the package list grows with packages
+constexpr int kMaxCallsPerRound = 3;
+constexpr std::size_t kLegacyHistoryChars = 8000;  // reading the pre-v0.4 history once
+constexpr std::size_t kMaxReplyBytes = 1500;
+
+// Each turn is a JSON array of chat messages exactly as sent to the model:
+// user text, then either an assistant text reply or an assistant tool_calls
+// message followed by one tool result per call.  Keeping real tool messages
+// (instead of rendering results as assistant prose) stops the model from
+// imitating device output as if it were a reply.
+//
+// Turns live in the context window on storage (context.h) and are streamed
+// into each request from there, so no long-lived heap blocks fragment the TLS
+// working set.  This file is the pre-v0.4 history, migrated once at boot.
+constexpr char kConversations[] = "/vat/memory/conversations.jsonl";
+
+// A turn must start with the user and every tool message must answer a call
+// of the preceding assistant message; anything else would be rejected by the
+// API and poison every later request, so it is skipped.
+bool valid_turn(const cJSON* messages) {
+    if (!cJSON_IsArray(messages) || cJSON_GetArraySize(messages) == 0) return false;
+    if (json_str(cJSON_GetArrayItem(messages, 0), "role") != "user") return false;
+    std::vector<String> open_ids;
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, messages) {
+        const String role = json_str(item, "role");
+        if (role == "assistant") {
+            if (!open_ids.empty()) return false;
+            const cJSON* call = nullptr;
+            cJSON_ArrayForEach(call, cJSON_GetObjectItemCaseSensitive(item, "tool_calls")) {
+                const String id = json_str(call, "id");
+                if (id.isEmpty() || !json_obj(call, "function")) return false;
+                open_ids.push_back(id);
+            }
+        } else if (role == "tool") {
+            const String id = json_str(item, "tool_call_id");
+            auto it = std::find(open_ids.begin(), open_ids.end(), id);
+            if (id.isEmpty() || it == open_ids.end() || !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(item, "content"))) {
+                return false;
+            }
+            open_ids.erase(it);
+        } else if (role != "user") {
+            return false;
+        }
+    }
+    return open_ids.empty();
+}
+
+std::vector<String> load_legacy_turns() {
+    std::vector<String> turns;
+    const String tail = storage::read_tail(kConversations, kLegacyHistoryChars + 4000);
+    int start = 0;
+    while (start < static_cast<int>(tail.length())) {
+        int end = tail.indexOf('\n', start);
+        if (end < 0) end = tail.length();
+        cJSON* record = cJSON_Parse(tail.substring(start, end).c_str());
+        start = end + 1;
+        if (!record) continue;
+        cJSON* messages = cJSON_GetObjectItemCaseSensitive(record, "messages");
+        if (valid_turn(messages)) turns.push_back(json_print(messages));
+        cJSON_Delete(record);
+    }
+    std::size_t total = 0;
+    std::size_t keep = 0;
+    for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
+        if (total + it->length() > kLegacyHistoryChars) break;
+        total += it->length();
+        ++keep;
+    }
+    turns.erase(turns.begin(), turns.end() - keep);
+    return turns;
+}
+
+// "[{a},{b}]" -> ",{a},{b}": the form the window stores and streams.
+String fragment_of(const String& array_json) {
+    return array_json.length() > 2 ? "," + array_json.substring(1, array_json.length() - 1) : String();
+}
+
+void migrate_legacy_history() {
+    if (storage::exists(context::kWindow) || !storage::exists(kConversations)) return;
+    std::size_t moved = 0;
+    for (const auto& turn : load_legacy_turns()) moved += context::append_turn(fragment_of(turn));
+    storage::remove(kConversations);
+    storage::remove("/vat/memory/conversations.1.jsonl");
+    runtime_event("history_migrated", String(moved) + " turns");
+}
+
+cJSON* chat_message(const char* role, const String& content) {
+    cJSON* item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "role", role);
+    cJSON_AddStringToObject(item, "content", content.c_str());
+    return item;
+}
+
+cJSON* tool_call(const String& id, const String& name, const String& arguments) {
+    cJSON* call = cJSON_CreateObject();
+    cJSON_AddStringToObject(call, "id", id.c_str());
+    cJSON_AddStringToObject(call, "type", "function");
+    cJSON* function = cJSON_AddObjectToObject(call, "function");
+    cJSON_AddStringToObject(function, "name", name.c_str());
+    cJSON_AddStringToObject(function, "arguments", arguments.c_str());
+    return call;
+}
+
+cJSON* tool_result(const String& id, const String& content) {
+    cJSON* item = chat_message("tool", content);
+    cJSON_AddStringToObject(item, "tool_call_id", id.c_str());
+    return item;
+}
+
+String clock_text() {
+    struct tm now;
+    if (!getLocalTime(&now, 0)) return "--:--";
+    char text[6];
+    snprintf(text, sizeof(text), "%02d:%02d", now.tm_hour, now.tm_min);
+    return text;
+}
+
+// One archive line per executed step (and one per final reply), searchable
+// later through memory://history.  `out` is the filed output, if any.
+void record_operation(const String& transcript, const Call& call, long out) {
+    cJSON* record = cJSON_CreateObject();
+    cJSON_AddStringToObject(record, "time", clock_text().c_str());
+    cJSON_AddStringToObject(record, "transcript", utf8_head(transcript, 300).c_str());
+    cJSON_AddStringToObject(record, "tool", call.name.c_str());
+    cJSON* arguments = cJSON_Parse(call.arguments.c_str());
+    cJSON_AddStringToObject(record, "target", json_str(arguments, "target").c_str());
+    cJSON_Delete(arguments);
+    cJSON_AddRawToObject(record, "arguments", call.arguments.c_str());
+    cJSON_AddStringToObject(record, "decision", call.decision.c_str());
+    cJSON_AddStringToObject(record, "result", utf8_head(call.result, 400).c_str());
+    if (out > 0) cJSON_AddNumberToObject(record, "out", out);
+    context::archive(json_print(record));
+    cJSON_Delete(record);
+}
+
+void record_reply(const String& transcript, const String& reply) {
+    cJSON* record = cJSON_CreateObject();
+    cJSON_AddStringToObject(record, "time", clock_text().c_str());
+    cJSON_AddStringToObject(record, "transcript", utf8_head(transcript, 300).c_str());
+    cJSON_AddStringToObject(record, "reply", utf8_head(reply, 400).c_str());
+    context::archive(json_print(record));
+    cJSON_Delete(record);
+}
+
+String profiles_message() {
+    const String names = config::profile_names();
+    return names.isEmpty() ? String("当前没有可见的 SSH profile。")
+                           : "当前可见 SSH profile（只含名称）: " + names + "。";
+}
+
+String to_json(cJSON* item) {
+    const String json = json_print(item);
+    cJSON_Delete(item);
+    return json;
+}
+
+String summarize_call(const String& tool, const cJSON* arguments) {
+    const String custom = registry::confirm_summary(tool, arguments);
+    if (!custom.isEmpty()) return utf8_head(custom, 300);
+    String line = tool;
+    const String target = json_str(arguments, "target");
+    if (!target.isEmpty()) line += " " + target;
+    if (tool == "exec") {
+        line += " $ " + json_str(arguments, "program");
+        const cJSON* args = cJSON_GetObjectItemCaseSensitive(arguments, "args");
+        const cJSON* item = nullptr;
+        cJSON_ArrayForEach(item, args) {
+            if (cJSON_IsString(item)) line += String(" ") + item->valuestring;
+        }
+    } else if (tool == "write") {
+        line += " [" + json_str(arguments, "mode", "overwrite") + "] " + utf8_head(json_str(arguments, "content"), 60);
+    } else if (tool == "session") {
+        line += " action=" + json_str(arguments, "action");
+        const String mode = json_str(arguments, "policy_mode");
+        if (!mode.isEmpty()) line += " mode=" + mode;
+    }
+    return utf8_head(line, 200);
+}
+
+}  // namespace
+
+void begin() {
+    migrate_legacy_history();
+    runtime_event("history_restored", String(context::turns()) + " turns " + String(context::window_bytes()) +
+                                          " bytes budget=" + String(context::budget()));
+}
+
+String discover_result(const cJSON* arguments) {
+    return utf8_head(registry::discover(arguments), kDiscoverResultBytes);
+}
+
+void clear_history() { context::clear(); }
+
+std::size_t history_messages() { return context::turns(); }
+
+namespace {
+
+constexpr int kMaxSteps = 6;  // tool rounds per task
+
+struct QueuedCall {
+    String id;
+    String name;
+    String arguments;  // compact JSON
+    bool approved = false;
+};
+
+// One task = one utterance.  Everything needed to continue after a pause
+// lives here; it is small (tool results are capped at 600 bytes each).
+struct Task {
+    bool active = false;
+    bool approve_all = false;
+    String transcript;
+    std::vector<QueuedCall> queue;  // calls of the round not yet executed
+    std::vector<Call> calls;
+    int rounds = 0;
+    int discover = 0;
+    int steps = 0;
+    unsigned long started = 0;
+    bool unattended = false;     // refuse calls that need confirmation or a secret
+    unsigned long model_ms = 0;  // time in model requests: the task's budget
+    unsigned long tool_ms = 0;   // time running tools: not budgeted (each has its own timeout)
+    bool broken = false;      // a message failed to serialise (low memory)
+};
+Task task;
+
+// Serialises one message of the task; a failed print (cJSON is silent about
+// allocation failures) marks the task so its turn is stored in short form.
+String piece(cJSON* item) {
+    const String json = to_json(item);
+    if (json.isEmpty()) task.broken = true;
+    return json;
+}
+
+String request_head(const String& tool_choice, int max_tokens = 700) {
+    const auto& cfg = config::get();
+    return "{\"model\":" + to_json(cJSON_CreateString(cfg.agent_model.c_str())) +
+           ",\"temperature\":0,\"max_tokens\":" + String(max_tokens) + ",\"tool_choice\":\"" + tool_choice +
+           "\",\"reasoning_effort\":\"none\",\"messages\":[{\"role\":\"system\",\"content\":";
+}
+
+// Asks the model with everything so far.  Returns the assistant message.
+cJSON* ask_model(const String& tool_choice, String& error, long budget_ms) {
+    const auto& cfg = config::get();
+    const String head = request_head(tool_choice);
+    const String profiles = "},{\"role\":\"system\",\"content\":" +
+                            to_json(cJSON_CreateString(profiles_message().c_str())) + "}";
+    const String case_notes = context::case_fragment();
+    // Summary and window stream from storage.  The window is normally within
+    // budget (maintain() compacts it after each task); if compaction failed,
+    // send only its newest part rather than an oversized request.
+    const std::size_t summary_bytes = storage::size(context::kSummary);
+    const std::size_t window_bytes = context::window_bytes();
+    const std::size_t window_from = context::tail_offset(context::budget() * 3 / 2);
+    const String user = "," + to_json(chat_message("user", task.transcript));
+    static constexpr char kTail[] = "],\"tools\":";
+    // System prompt: core rules + each package's usage, all streamed from flash.
+    std::vector<net::Segment> parts = {
+        {head.c_str(), head.length()},
+        {"\"", 1},
+        {kCorePrompt, sizeof(kCorePrompt) - 1},
+    };
+    for (const char* usage : registry::usages()) parts.push_back({usage, strlen(usage)});
+    if (!cfg.agent_persona.isEmpty()) parts.push_back({cfg.agent_persona.c_str(), cfg.agent_persona.length()});
+    parts.insert(parts.end(), {
+        {"\"", 1},
+        {profiles.c_str(), profiles.length()},
+        {case_notes.c_str(), case_notes.length()},
+        {nullptr, summary_bytes, context::kSummary, 0},
+        {nullptr, window_bytes - window_from, context::kWindow, window_from},
+        {user.c_str(), user.length()},
+        {nullptr, context::task_bytes(), context::kTask, 0},
+        {kTail, sizeof(kTail) - 1},
+        {kToolsJson, sizeof(kToolsJson) - 1},
+        {"}", 1},
+    });
+    ssh::release();  // never hold an SSH session across TLS
+    const auto response = net::post_segments(cfg.agent_url, cfg.deepseek_key, parts,
+                                             std::min<long>(cfg.agent_round_timeout_ms, budget_ms));
+    if (!response.ok()) {
+        error = response.status == -2 ? String("已取消")
+                                      : "Agent HTTP " + String(response.status) + " " +
+                                            utf8_head(response.error.isEmpty() ? response.body : response.error, 160);
+        return nullptr;
+    }
+    cJSON* decoded = cJSON_Parse(response.body.c_str());
+    const cJSON* choices = decoded ? cJSON_GetObjectItemCaseSensitive(decoded, "choices") : nullptr;
+    const cJSON* choice = cJSON_IsArray(choices) ? cJSON_GetArrayItem(choices, 0) : nullptr;
+    cJSON* message = choice ? cJSON_Duplicate(json_obj(choice, "message"), true) : nullptr;
+    cJSON_Delete(decoded);
+    if (!message) error = "Agent 响应没有 assistant message";
+    return message;
+}
+
+String joined_results() {
+    String detail;
+    for (const auto& call : task.calls) {
+        if (call.decision == "discover") continue;
+        if (!detail.isEmpty()) detail += "\n";
+        detail += call.result;
+    }
+    return utf8_head(detail, kMaxReplyBytes);
+}
+
+// Steps of the task go to storage as they happen (context::kTask).
+void task_message(cJSON* item) {
+    const String json = piece(item);
+    if (!json.isEmpty() && !context::task_append("," + json)) task.broken = true;
+}
+
+Outcome finish(const String& reply) {
+    Outcome outcome;
+    outcome.ok = true;
+    outcome.reply = utf8_head(reply.isEmpty() ? String("已完成。") : reply, kMaxReplyBytes);
+    outcome.detail = joined_results();
+    outcome.calls = task.calls;
+    outcome.rounds = task.rounds;
+    outcome.steps = task.steps;
+    outcome.elapsed_ms = millis() - task.started;
+    // The whole exchange goes into the window (tool results are already
+    // compacted to their head plus out#N).  Without a card the window is
+    // small, so long exchanges keep only the request and the answer, as do
+    // turns whose messages failed to serialise.
+    const String user = piece(chat_message("user", task.transcript));
+    const String answer = piece(chat_message("assistant", utf8_head(outcome.reply, 600)));
+    const bool short_form = task.broken || (!context::on_card() && context::task_bytes() > 4000);
+    if (!user.isEmpty() && !answer.isEmpty()) {
+        const bool ok = short_form ? context::append_turn("," + user + "," + answer)
+                                   : context::commit_task(user, answer);
+        if (!ok) runtime_event("history_skip", "window append failed");
+    }
+    context::task_begin();
+    record_reply(task.transcript, outcome.reply);
+    task.active = false;
+    runtime_event("agent_done", String(outcome.elapsed_ms) + "ms model=" + task.model_ms + "ms tools=" +
+                                    task.tool_ms + "ms steps=" + outcome.steps + " calls=" + task.calls.size() + " " +
+                                    utf8_head(outcome.reply, 120));
+    return outcome;
+}
+
+Outcome fail(const String& error) {
+    Outcome outcome;
+    outcome.error = error;
+    outcome.calls = task.calls;
+    outcome.detail = joined_results();
+    outcome.rounds = task.rounds;
+    outcome.steps = task.steps;
+    outcome.elapsed_ms = millis() - task.started;
+    task.active = false;
+    runtime_event("agent_error", String(outcome.elapsed_ms) + "ms model=" + task.model_ms + "ms tools=" +
+                                     task.tool_ms + "ms " + utf8_head(error, 160));
+    return outcome;
+}
+
+Outcome pause_for(const QueuedCall& call, const String& reason, const String& secret_prompt) {
+    Outcome outcome;
+    outcome.ok = true;
+    outcome.paused = true;
+    cJSON* arguments = cJSON_Parse(call.arguments.c_str());
+    Pending pending{call.name, call.arguments, reason, summarize_call(call.name, arguments), secret_prompt,
+                    task.steps};
+    cJSON_Delete(arguments);
+    outcome.pending.push_back(pending);
+    outcome.reply = secret_prompt.isEmpty() ? "需要确认：" + pending.summary : secret_prompt;
+    outcome.detail = joined_results();
+    outcome.calls = task.calls;
+    // The waiting step belongs in the record too (not executed yet).
+    outcome.calls.push_back({call.name, call.arguments,
+                             secret_prompt.isEmpty() ? "需要确认（尚未执行）：" + reason : String("等待输入密钥（尚未执行）"),
+                             secret_prompt.isEmpty() ? "ask" : "secret"});
+    outcome.steps = task.steps;
+    outcome.elapsed_ms = millis() - task.started;
+    runtime_event("agent_pause", String(secret_prompt.isEmpty() ? "confirm " : "secret ") + pending.summary);
+    return outcome;
+}
+
+void record_result(const QueuedCall& call, const String& decision, const String& result) {
+    Call record{call.name, call.arguments, result, decision};
+    String in_context = result;
+    long out = 0;
+    if (decision != "discover") {
+        cJSON* arguments = cJSON_Parse(call.arguments.c_str());
+        in_context = context::compact_result(summarize_call(call.name, arguments), result);
+        cJSON_Delete(arguments);
+        const int ref = in_context.lastIndexOf("完整输出 out#");
+        if (ref >= 0) out = in_context.substring(ref + String("完整输出 out#").length()).toInt();
+        record_operation(task.transcript, record, out);
+    }
+    task.calls.push_back(record);
+    task_message(tool_result(call.id, utf8_sanitize(in_context)));
+}
+
+// Runs queued calls of the current round.  Returns true when it paused.
+bool drain_queue(Outcome& paused, const String* secret, const Progress& progress) {
+    while (!task.queue.empty()) {
+        if (cancel::requested()) return false;
+        QueuedCall& call = task.queue.front();
+        cJSON* arguments = cJSON_Parse(call.arguments.c_str());
+        if (!arguments) arguments = cJSON_CreateObject();
+        if (call.name == "discover") {
+            ++task.discover;
+            if (progress) progress("DISCOVER");
+            const String result = task.discover > kMaxDiscoverCalls ? String("{\"error\":\"discover 次数已达上限\"}")
+                                                                    : discover_result(arguments);
+            record_result(call, "discover", result);
+        } else {
+            const auto verdict = policy::evaluate(call.name, arguments);
+            if (verdict.decision == policy::Decision::Deny) {
+                record_result(call, "deny", "已拒绝：" + verdict.reason);
+            } else if (verdict.decision == policy::Decision::Ask && !call.approved && !task.approve_all &&
+                       task.unattended) {
+                record_result(call, "rejected", "无人值守，不执行需要确认的操作：" + verdict.reason);
+            } else if (verdict.decision == policy::Decision::Ask && !call.approved && !task.approve_all) {
+                cJSON_Delete(arguments);
+                paused = pause_for(call, verdict.reason, "");
+                return true;
+            } else if (task.unattended && !registry::needs_secret(call.name, arguments).isEmpty()) {
+                record_result(call, "rejected", "无人值守，不能输入密码");
+            } else {
+                const String prompt = registry::needs_secret(call.name, arguments);
+                if (!prompt.isEmpty() && !secret) {
+                    if (verdict.decision == policy::Decision::Ask) call.approved = true;
+                    cJSON_Delete(arguments);
+                    paused = pause_for(call, "", prompt);
+                    return true;
+                }
+                if (progress) progress("RUN " + call.name);
+                const bool approved = call.approved || task.approve_all || verdict.decision == policy::Decision::Ask;
+                const String result = registry::execute(call.name, arguments, approved, secret ? *secret : String());
+                const String decision = verdict.decision == policy::Decision::Allow ? "allow"
+                                        : task.approve_all && !call.approved ? "approved_all" : "approved";
+                record_result(call, decision, result);
+                secret = nullptr;  // a secret is used for exactly one call
+            }
+        }
+        cJSON_Delete(arguments);
+        task.queue.erase(task.queue.begin());
+    }
+    return false;
+}
+
+// Model rounds until a text answer, a pause, or the step limit.
+Outcome advance(const String* secret, const Progress& progress) {
+    const auto& cfg = config::get();
+    while (true) {
+        Outcome paused;
+        const unsigned long tools_from = millis();
+        const bool stop = drain_queue(paused, secret, progress);
+        task.tool_ms += millis() - tools_from;
+        if (stop) return paused;
+        secret = nullptr;
+        if (cancel::requested()) return fail("已取消");
+        // Only model time is budgeted; tools, and waiting for the user, are not.
+        const long budget = static_cast<long>(cfg.agent_total_timeout_ms) - static_cast<long>(task.model_ms);
+        if (budget <= 1000) return fail("理解超时：模型累计用了 " + String(task.model_ms / 1000) + " 秒");
+        const bool last = task.steps >= kMaxSteps;
+        if (progress) progress(last ? String("SUMMARY") : "THINK " + String(task.steps + 1));
+        String error;
+        const unsigned long asked = millis();
+        cJSON* message = ask_model(last ? "none" : "auto", error, budget);
+        task.model_ms += millis() - asked;
+        if (!message) return fail(error);
+        ++task.rounds;
+        cJSON* tool_calls = cJSON_GetObjectItemCaseSensitive(message, "tool_calls");
+        const int count = cJSON_IsArray(tool_calls) ? cJSON_GetArraySize(tool_calls) : 0;
+        if (count == 0 || last) {
+            String content = json_str(message, "content");
+            content.trim();
+            cJSON_Delete(message);
+            return finish(content);
+        }
+        // Queue this round's calls (at most three).
+        cJSON* assistant = cJSON_CreateObject();
+        cJSON_AddStringToObject(assistant, "role", "assistant");
+        const String content = json_str(message, "content");
+        if (content.isEmpty()) cJSON_AddNullToObject(assistant, "content");
+        else cJSON_AddStringToObject(assistant, "content", content.c_str());
+        cJSON* kept = cJSON_AddArrayToObject(assistant, "tool_calls");
+        bool counts_as_step = false;
+        for (int i = 0; i < count && i < kMaxCallsPerRound; ++i) {
+            const cJSON* raw = cJSON_GetArrayItem(tool_calls, i);
+            const cJSON* function = json_obj(raw, "function");
+            QueuedCall call;
+            call.id = json_str(raw, "id", "call-" + String(millis()) + "-" + String(i));
+            call.name = json_str(function, "name", "unknown");
+            cJSON* arguments = cJSON_Parse(json_str(function, "arguments", "{}").c_str());
+            if (!cJSON_IsObject(arguments)) {
+                cJSON_Delete(arguments);
+                arguments = cJSON_CreateObject();
+            }
+            call.arguments = to_json(arguments);
+            cJSON_AddItemToArray(kept, tool_call(call.id, call.name, call.arguments));
+            counts_as_step = counts_as_step || call.name != "discover";
+            task.queue.push_back(call);
+        }
+        cJSON_Delete(message);
+        task_message(assistant);
+        if (counts_as_step) ++task.steps;
+        if (progress) progress("STEP " + String(task.steps));
+    }
+}
+
+}  // namespace
+
+Outcome run(const String& transcript, const Progress& progress, bool unattended) {
+    task = Task{};
+    context::task_begin();
+    task.active = true;
+    task.transcript = transcript;
+    task.unattended = unattended;
+    task.started = millis();
+    runtime_event("agent_start", utf8_head(transcript, 120));
+    return advance(nullptr, progress);
+}
+
+Outcome resume(Answer answer, const String& secret, const Progress& progress) {
+    if (!task.active || task.queue.empty()) return fail("没有等待中的任务");
+    task.started = millis();
+    QueuedCall& call = task.queue.front();
+    if (answer == Answer::Reject) {
+        record_result(call, "rejected", "用户在设备上拒绝了这一步，未执行。");
+        task.queue.erase(task.queue.begin());
+        return advance(nullptr, progress);
+    }
+    if (answer == Answer::Secret) {
+        if (secret.isEmpty()) {
+            record_result(call, "secret_cancelled", "用户取消了密码输入，未执行。");
+            task.queue.erase(task.queue.begin());
+            return advance(nullptr, progress);
+        }
+        return advance(&secret, progress);
+    }
+    call.approved = true;
+    if (answer == Answer::ApproveAll) task.approve_all = true;
+    return advance(nullptr, progress);
+}
+
+bool paused() { return task.active && !task.queue.empty(); }
+bool active() { return task.active; }
+
+void maintain() {
+    if (task.active) return;
+    const std::size_t size = context::window_bytes();
+    if (size <= context::budget()) return;
+    // Keep the newest half of the budget verbatim; summarise everything older.
+    const std::size_t cut = context::tail_offset(context::budget() / 2);
+    if (cut == 0 || cut >= size) return;
+    static constexpr char kInstruction[] =
+        "\"你是操作记录员。下面是之前的摘要（如有）和较早的对话，请把它们合并成新的摘要："
+        "保留主机、路径、命令、关键结果数字、发现、未完成事项和 out#编号，删掉寒暄和重复；"
+        "按主题分条，中文，不超过 1200 字，不要编造。\"";
+    static constexpr char kAsk[] = ",{\"role\":\"user\",\"content\":\"请输出合并后的摘要。\"}";
+    static constexpr char kTail[] = "],\"tools\":";
+    const String head = request_head("none", 1500);
+    const std::size_t summary_bytes = storage::size(context::kSummary);
+    const std::vector<net::Segment> parts = {
+        {head.c_str(), head.length()},
+        {kInstruction, sizeof(kInstruction) - 1},
+        {"}", 1},
+        {nullptr, summary_bytes, context::kSummary, 0},
+        {nullptr, cut, context::kWindow, 0},
+        {kAsk, sizeof(kAsk) - 1},
+        {kTail, sizeof(kTail) - 1},
+        {kToolsJson, sizeof(kToolsJson) - 1},
+        {"}", 1},
+    };
+    const unsigned long started = millis();
+    ssh::release();
+    const auto& cfg = config::get();
+    const auto response = net::post_segments(cfg.agent_url, cfg.deepseek_key, parts, cfg.agent_round_timeout_ms);
+    String summary;
+    if (response.ok()) {
+        cJSON* decoded = cJSON_Parse(response.body.c_str());
+        const cJSON* choices = decoded ? cJSON_GetObjectItemCaseSensitive(decoded, "choices") : nullptr;
+        summary = json_str(json_obj(cJSON_GetArrayItem(choices, 0), "message"), "content");
+        cJSON_Delete(decoded);
+        summary.trim();
+    }
+    if (summary.isEmpty()) {
+        runtime_event("context_compact_fail", "HTTP " + String(response.status) + " " + utf8_head(response.error, 80));
+        return;
+    }
+    const bool ok = context::write_summary(
+                        "此前对话的摘要（更早的细节用 read memory://history?q=关键词 检索，完整输出用 out#编号 查看）：\n" +
+                        utf8_head(summary, 4000)) &&
+                    context::drop_before(cut);
+    runtime_event(ok ? "context_compact" : "context_compact_fail",
+                  String(size) + " -> " + String(context::window_bytes()) + " bytes, summary " +
+                      String(summary.length()) + " bytes, " + String(millis() - started) + "ms");
+}
+
+void abort_task() {
+    if (!task.active) return;
+    runtime_event("agent_abort", utf8_head(task.transcript, 80));
+    task = Task{};
+    context::task_begin();
+}
+
+}  // namespace vat::agent

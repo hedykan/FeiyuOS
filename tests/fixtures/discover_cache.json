@@ -1,0 +1,11 @@
+{
+ "{\"query\": \"ir 红外遥控 用法\", \"scope\": \"help\", \"target\": \"ir\"}": "{\"error\":\"该命令不在已注册能力包中\"}",
+ "{\"query\": \"trigger 定时执行设备动作\", \"scope\": \"capabilities\"}": "1. local：Cardputer 本机状态、设置、剪贴板与记忆\n2. timer：本机定时提醒：多久以后或几点提醒，到点全屏显示并响铃\n3. program：程序与触发：把动作组合成可反复运行的程序（prog://），按时间或开机自动运行（trigger://）\n",
+ "{\"query\": \"trigger 触发\", \"scope\": \"resources\"}": "1. prog://list\n2. prog://help\n3. prog://名字\n4. trigger://new\n5. trigger://list\n6. prog://runs\n7. memory://out\n8. memory://history\n",
+ "{\"query\": \"trigger:// 定时执行动作 语法\", \"scope\": \"help\", \"target\": \"program\"}": "{\"error\":\"该命令不在已注册能力包中\"}",
+ "{\"query\": \"已安装能力包 程序\", \"scope\": \"capabilities\"}": "1. program：程序与触发：把动作组合成可反复运行的程序（prog://），按时间或开机自动运行（trigger://）\n2. ask：在程序里问大肥鱼一句（ask://），回复作为这一步的结果；只在程序中使用\n",
+ "{\"query\": \"测试-灯 程序\", \"scope\": \"resources\"}": "1. prog://list\n2. prog://help\n3. prog://名字\n4. trigger://new\n5. trigger://list\n6. prog://runs\n7. memory://out\n8. memory://history\n",
+ "{\"query\": \"红外 发射 电视 客厅\", \"scope\": \"capabilities\"}": "1. ir：红外遥控：给电视发电源、音量、静音（内置三星/LG/索尼/飞利浦码，人工确认是否生效）\n",
+ "{\"query\": \"红外 客厅 电视\", \"scope\": \"resources\"}": "1. ir://list\n2. ir://电器名/power\n3. ir://电器名/confirm\n4. ir://send\n5. memory://out\n6. memory://history\n7. memory://cases\n8. device://local/display/text\n",
+ "{\"query\": \"红外电器 设备列表\", \"scope\": \"resources\"}": "1. ir://list\n2. ir://电器名/power\n3. ir://电器名/confirm\n4. ir://send\n5. device://local/status\n6. device://local/settings\n7. device://local/battery\n8. device://local/display/brightness\n"
+}

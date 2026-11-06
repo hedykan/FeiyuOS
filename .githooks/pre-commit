@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Refuse a commit whose staged changes add a secret (API key, token, password,
+# private key).  Enable once per clone:  git config core.hooksPath .githooks
+# Without gitleaks the commit is refused rather than let through unchecked.
+set -euo pipefail
+gitleaks=$(command -v gitleaks || true)
+if [ -z "$gitleaks" ] && [ -x "$HOME/.local/bin/gitleaks" ]; then gitleaks="$HOME/.local/bin/gitleaks"; fi
+if [ -z "$gitleaks" ]; then
+  echo "pre-commit: gitleaks is not installed (https://github.com/gitleaks/gitleaks); commit refused" >&2
+  exit 1
+fi
+exec "$gitleaks" git --pre-commit --staged --redact --no-banner --verbose

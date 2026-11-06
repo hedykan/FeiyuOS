@@ -1,0 +1,17 @@
+[
+  {"id": "display_text", "input": "在屏幕上全屏大字显示：会议中", "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/display/text"}]}},
+  {"id": "display_qr", "input": "把 https://m5stack.com 显示成二维码", "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/display/qr"}]}},
+  {"id": "display_banner", "input": "在 Agent 页显示一条通知：编译完成", "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/display/banner"}]}},
+  {"id": "led_green", "input": "把本机的 RGB 灯调成绿色", "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/led"}]}},
+  {"id": "beep_twice", "input": "响两声提示音", "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/audio/beep"}]}},
+  {"id": "imu_flat", "input": "设备现在是平放的吗", "expect": {"call_names": ["read"], "arguments": [{"target": "sensor://imu/orientation"}]}},
+  {"id": "timer_in", "input": "十分钟后提醒我喝水", "expect": {"call_names": ["write"], "arguments": [{"target": "timer://in/10m"}]}},
+  {"id": "timer_list", "input": "现在有哪些提醒", "expect": {"call_names": ["read"], "arguments": [{"target": "timer://list"}]}},
+  {"id": "files_list", "input": "卡上 /vat/memory 里有什么文件", "expect": {"call_names": ["read"], "arguments": [{"target": "file:///vat/memory"}]}},
+  {"id": "grove_scan", "input": "Grove 口接了什么", "expect": {"call_names": ["read"], "arguments": [{"target": "sensor://grove"}]}},
+  {"id": "ir_tv_power", "input": "用红外打开客厅电视", "expect": {"call_names": ["write"], "arguments": [{"target": "ir://客厅电视/power"}]}},
+  {"id": "ir_list", "input": "有哪些红外电器", "expect": {"call_names": ["read"], "arguments": [{"target": "ir://list"}]}},
+  {"id": "lora_frequency", "input": "把 LoRa 频点设成 915 MHz", "expect": {"call_names": ["write"], "arguments": [{"target": "lora://settings/frequency"}]}},
+  {"id": "lora_status", "input": "LoRa 现在什么状态", "expect": {"call_names": ["read"], "arguments": [{"target": "lora://status"}]}},
+  {"id": "gps_where", "input": "我现在在哪", "expect": {"call_names": ["read"], "arguments": [{"target": "place://here"}]}}
+]

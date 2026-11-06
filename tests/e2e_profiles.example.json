@@ -1,0 +1,93 @@
+{
+ "_comment": "Copy these profiles to the device's /vat/ssh/profiles.json. Every profile points at the host that runs tools/vat_e2e.py; 测试机 is the throwaway openssh-server container that S7 starts on port 2222.",
+ "profiles": [
+  {
+   "id": "开发机",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "生产机",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "devbox",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "staging",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "prod",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "voice-agent-local",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "voice-agent-loopback",
+   "host": "<this-host-ip>",
+   "port": 22,
+   "user": "<user>",
+   "project_root": "/home/<user>/Develope",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  },
+  {
+   "id": "测试机",
+   "host": "<this-host-ip>",
+   "port": 2222,
+   "user": "vat",
+   "project_root": "/config",
+   "auth": {
+    "type": "private_key",
+    "private_key": "/vat/ssh/id_ed25519"
+   }
+  }
+ ]
+}

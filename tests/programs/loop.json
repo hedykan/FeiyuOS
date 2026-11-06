@@ -1,0 +1,23 @@
+{
+ "name": "测试-循环",
+ "about": "repeat 3 次切换灯色",
+ "steps": [
+  {
+   "repeat": 3,
+   "steps": [
+    {
+     "write": "device://local/led",
+     "content": "红"
+    },
+    {
+     "write": "device://local/led",
+     "content": "绿"
+    }
+   ]
+  },
+  {
+   "write": "device://local/led",
+   "content": "off"
+  }
+ ]
+}

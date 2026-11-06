@@ -1,0 +1,87 @@
+[
+  {
+    "id": "battery_status",
+    "input": "查看本机剩余电量。",
+    "expect": {"call_names": ["read"], "arguments": [{"target": "device://local/battery"}]}
+  },
+  {
+    "id": "screen_off",
+    "input": "关闭本机屏幕。",
+    "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/display/power", "content": "off", "mode": "overwrite", "confirm_required": true}]}
+  },
+  {
+    "id": "set_volume",
+    "input": "把本机音量调到百分之三十。",
+    "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/audio/volume", "content": "30", "mode": "overwrite", "confirm_required": true}]}
+  },
+  {
+    "id": "connect_home_wifi",
+    "input": "连接配置家里 WiFi。",
+    "expect": {"call_names": ["session"], "arguments": [{"action": "connect", "target": "wifi://家里 WiFi"}]}
+  },
+  {
+    "id": "read_recent_tasks",
+    "input": "读取最近的任务记录。",
+    "expect": {"call_names": ["read"], "arguments": [{"target": "memory://recent-tasks"}]}
+  },
+  {
+    "id": "remember_note",
+    "input": "记住明天检查服务器证书。",
+    "expect": {"call_names": ["write"], "arguments": [{"target": "memory://notes", "content": "明天检查服务器证书", "mode": "append", "confirm_required": true}]}
+  },
+  {
+    "id": "copy_clipboard",
+    "input": "把部署完成复制到本机剪贴板。",
+    "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/clipboard", "content": "部署完成", "mode": "overwrite", "confirm_required": true}]}
+  },
+  {
+    "id": "observe_current_terminal",
+    "input": "看看当前终端输出了什么。",
+    "expect": {"call_names": ["observe"], "arguments": [{"target": "tui://current"}]}
+  },
+  {
+    "id": "interrupt_current_terminal",
+    "input": "给当前终端发送 Control C。",
+    "expect": {"call_names": ["input"], "arguments": [{"target": "tui://current", "keys": ["CTRL_C"], "submit": false}]}
+  },
+  {
+    "id": "send_terminal_text",
+    "input": "在当前终端输入继续并发送。",
+    "expect": {"call_names": ["input"], "arguments": [{"target": "tui://current", "text": "继续", "submit": true}]}
+  },
+  {
+    "id": "attach_tmux",
+    "input": "附加开发机上的 work tmux 会话。",
+    "expect": {"call_names": ["session"], "arguments": [{"action": "attach", "target": "tmux://开发机/work"}]}
+  },
+  {
+    "id": "interrupt_agent",
+    "input": "中断当前远程 Agent。",
+    "expect": {"call_names": ["session"], "arguments": [{"action": "interrupt", "target": "agent://current"}]}
+  },
+  {
+    "id": "read_humidity",
+    "input": "读取书桌湿度传感器。",
+    "expect": {"call_names": ["read"], "arguments": [{"target": "sensor://书桌/humidity"}]}
+  },
+  {
+    "id": "turn_off_outlet",
+    "input": "关闭客厅一号智能插座。",
+    "expect": {"call_names": ["write"], "arguments": [{"target": "device://客厅/outlet-1/power", "content": "off", "mode": "overwrite", "confirm_required": true}]}
+  },
+  {
+    "id": "set_gpio_high",
+    "input": "把厨房 ESP 的二号 GPIO 设为高电平。",
+    "expect": {"call_names": ["write"], "arguments": [{"target": "device://厨房ESP/gpio/2", "content": "high", "mode": "overwrite", "confirm_required": true}]}
+  },
+  {
+    "id": "read_relay_state",
+    "input": "读取车库一号继电器状态。",
+    "expect": {"call_names": ["read"], "arguments": [{"target": "device://车库/relay-1/state"}]}
+  },
+  {
+    "id": "ambiguous_light",
+    "input": "把灯打开。",
+    "expect": {"no_tool": true}
+  }
+]

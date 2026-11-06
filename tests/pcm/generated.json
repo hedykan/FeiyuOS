@@ -1,0 +1,232 @@
+[
+  {
+    "id": "connect_dev",
+    "file": "connect_dev.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 93696,
+    "duration_seconds": 2.928,
+    "sha256": "b093e281ab4ef0e1d9b1e06187205c74e48501b9f2c51b4089a1f87974f19f64",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "read_hostname",
+    "file": "read_hostname.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 124416,
+    "duration_seconds": 3.888,
+    "sha256": "1104cfc1b31c20f376546dcaf2cc524406762da80b613e0f6cc11cca4333800a",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "git_status",
+    "file": "git_status.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 83712,
+    "duration_seconds": 2.616,
+    "sha256": "a4e41b3303fb87d01dcd717004d188805839e4467aa39bc81593ee5ebcd1a76d",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "current_codex_draft",
+    "file": "current_codex_draft.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 145152,
+    "duration_seconds": 4.536,
+    "sha256": "63fc3a9efd66f096025dccae52e7f35ed5973b641dd0f82ad8f160cd20640ee6",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "write_remote_note",
+    "file": "write_remote_note.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 195840,
+    "duration_seconds": 6.12,
+    "sha256": "b29657e1c8e7b0131187dab190e7fb8f365514faa7503c92338f3c83056af8da",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "terminal_submit",
+    "file": "terminal_submit.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 103680,
+    "duration_seconds": 3.24,
+    "sha256": "b6d396b17f10dd528b304502aef54d8a1ce6d9245ec61efab5acd2752888b697",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "observe_terminal",
+    "file": "observe_terminal.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 72960,
+    "duration_seconds": 2.28,
+    "sha256": "c4a52f678a4daa1d09d70a4c8054f9af581666f636b55b08cd8f9932a6b5bd2f",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "start_codex_agent",
+    "file": "start_codex_agent.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 145152,
+    "duration_seconds": 4.536,
+    "sha256": "c80514eb54aeff4c2613bbcab85c10aa7b7a27d95c347d6b646850a466ed13a6",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "disk_usage",
+    "file": "disk_usage.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 145152,
+    "duration_seconds": 4.536,
+    "sha256": "3d985ab72591ae8c26c9eb2987a1c464064f234c7b79dadd2b19e476eec8aa65",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "docker_logs",
+    "file": "docker_logs.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 175872,
+    "duration_seconds": 5.496,
+    "sha256": "0eea246eafbd1abfd416d1db7914f6efd9a46f815b88edfa17b6e72fbbad53c5",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "service_status",
+    "file": "service_status.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 103680,
+    "duration_seconds": 3.24,
+    "sha256": "7619babb51ffec917e4d0ab4dec05205f73c5c1a43b3f917fc12510186ba92ee",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "service_logs",
+    "file": "service_logs.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 165120,
+    "duration_seconds": 5.16,
+    "sha256": "a668a7780387e0f218f22ab0dcaf4c0dc15494c6e8f01fb75a258639872de91c",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "restart_nginx",
+    "file": "restart_nginx.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 134400,
+    "duration_seconds": 4.2,
+    "sha256": "a6cb3524f658f98ea5c8ed23506689d5626c08f057a86b8532a51e3e026b24ab",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "terminal_ctrl_c",
+    "file": "terminal_ctrl_c.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 83712,
+    "duration_seconds": 2.616,
+    "sha256": "cd2bc936d085ac4c8b604a3101184144c7b3b0f2c01bcf37d8e05da63b520f5a",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "tmux_create",
+    "file": "tmux_create.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 124416,
+    "duration_seconds": 3.888,
+    "sha256": "0dfb8105994d9efe00c546454e9082e67dd15ff945439a00fc8ecefdc25bbe1c",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "tmux_attach",
+    "file": "tmux_attach.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 93696,
+    "duration_seconds": 2.928,
+    "sha256": "a55bf4b0d8f1264df6d50315d0515f0e7dc8030462f7f64941da5282703ba151",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "start_claude_agent",
+    "file": "start_claude_agent.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 124416,
+    "duration_seconds": 3.888,
+    "sha256": "4a2d19fcf0d22c6aa6d74a5425c1a722ab9ac01fdf56993b4a29a5a52de557e0",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "interrupt_agent",
+    "file": "interrupt_agent.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 72960,
+    "duration_seconds": 2.28,
+    "sha256": "7ce05611418a1cc884c0866b38a52bb8cb96daba712a47678c036595e4a9b7ba",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "read_temperature_sensor",
+    "file": "read_temperature_sensor.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 103680,
+    "duration_seconds": 3.24,
+    "sha256": "7d3644879b20b5a178637b75b760cb42bd2a5fa884f86c2b3b641d8534c37574",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "turn_on_light",
+    "file": "turn_on_light.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 62976,
+    "duration_seconds": 1.968,
+    "sha256": "2279ab972e4655bfbd18aea40b787c3ef6fe79384acb54364653b24c2ff4e4ea",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "unlock_front_door",
+    "file": "unlock_front_door.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 52992,
+    "duration_seconds": 1.656,
+    "sha256": "94bf88f9d77deea67f3fa599ba86f8660b0e748629868df808360bca32a3ca44",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "disconnect_dev",
+    "file": "disconnect_dev.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 62976,
+    "duration_seconds": 1.968,
+    "sha256": "dd92811a62102bb1d531933ca5255eac7dc901af5315225170405b4ff6a348df",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  },
+  {
+    "id": "ambiguous_temperature",
+    "file": "ambiguous_temperature.pcm",
+    "format": "s16le-mono-16000hz",
+    "bytes": 42240,
+    "duration_seconds": 1.32,
+    "sha256": "694b35d6fbe619f4b1c60292505e517fb631cd24a0226c16c4eeefed6964e3fd",
+    "tts_model": "x-ai/grok-voice-tts-1.0",
+    "tts_voice": "ara"
+  }
+]

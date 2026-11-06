@@ -1,0 +1,132 @@
+{
+ "status": "1",
+ "info": "OK",
+ "infocode": "10000",
+ "count": "1",
+ "route": {
+  "origin": "116.397455,39.909187",
+  "destination": "116.397029,39.917839",
+  "paths": [
+   {
+    "distance": "1899",
+    "duration": "693",
+    "steps": [
+     {
+      "instruction": "向东骑行215米向左前方行驶",
+      "orientation": "东",
+      "road_name": "",
+      "step_distance": 215
+     },
+     {
+      "instruction": "向北骑行75米右转",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": 75
+     },
+     {
+      "instruction": "向北骑行128米向右前方行驶",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": 128
+     },
+     {
+      "instruction": "向东北骑行100米右转",
+      "orientation": "东北",
+      "road_name": "",
+      "step_distance": 100
+     },
+     {
+      "instruction": "向东骑行121米左转",
+      "orientation": "东",
+      "road_name": "",
+      "step_distance": 121
+     },
+     {
+      "instruction": "沿南池子大街向北骑行386米左转",
+      "orientation": "北",
+      "road_name": "南池子大街",
+      "step_distance": 386
+     },
+     {
+      "instruction": "沿东华门大街向西骑行238米向右前方行驶",
+      "orientation": "西",
+      "road_name": "东华门大街",
+      "step_distance": 238
+     },
+     {
+      "instruction": "向西骑行132米右转",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 132
+     },
+     {
+      "instruction": "向北骑行214米左转",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": 214
+     },
+     {
+      "instruction": "向西骑行23米直行",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 23
+     },
+     {
+      "instruction": "向西骑行11米直行",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 11
+     },
+     {
+      "instruction": "向西骑行9米直行",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 9
+     },
+     {
+      "instruction": "向西骑行22米直行",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 22
+     },
+     {
+      "instruction": "向西骑行12米右转",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 12
+     },
+     {
+      "instruction": "向北骑行12米左转",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": 12
+     },
+     {
+      "instruction": "向西骑行22米直行",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": 22
+     },
+     {
+      "instruction": "向西北骑行33米右转",
+      "orientation": "西北",
+      "road_name": "",
+      "step_distance": 33
+     },
+     {
+      "instruction": "向西北骑行114米右转",
+      "orientation": "西北",
+      "road_name": "",
+      "step_distance": 114
+     },
+     {
+      "instruction": "向北骑行32米到达目的地",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": 32
+     }
+    ]
+   }
+  ]
+ }
+}

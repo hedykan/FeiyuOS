@@ -1,0 +1,66 @@
+#pragma once
+
+#include <Arduino.h>
+#include <FS.h>
+
+#include <vector>
+
+namespace vat::net {
+
+// Two large blocks claimed while the heap is still unfragmented.  They are
+// handed back for the duration of a TLS connection or an SSH session (the
+// stages never overlap) so mbedTLS and libssh always find contiguous memory.
+void release_reserve();
+void restore_reserve();
+
+enum class WifiState { Off, Connecting, Connected, SetupAp };
+
+// Station mode with the configured credentials; falls back to a setup
+// access point named VAT-XXXX when no credentials exist or joining fails.
+bool connect_station(const String& ssid, const String& password, uint32_t timeout_ms);
+void start_setup_ap();
+WifiState state();
+String ip();
+String ssid();
+int rssi();
+String ap_name();
+
+struct HttpResult {
+    int status = 0;
+    String body;
+    String error;
+    bool ok() const { return status >= 200 && status < 300; }
+};
+
+// POST JSON with Bearer auth.  Retries transport errors and 5xx once.
+HttpResult post_json(const String& url, const String& api_key, const String& body,
+                     uint32_t timeout_ms, int attempts = 2);
+// One piece of a streamed request body: `length` bytes from memory, or, when
+// `path` is set, `length` bytes of that file starting at `offset` (read in
+// small blocks while sending, never loaded whole).  A file that turned out
+// shorter is padded with spaces, which JSON ignores between elements.
+struct Segment {
+    const char* data;
+    std::size_t length;
+    const char* path = nullptr;
+    std::size_t offset = 0;
+};
+// POST a JSON body made of consecutive segments (flash constants, Strings
+// owned by the caller, or file ranges) without assembling it in RAM.
+HttpResult post_segments(const String& url, const String& api_key, const std::vector<Segment>& parts,
+                         uint32_t timeout_ms, int attempts = 2);
+
+// POST JSON and write the response body to `save_path` instead of memory
+// (result.body stays empty); for responses that may be large.
+HttpResult post_json_to_file(const String& url, const String& api_key, const String& body,
+                             const String& save_path, uint32_t timeout_ms, int attempts = 2);
+
+HttpResult get(const String& url, const String& api_key, uint32_t timeout_ms);
+
+// POST a body produced as: prefix + base64(wav_header + pcm_file) + suffix.
+// The PCM never has to be duplicated on storage or in RAM.
+HttpResult post_pcm_base64(const String& url, const String& api_key,
+                           const String& prefix, const String& pcm_path,
+                           const String& suffix, uint32_t timeout_ms, int attempts = 2);
+
+}  // namespace vat::net

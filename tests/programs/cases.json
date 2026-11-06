@@ -1,0 +1,107 @@
+[
+ {
+  "id": "led",
+  "save": "led.json",
+  "run": "prog://测试-灯",
+  "reply_has": [
+   "完成",
+   "RGB 灯：红"
+  ]
+ },
+ {
+  "id": "branch",
+  "save": "branch.json",
+  "run": "prog://测试-分支",
+  "reply_has": [
+   "蓝"
+  ],
+  "reply_lacks": [
+   "RGB 灯：红"
+  ]
+ },
+ {
+  "id": "loop",
+  "save": "loop.json",
+  "run": "prog://测试-循环",
+  "count": {
+   "write device://local/led": 7
+  }
+ },
+ {
+  "id": "callee",
+  "save": "callee.json",
+  "run": "prog://测试-被调?x=乙&y=丙",
+  "reply_has": [
+   "参数 乙 丙"
+  ]
+ },
+ {
+  "id": "caller",
+  "save": "caller.json",
+  "run": "prog://测试-调用",
+  "reply_has": [
+   "返回：参数 甲 默认"
+  ]
+ },
+ {
+  "id": "missing_param",
+  "run": "prog://测试-被调",
+  "error_or_reply_has": [
+   "缺少参数 x"
+  ]
+ },
+ {
+  "id": "broken",
+  "save": "broken.json",
+  "run": "prog://测试-坏",
+  "error_or_reply_has": [
+   "失败"
+  ]
+ },
+ {
+  "id": "recover",
+  "save": "recover.json",
+  "run": "prog://测试-容错",
+  "reply_has": [
+   "错误：",
+   "没有能力包"
+  ]
+ },
+ {
+  "id": "ask",
+  "save": "ask.json",
+  "run": "prog://测试-问答",
+  "reply_has": [
+   "ask 正确"
+  ]
+ },
+ {
+  "id": "weather",
+  "save": "weather.json",
+  "run": "prog://测试-天气",
+  "reply_has": [
+   "天气",
+   "℃"
+  ]
+ },
+ {
+  "id": "wait",
+  "save": "wait.json",
+  "run": "prog://测试-等待",
+  "reply_has": [
+   "已排队"
+  ],
+  "then_runs_has": "测试-等待 完成",
+  "within_s": 40
+ },
+ {
+  "id": "confirm_refused",
+  "save": "confirm.json",
+  "save_refused": true
+ },
+ {
+  "id": "invalid",
+  "save": "invalid.json",
+  "save_error_has": "没有用 as 定义"
+ }
+]

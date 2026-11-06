@@ -1,0 +1,268 @@
+{
+ "status": "1",
+ "info": "OK",
+ "infocode": "10000",
+ "route": {
+  "origin": "116.397455,39.909187",
+  "destination": "116.481028,39.989643",
+  "distance": "16070",
+  "cost": {},
+  "transits": [
+   {
+    "cost": {
+     "duration": "5441",
+     "transit_fee": "5.0"
+    },
+    "distance": "19972",
+    "walking_distance": "3303",
+    "nightflag": "0",
+    "segments": [
+     {
+      "walking": {
+       "destination": "116.391281,39.907475",
+       "distance": "2038",
+       "origin": "116.397438,39.909184",
+       "cost": {
+        "duration": "2174"
+       },
+       "steps": [
+        {
+         "instruction": "步行396米左转",
+         "road": "",
+         "distance": "396"
+        },
+        {
+         "instruction": "沿东华门路步行80米右转",
+         "road": "东华门路",
+         "distance": "80"
+        },
+        {
+         "instruction": "步行538米左转",
+         "road": "",
+         "distance": "538"
+        },
+        {
+         "instruction": "沿西华门大街步行105米左转",
+         "road": "西华门大街",
+         "distance": "105"
+        },
+        {
+         "instruction": "沿南长街步行765米左转",
+         "road": "南长街",
+         "distance": "765"
+        },
+        {
+         "instruction": "步行32米到达目的地",
+         "road": "",
+         "distance": "32"
+        },
+        {
+         "instruction": "步行1米左转进入左侧道路",
+         "road": "",
+         "distance": "1"
+        },
+        {
+         "instruction": "步行122米到达天安门西",
+         "road": "",
+         "distance": "122"
+        }
+       ]
+      },
+      "bus": {
+       "buslines": [
+        {
+         "departure_stop": {
+          "name": "天安门西",
+          "id": "110100023110015",
+          "location": "116.391278,39.907472",
+          "entrance": {
+           "name": "B东北口",
+           "location": "116.392230,39.907859"
+          }
+         },
+         "arrival_stop": {
+          "name": "大望路",
+          "id": "110100023110022",
+          "location": "116.475783,39.908287"
+         },
+         "name": "地铁1号线八通线(苹果园--环球度假区)",
+         "id": "110100023110",
+         "type": "地铁线路",
+         "distance": "7210",
+         "cost": {
+          "duration": "1080"
+         },
+         "bus_time_tips": "",
+         "bustimetag": "0",
+         "start_time": "0509",
+         "station_start_time": "0518",
+         "end_time": "2247",
+         "station_end_time": "0002",
+         "via_num": "6",
+         "via_stops": [
+          {
+           "name": "天安门东",
+           "id": "110100023110016",
+           "location": "116.401216,39.907780"
+          },
+          {
+           "name": "王府井",
+           "id": "110100023110017",
+           "location": "116.411571,39.908069"
+          },
+          {
+           "name": "东单",
+           "id": "110100023110018",
+           "location": "116.420327,39.908317"
+          },
+          {
+           "name": "建国门",
+           "id": "110100023110019",
+           "location": "116.434648,39.908555"
+          },
+          {
+           "name": "永安里",
+           "id": "110100023110020",
+           "location": "116.450330,39.908472"
+          },
+          {
+           "name": "国贸",
+           "id": "110100023110021",
+           "location": "116.459707,39.908421"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "walking": {
+       "destination": "116.477928,39.909557",
+       "distance": "303",
+       "origin": "116.475784,39.908287",
+       "cost": {
+        "duration": "259"
+       },
+       "steps": [
+        {
+         "instruction": "步行322米到达大望路",
+         "road": "",
+         "distance": "322"
+        }
+       ]
+      },
+      "bus": {
+       "buslines": [
+        {
+         "departure_stop": {
+          "name": "大望路",
+          "id": "900000028908024",
+          "location": "116.477927,39.909559"
+         },
+         "arrival_stop": {
+          "name": "望京南",
+          "id": "900000028908007",
+          "location": "116.481880,39.984670",
+          "exit": {
+           "name": "A西北口",
+           "location": "116.480285,39.986401"
+          }
+         },
+         "name": "地铁14号线(张郭庄--善各庄)",
+         "id": "900000028908",
+         "type": "地铁线路",
+         "distance": "9459",
+         "cost": {
+          "duration": "1050"
+         },
+         "bus_time_tips": "",
+         "bustimetag": "0",
+         "start_time": "0455",
+         "station_start_time": "0551",
+         "end_time": "2242",
+         "station_end_time": "2336",
+         "via_num": "5",
+         "via_stops": [
+          {
+           "name": "金台路",
+           "id": "900000028908001",
+           "location": "116.478115,39.923556"
+          },
+          {
+           "name": "朝阳公园",
+           "id": "900000028908002",
+           "location": "116.478291,39.933492"
+          },
+          {
+           "name": "枣营",
+           "id": "900000028908003",
+           "location": "116.474947,39.944132"
+          },
+          {
+           "name": "东风北桥",
+           "id": "900000028908004",
+           "location": "116.485919,39.958375"
+          },
+          {
+           "name": "将台",
+           "id": "900000028908005",
+           "location": "116.490213,39.971026"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "walking": {
+       "destination": "116.481194,39.989544",
+       "distance": "962",
+       "origin": "116.481880,39.984665",
+       "cost": {
+        "duration": "878"
+       },
+       "steps": [
+        {
+         "instruction": "步行266米直行",
+         "road": "",
+         "distance": "266"
+        },
+        {
+         "instruction": "步行1米到达目的地",
+         "road": "",
+         "distance": "1"
+        },
+        {
+         "instruction": "步行12米右转",
+         "road": "",
+         "distance": "12"
+        },
+        {
+         "instruction": "步行267米右转",
+         "road": "",
+         "distance": "267"
+        },
+        {
+         "instruction": "沿阜通东大街辅路步行274米右转",
+         "road": "阜通东大街辅路",
+         "distance": "274"
+        },
+        {
+         "instruction": "沿阜荣街辅路步行100米左转",
+         "road": "阜荣街辅路",
+         "distance": "100"
+        },
+        {
+         "instruction": "步行43米到达目的地",
+         "road": "",
+         "distance": "43"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "count": "1"
+}

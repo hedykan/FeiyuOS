@@ -1,0 +1,33 @@
+{
+ "name": "测试-分支",
+ "about": "读回灯色并分支",
+ "steps": [
+  {
+   "write": "device://local/led",
+   "content": "绿"
+  },
+  {
+   "read": "device://local/led",
+   "as": "c"
+  },
+  {
+   "if": "c",
+   "has": "绿",
+   "then": [
+    {
+     "write": "device://local/led",
+     "content": "蓝"
+    }
+   ],
+   "else": [
+    {
+     "write": "device://local/led",
+     "content": "红"
+    }
+   ]
+  },
+  {
+   "read": "device://local/led"
+  }
+ ]
+}

@@ -1,0 +1,30 @@
+{
+ "name": "测试-问答",
+ "about": "ask:// 判断后分支",
+ "steps": [
+  {
+   "write": "ask://",
+   "content": "1 加 1 等于几？只回答阿拉伯数字",
+   "as": "a"
+  },
+  {
+   "if": "a",
+   "has": "2",
+   "then": [
+    {
+     "write": "device://local/clipboard",
+     "content": "ask 正确"
+    }
+   ],
+   "else": [
+    {
+     "write": "device://local/clipboard",
+     "content": "ask 错误：{a}"
+    }
+   ]
+  },
+  {
+   "read": "device://local/clipboard"
+  }
+ ]
+}

@@ -1,0 +1,24 @@
+{
+ "name": "测试-等待",
+ "about": "wait 5 秒后继续",
+ "steps": [
+  {
+   "write": "device://local/led",
+   "content": "蓝"
+  },
+  {
+   "wait": "5s"
+  },
+  {
+   "write": "device://local/led",
+   "content": "off"
+  },
+  {
+   "write": "device://local/clipboard",
+   "content": "等待完成"
+  },
+  {
+   "read": "device://local/clipboard"
+  }
+ ]
+}

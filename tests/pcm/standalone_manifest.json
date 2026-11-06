@@ -1,0 +1,22 @@
+[
+  {
+    "id": "local_status",
+    "text": "查看这台 Cardputer 的本机状态。"
+  },
+  {
+    "id": "local_settings",
+    "text": "查看这台设备当前的屏幕设置。"
+  },
+  {
+    "id": "set_brightness_96",
+    "text": "把这台设备的屏幕亮度设置为九十六。"
+  },
+  {
+    "id": "set_timeout_180",
+    "text": "把这台设备的自动息屏时间设置为三分钟。"
+  },
+  {
+    "id": "local_history",
+    "text": "查看最近的本机操作历史。"
+  }
+]

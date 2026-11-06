@@ -1,0 +1,50 @@
+{
+ "status": "1",
+ "regeocode": {
+  "addressComponent": {
+   "city": [],
+   "province": "北京市",
+   "adcode": "110101",
+   "district": "东城区",
+   "towncode": "110101001000",
+   "streetNumber": {
+    "number": "69号",
+    "location": "116.400423,39.910035",
+    "direction": "东",
+    "distance": "270.159",
+    "street": "南河沿大街"
+   },
+   "country": "中国",
+   "township": "东华门街道",
+   "businessAreas": [
+    {
+     "location": "116.391136,39.895092",
+     "name": "大栅栏",
+     "id": "110102"
+    },
+    {
+     "location": "116.412422,39.908966",
+     "name": "王府井",
+     "id": "110101"
+    },
+    {
+     "location": "116.418943,39.908683",
+     "name": "东单",
+     "id": "110101"
+    }
+   ],
+   "building": {
+    "name": [],
+    "type": []
+   },
+   "neighborhood": {
+    "name": [],
+    "type": []
+   },
+   "citycode": "010"
+  },
+  "formatted_address": "北京市东城区东华门街道天安门"
+ },
+ "info": "OK",
+ "infocode": "10000"
+}

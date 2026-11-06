@@ -1,0 +1,173 @@
+{
+ "status": "1",
+ "info": "OK",
+ "infocode": "10000",
+ "count": "1",
+ "route": {
+  "origin": "116.397455,39.909187",
+  "destination": "116.397029,39.917839",
+  "paths": [
+   {
+    "distance": "1064",
+    "cost": {
+     "duration": "851"
+    },
+    "steps": [
+     {
+      "instruction": "向北步行566米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "566",
+      "cost": {
+       "duration": "453"
+      }
+     },
+     {
+      "instruction": "向北步行24米左转",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "24",
+      "cost": {
+       "duration": "19"
+      }
+     },
+     {
+      "instruction": "向西步行30米向右前方行走",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": "30",
+      "cost": {
+       "duration": "24"
+      }
+     },
+     {
+      "instruction": "向西北步行73米直行",
+      "orientation": "西北",
+      "road_name": "",
+      "step_distance": "73",
+      "cost": {
+       "duration": "58"
+      }
+     },
+     {
+      "instruction": "向北步行22米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "22",
+      "cost": {
+       "duration": "18"
+      }
+     },
+     {
+      "instruction": "向北步行13米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "13",
+      "cost": {
+       "duration": "10"
+      }
+     },
+     {
+      "instruction": "向北步行22米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "22",
+      "cost": {
+       "duration": "18"
+      }
+     },
+     {
+      "instruction": "向北步行74米左转",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "74",
+      "cost": {
+       "duration": "59"
+      }
+     },
+     {
+      "instruction": "向西步行13米右转",
+      "orientation": "西",
+      "road_name": "",
+      "step_distance": "13",
+      "cost": {
+       "duration": "10"
+      }
+     },
+     {
+      "instruction": "向北步行64米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "64",
+      "cost": {
+       "duration": "51"
+      }
+     },
+     {
+      "instruction": "向北步行23米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "23",
+      "cost": {
+       "duration": "18"
+      }
+     },
+     {
+      "instruction": "向北步行12米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "12",
+      "cost": {
+       "duration": "10"
+      }
+     },
+     {
+      "instruction": "向北步行23米直行",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "23",
+      "cost": {
+       "duration": "18"
+      }
+     },
+     {
+      "instruction": "向北步行41米右转",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "41",
+      "cost": {
+       "duration": "33"
+      }
+     },
+     {
+      "instruction": "向东步行32米直行",
+      "orientation": "东",
+      "road_name": "",
+      "step_distance": "32",
+      "cost": {
+       "duration": "26"
+      }
+     },
+     {
+      "instruction": "向东步行30米左转",
+      "orientation": "东",
+      "road_name": "",
+      "step_distance": "30",
+      "cost": {
+       "duration": "24"
+      }
+     },
+     {
+      "instruction": "向北步行2米到达目的地",
+      "orientation": "北",
+      "road_name": "",
+      "step_distance": "2",
+      "cost": {
+       "duration": "2"
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

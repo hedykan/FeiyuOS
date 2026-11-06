@@ -1,0 +1,19 @@
+{
+ "suggestion": {
+  "keywords": [],
+  "cities": []
+ },
+ "count": "100",
+ "infocode": "10000",
+ "pois": [
+  {
+   "distance": [],
+   "type": "风景名胜;风景名胜;世界遗产|科教文化服务;博物馆;博物馆",
+   "address": "景山前街4号",
+   "name": "故宫博物院",
+   "location": "116.397029,39.917839"
+  }
+ ],
+ "status": "1",
+ "info": "OK"
+}

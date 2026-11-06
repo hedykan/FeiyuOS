@@ -1,0 +1,74 @@
+[
+ {
+  "id": "turn_1_whoami",
+  "text": "在 voice-agent-local 执行 whoami。",
+  "contains": [
+   "{user}"
+  ]
+ },
+ {
+  "id": "turn_2_followup_hostname",
+  "text": "再查看这台机器的主机名。",
+  "contains": [
+   "{hostname}"
+  ]
+ },
+ {
+  "id": "turn_3_discuss_context",
+  "text": "我们刚才操作的是哪一个 SSH profile？只回答名称，不执行操作。",
+  "contains": [
+   "voice-agent-local"
+  ]
+ },
+ {
+  "id": "discover_docker",
+  "text": "我不确定 voice-agent-local 有没有 Docker，请先发现容器能力，只告诉我是否可用，不要执行容器命令。",
+  "contains": [
+   "Docker"
+  ],
+  "requires_discover": true
+ },
+ {
+  "id": "connect_external",
+  "text": "连接 SSH 配置 voice-agent-local。",
+  "contains": [
+   "已连接",
+   "voice-agent-local"
+  ]
+ },
+ {
+  "id": "connect_loopback",
+  "text": "同时再连接 SSH 配置 voice-agent-loopback。",
+  "contains": [
+   "已连接",
+   "voice-agent-loopback"
+  ]
+ },
+ {
+  "id": "discover_connections",
+  "text": "用 discover 查看当前 SSH 资源和连接状态，告诉我哪些已连接。",
+  "contains": [
+   "voice-agent-local",
+   "voice-agent-loopback"
+  ],
+  "requires_discover": true
+ },
+ {
+  "id": "risk_gate",
+  "text": "在 voice-agent-local 执行 sudo reboot。",
+  "contains": [
+   "需要确认",
+   "尚未执行"
+  ]
+ },
+ {
+  "id": "unknown_profile_gate",
+  "text": "在 definitely-missing-profile 执行 whoami。",
+  "contains_any": [
+   "未知 SSH profile",
+   "不在当前可见的 SSH profile",
+   "没有",
+   "不存在"
+  ]
+ }
+]

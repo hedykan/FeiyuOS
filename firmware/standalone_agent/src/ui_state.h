@@ -1,0 +1,100 @@
+#pragma once
+
+#include <Arduino.h>
+
+#include <vector>
+
+#include "agent.h"
+
+namespace vat::ui {
+
+enum class Page : uint8_t { Agent, Terminal };
+
+enum class Status : uint8_t { Running, Done, Failed, Confirm, Secret, Cancelled, Text };
+
+// One line of the Agent timeline: one utterance and what came of it.  The
+// full detail (raw output, every step) lives in /vat/memory/timeline.jsonl
+// and is read only when the detail view opens.
+struct Entry {
+    uint32_t id = 0;
+    String time;      // "23:41" or "--:--" before NTP sync
+    String text;      // what the user said (trimmed)
+    Status status = Status::Running;
+    String summary;   // one or two sentences
+    String stage;     // running: STT / THINK n / RUN x / SUMMARY
+    int step = 0;     // running/confirm: current step number
+    unsigned long started_ms = 0;
+    uint32_t elapsed_ms = 0;
+};
+
+// Everything the screen shows.  The worker mutates it through the functions
+// below; only the UI task draws.  All access is serialised by one mutex.
+struct Model {
+    std::vector<Entry> timeline;  // oldest first, at most 20
+    String notice;                // transient idle message ("录音太短…")
+    bool notice_error = false;
+    bool busy = false;
+    String stage;
+    unsigned long stage_started_ms = 0;
+    std::vector<agent::Pending> pending;
+    String terminal_text = "没有活动终端";
+    String terminal_title = "未连接";
+    bool terminal_password = false;  // remote is asking for a password
+    String terminal_draft;
+    uint32_t version = 0;
+};
+
+void init_model();
+Model snapshot();
+uint32_t version();
+bool is_busy();
+bool draft_empty();
+bool terminal_password();
+
+// Busy flags (the Agent page shows progress on the running entry).
+void set_busy(const String& stage);
+void set_stage(const String& stage);
+void set_quiet_busy(bool busy);  // background terminal work
+void set_idle();
+void set_idle_if_quiet();  // clear a busy flag left by a job that made no entry
+
+// Timeline.
+uint32_t entry_begin(const String& text);
+void entry_retext(const String& text);  // transcript arrived after the entry was created
+void entry_update(Status status, const String& summary);
+void entry_finish(Status status, const String& summary, const String& detail, const String& steps_json);
+void load_timeline();
+String entry_reply(uint32_t id);  // the whole reply when longer than the preview, else ""
+void set_notice(const String& text, bool error = false);
+// Detail of one entry from storage: JSON {text, summary, detail, steps, ...}.
+String entry_detail(uint32_t id);
+
+void set_pending(const std::vector<agent::Pending>& pending);
+bool has_pending();
+
+void set_terminal(const String& title, const String& text, bool password_prompt = false);
+void set_draft(const String& text);
+String take_draft();
+
+// Hardware requests from the worker, applied by the UI task.
+void post_brightness(int value);
+void post_screen_power(bool on);
+void post_beep(int count = 1);
+bool take_brightness(int& value);
+bool take_screen_power(bool& on);
+bool take_beep(int& count);
+
+// Full-screen overlay from the display package: covers the current page until
+// any key.  Kind None closes an open one.
+struct Overlay {
+    enum class Kind : uint8_t { None, Text, Qr, Image };
+    Kind kind = Kind::None;
+    String text;                 // Text: what to show; Qr: the encoded data
+    std::vector<uint8_t> image;  // Image: PNG / JPG / BMP bytes
+};
+void post_overlay(Overlay&& overlay);
+bool take_overlay(Overlay& overlay);
+String overlay_kind();  // "" | "text" | "qr" | "image" (what is on screen now)
+void set_overlay_kind(const String& kind);
+
+}  // namespace vat::ui

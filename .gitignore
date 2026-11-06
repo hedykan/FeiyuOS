@@ -1,0 +1,30 @@
+# Local API key files. Device keys live in /vat/secrets.json on the Cardputer; never commit either.
+/.deepseek_key
+/.openroute_voice_key
+/.openrouter_voice_key
+/.qwen_key
+
+# Copies of device configuration and secrets.
+**/secrets.h
+**/secrets.json
+**/.env
+**/.env.*
+
+# Arduino build outputs.
+/build/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Local operation logs may contain transcripts and intended terminal actions.
+/logs/
+
+# Editor and operating-system files.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
