@@ -24,7 +24,7 @@
 namespace vat::worker {
 namespace {
 
-constexpr uint32_t kStackBytes = 32768;  // measured peak ~15.4 KB (libssh + mbedTLS); 2x headroom
+constexpr uint32_t kStackBytes = 24576;  // peak 15.4-16 KB (libssh + mbedTLS, full E2E); 1.5x headroom (was 32 KB)
 constexpr std::size_t kRecordCount = 16;  // text fields live on storage; slots are small
 
 struct Record {
@@ -161,17 +161,23 @@ bool password_prompt(const String& screen) {
 // The SSH page shows the session the agent connected.  Opening terminals is
 // the agent's job (session connect / create / start_agent); without one the
 // page only explains how to get one.
+// The last session ended under us (closed, killed, host rebooted): keep
+// saying so until another one is opened, rather than a bare "no terminal".
+bool session_ended = false;
+
 void refresh_terminal() {
     const String hint = "\n回到 Agent 页说“连接" + config::get().default_profile + "”";
     if (!tui::has_current()) {
-        ui::set_terminal("未连接", "没有活动终端" + hint);
+        ui::set_terminal("未连接", String(session_ended ? "终端会话已结束" : "没有活动终端") + hint);
         return;
     }
     const String raw = tui::observe("tui://current");
     if (raw == tui::kSessionGone) {
+        session_ended = true;
         ui::set_terminal("未连接", "终端会话已结束" + hint);
         return;
     }
+    session_ended = false;
     const auto session = tui::current();
     ui::set_terminal(session.profile + " · " + session.name,
                      detail_level == 0 ? tui::compact_screen(raw) : utf8_tail(raw, 1400), password_prompt(raw));
@@ -316,7 +322,8 @@ void handle(uint32_t id, Job& job) {
             ui::set_quiet_busy(true);
             const auto result = stt::transcribe_pcm(job.path);
             if (result.ok) {
-                ui::set_draft(result.text);
+                if (job.text == "agent") ui::append_agent_draft(result.text);
+                else ui::set_draft(result.text);
                 update(id, [&](Record& record) {
                     record.status = "done";
                     record.reply = result.text;

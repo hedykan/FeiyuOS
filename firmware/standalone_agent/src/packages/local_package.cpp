@@ -11,7 +11,7 @@ namespace vat::registry {
 namespace {
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "本机资源规范：电量 device://local/battery，屏幕电源 device://local/display/power，音量 device://local/audio/volume，剪贴板 device://local/clipboard。最近任务为 memory://recent-tasks，记忆笔记为 memory://notes，用 write mode=append，content 只写要记住的事本身，去掉“记住”和句末标点，例如“记住明天检查服务器证书。”的 content 是 明天检查服务器证书。本机资源规范补充：查看本机状态用 read target=device://local/status；查看本机设置用 device://local/settings；设置屏幕亮度用 write target=device://local/display/brightness，content 为 8 到 255 的整数；设置自动息屏时间用 write target=device://local/display/timeout，content 为秒数。";
+constexpr char kUsage[] = "本机资源规范：电量 device://local/battery，屏幕电源 device://local/display/power，音量 device://local/audio/volume，剪贴板 device://local/clipboard：把一段文字复制到本机剪贴板用 write target=device://local/clipboard，mode=overwrite，content 就是那段文字本身（例如“把部署完成复制到本机剪贴板”的 content 是 部署完成），不是复制文件。最近任务为 memory://recent-tasks，记忆笔记为 memory://notes，用 write mode=append，content 只写要记住的事本身，去掉“记住”和句末标点，例如“记住明天检查服务器证书。”的 content 是 明天检查服务器证书。本机资源规范补充：查看本机状态用 read target=device://local/status；查看本机设置用 device://local/settings；设置屏幕亮度用 write target=device://local/display/brightness，content 为 8 到 255 的整数；设置自动息屏时间用 write target=device://local/display/timeout，content 为秒数。对话记忆长度用 device://local/context/length，content 为 短、中、长 或 32、64、96（KB）。";
 
 class LocalPackage : public Package {
 public:
@@ -58,6 +58,7 @@ public:
         out.push_back({"息屏", cfg.screen_timeout_seconds ? String(cfg.screen_timeout_seconds) + " 秒" : String("永不"),
                        "三分钟后息屏"});
         out.push_back({"音量", String(cfg.volume) + "%", "音量调到 30"});
+        out.push_back({"对话记忆", String(cfg.context_kb) + " KB", "把对话记忆调长"});
         out.push_back({"记忆", "", "记住明天检查证书"});
         out.push_back({"剪贴板", "", "把部署完成复制到剪贴板"});
     }

@@ -22,6 +22,7 @@ Package* make_files_package();
 Package* make_timer_package();
 Package* make_grove_package();
 Package* make_ir_package();
+Package* make_ui_package();
 Package* make_program_package();
 Package* make_ask_package();
 std::vector<Package*> make_catalog_packages();
@@ -46,6 +47,7 @@ void register_builtin() {
     add(make_ir_package());
     add(make_program_package());
     add(make_ask_package());
+    add(make_ui_package());
     for (auto* catalog : make_catalog_packages()) add(catalog);
 }
 

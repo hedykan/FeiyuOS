@@ -4,9 +4,12 @@ SKETCH ?= firmware/standalone_agent
 BUILD_NAME := $(notdir $(SKETCH))
 BUILD_DIR := build/$(BUILD_NAME)
 DEVICE ?= http://vat.local
+# The device's web API token (tools/device_token.sh saves it).
+DEVICE_TOKEN ?= $(shell cat $(HOME)/.config/feiyuos/device_token 2>/dev/null)
+AUTH = -H 'Authorization: Bearer $(DEVICE_TOKEN)'
 PHASES ?= auto
 
-.PHONY: build upload flash wait-ready host-test mascot mascot-upload irdb-upload release m5burner monitor clean e2e serial-log serial-stop probe-hardware probe-sd libs-status libs-custom libs-stock
+.PHONY: build upload flash wait-ready host-test mascot mascot-upload irdb-upload device-token release m5burner monitor clean e2e serial-log serial-stop probe-hardware probe-sd libs-status libs-custom libs-stock
 
 build:
 	arduino-cli compile -b '$(FQBN)' --build-path '$(BUILD_DIR)' '$(SKETCH)'
@@ -26,7 +29,7 @@ wait-ready:
 # cJSON comes from the same ESP-IDF tree as the custom libraries.
 CJSON_DIR ?= ../../esp-libbuild/lib-builder/esp-idf/components/json/cJSON
 HOST_SRC := firmware/standalone_agent/src
-HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/prog_engine.cpp $(HOST_SRC)/ac_core.cpp
+HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/prog_engine.cpp $(HOST_SRC)/ac_core.cpp $(HOST_SRC)/arena_ledger.cpp $(HOST_SRC)/ui_panel.cpp $(HOST_SRC)/web_token_core.cpp $(HOST_SRC)/ui_canvas.cpp
 IREXT_C := $(wildcard $(HOST_SRC)/third_party/irext/*.c)
 host-test:
 	mkdir -p build/host
@@ -37,19 +40,26 @@ host-test:
 	build/host/host_test tests/host/fixtures
 	python3 tools/check_usage.py
 
-# Corner mascot: pack assets/mascot and copy it to
-# the card; the firmware shows it when /vat/assets/mascot.bin exists.
+# Corner mascot and boot animation: pack assets/mascot (and assets/boot) and
+# copy them to the card; the firmware shows them when /vat/assets/mascot.bin
+# (boot.bin) exists.
 mascot:
 	mkdir -p build
 	python3 tools/pack_mascot.py assets/mascot build/mascot.bin
+	if [ -d assets/boot/frames/wait ]; then python3 tools/pack_mascot.py --boot assets/boot build/boot.bin; fi
 
 mascot-upload: mascot
-	curl -sS -F "file=@build/mascot.bin" '$(DEVICE)/api/upload?path=/vat/assets/mascot.bin'
+	@curl -sS $(AUTH) -F "file=@build/mascot.bin" '$(DEVICE)/api/upload?path=/vat/assets/mascot.bin'
+	@if [ -f build/boot.bin ]; then curl -sS $(AUTH) -F "file=@build/boot.bin" '$(DEVICE)/api/upload?path=/vat/assets/boot.bin'; fi
 
 # Air-conditioner IR codes (IRext, MIT): assets/irdb/ac.irdb, packed by
 # tools/pack_irdb.py from the IRext database; the firmware reads it from the card.
 irdb-upload:
-	curl -sS -F "file=@assets/irdb/ac.irdb" '$(DEVICE)/api/upload?path=/vat/ir/ac.irdb'
+	@curl -sS $(AUTH) -F "file=@assets/irdb/ac.irdb" '$(DEVICE)/api/upload?path=/vat/ir/ac.irdb'
+
+# Read the web API token from the serial console (resets the device).
+device-token:
+	tools/device_token.sh '$(PORT)'
 
 # Release images (GitHub Release assets).  A separate build directory, with
 # source paths mapped so __FILE__ in library asserts does not carry the build
@@ -80,7 +90,7 @@ clean:
 serial-log: serial-stop
 	mkdir -p logs
 	stty -F '$(PORT)' 115200 raw -echo
-	nohup sh -c "cat '$(PORT)' >> logs/serial.log" >/dev/null 2>&1 &
+	nohup sh -c "cat '$(PORT)' | grep --line-buffered -av web_token >> logs/serial.log" >/dev/null 2>&1 &
 
 serial-stop:
 	-pkill -x -f "cat $(PORT)" || true

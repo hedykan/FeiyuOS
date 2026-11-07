@@ -7,7 +7,8 @@
 //                                                      upload a version, kept private
 //   node tools/m5burner.mjs version <version> <firmware.bin>
 //                                                      add a version to the existing firmware (same
-//                                                      name), kept private; also refreshes the description
+//                                                      name), kept private; also refreshes the description;
+//                                                      its change log comes from docs/releases/<version>.md
 //   node tools/m5burner.mjs share <fid> <version>      share code for burning a private version
 //   node tools/m5burner.mjs publish <fid> <version> on|off
 //
@@ -19,6 +20,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { changeLog } from './release_notes.mjs';
 
 const API = 'https://m5burner-api.m5stack.com';
 const LOGIN = 'https://uiflow2.m5stack.com/api/v1/account/login';
@@ -153,8 +155,14 @@ async function version(name, firmwarePath) {
   const items = Array.isArray(data) ? data : data.data ?? [];
   const existing = items.find((f) => f.name === config.name) ?? die(`no firmware named ${config.name}: use upload`);
   if ((existing.versions ?? []).some((v) => v.version === name)) die(`${name} is already uploaded`);
+  let notes;
+  try {
+    notes = changeLog(name);
+  } catch (error) {
+    die(error.message);
+  }
   const form = new FormData();
-  const fields = { ...config, author: existing.author, version: name, cover: 'null' };
+  const fields = { ...config, author: existing.author, version: name, cover: 'null', change_log: notes };
   for (const [key, value] of Object.entries(fields)) form.append(key, String(value));
   form.append('firmware', new Blob([readFileSync(firmwarePath)]), basename(firmwarePath));
   await call('POST', '/api/admin/firmware', form);

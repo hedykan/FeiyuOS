@@ -40,12 +40,18 @@ String signal_word(int rssi) { return rssi > -60 ? "强" : rssi > -75 ? "中" : 
 bool last_scan_failed() { return scan_failed; }
 
 std::vector<Network> scan(std::size_t max) {
-    // Not connected, the driver keeps retrying the old network and a scan
-    // started meanwhile fails: stop the retries first, then try twice.
-    if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false, false);
-    int count = WiFi.scanNetworks(false, false);
-    if (count == WIFI_SCAN_FAILED) {
-        delay(500);
+    // Not connected, the driver may still be retrying the last network, and
+    // a scan fails at once while it connects: stop the retries, let the
+    // station settle (a failed attempt still reports its drop and would
+    // reconnect), then try up to three times.
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect(false, false);
+        delay(300);
+    }
+    int count = WIFI_SCAN_FAILED;
+    for (int attempt = 0; attempt < 3 && count == WIFI_SCAN_FAILED; ++attempt) {
+        if (attempt) delay(400 * attempt);
         count = WiFi.scanNetworks(false, false);
     }
     scan_failed = count == WIFI_SCAN_FAILED;

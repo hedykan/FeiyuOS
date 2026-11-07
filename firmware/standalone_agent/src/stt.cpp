@@ -75,6 +75,12 @@ Transcript transcribe_pcm(const String& pcm_path) {
         transcript.ok = true;
         transcript.text = text->valuestring;
         transcript.text.trim();
+        // With (almost) no speech the recogniser can hand back its context
+        // prompt; that is not what was said.
+        if (transcript.text.indexOf("专有词") >= 0 || transcript.text.indexOf("Cardputer AI 操作终端") >= 0) {
+            transcript.ok = false;
+            transcript.text = "没听清，请按住 Enter 再说一次";
+        }
     } else {
         transcript.text = "语音识别没有返回文字";
     }

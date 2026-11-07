@@ -134,6 +134,15 @@ String discover_capabilities(const String& query, const String& target, int limi
     return text;
 }
 
+// Every package by name only: a few bytes each, so the list is never cut
+// however many packages there are.  Details come from a query by name.
+String package_names() {
+    String names;
+    int count = 0;
+    for (auto* package : installed) names += String(count++ ? "、" : "") + package->manifest().id;
+    return "共 " + String(count) + " 个能力包：" + names + "\n（看某个包的用途和用法：discover query 写包名或关键词）";
+}
+
 String discover_commands(const String& query, int limit) {
     const auto query_terms = terms(query);
     struct Ranked {
@@ -237,14 +246,17 @@ String discover(const cJSON* arguments) {
     String query = json_str(arguments, "query");
     query.trim();
     const String target = json_str(arguments, "target");
-    const int limit = constrain(json_int(arguments, "limit", 8), 1, 20);
+    const int limit = constrain(json_int(arguments, "limit", 8), 1, 32);  // more than 20 packages since v0.6
     if (scope == "resources") return discover_resources(query, limit);
     if (scope == "capabilities") {
         // A query that matches nothing (e.g. "all capabilities") returns the
         // full list instead of an empty one, flagged as unmatched.
+        // No query: all packages, names only (never cut).  A query lists the
+        // matching ones with what they do, up to `limit`.
+        if (query.isEmpty()) return package_names();
         const String matched = discover_capabilities(query, target, limit);
-        if (query.isEmpty() || !matched.isEmpty()) return matched;
-        return "没有精确匹配，以下是全部能力包：\n" + discover_capabilities(query, target, 20, false);
+        if (!matched.isEmpty()) return matched;
+        return "没有精确匹配。" + package_names();
     }
     if (scope == "commands") return discover_commands(query, limit);
     if (scope == "help") return discover_help(query, target);
@@ -267,8 +279,21 @@ bool reversible(const String& tool, const cJSON* arguments) {
 
 std::vector<Package::Hint> hints() {
     std::vector<Package::Hint> out;
-    for (auto* package : installed) package->hints(out);
+    for (auto* package : installed) {
+        const std::size_t from = out.size();
+        package->hints(out);
+        for (std::size_t i = from; i < out.size(); ++i) out[i].package = package->manifest().id;
+    }
     return out;
+}
+
+String package_help(const String& id) {
+    for (auto* package : installed) {
+        if (id != package->manifest().id) continue;
+        const char* usage = package->usage();
+        return String(package->manifest().summary) + (usage ? String("\n\n") + usage : String());
+    }
+    return {};
 }
 
 String watch(const String& target, String& normalized) {

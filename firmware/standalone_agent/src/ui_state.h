@@ -4,6 +4,7 @@
 
 #include <vector>
 
+#include "ui_canvas.h"
 #include "agent.h"
 
 namespace vat::ui {
@@ -41,6 +42,7 @@ struct Model {
     String terminal_title = "未连接";
     bool terminal_password = false;  // remote is asking for a password
     String terminal_draft;
+    String agent_draft;  // Agent page: spoken segments waiting for Enter
     uint32_t version = 0;
 };
 
@@ -75,6 +77,9 @@ bool has_pending();
 void set_terminal(const String& title, const String& text, bool password_prompt = false);
 void set_draft(const String& text);
 String take_draft();
+void append_agent_draft(const String& text);
+String take_agent_draft();
+void set_agent_draft(const String& text);
 
 // Hardware requests from the worker, applied by the UI task.
 void post_brightness(int value);
@@ -87,14 +92,30 @@ bool take_beep(int& count);
 // Full-screen overlay from the display package: covers the current page until
 // any key.  Kind None closes an open one.
 struct Overlay {
-    enum class Kind : uint8_t { None, Text, Qr, Image };
+    enum class Kind : uint8_t { None, Text, Qr, Image, Panel, Canvas };
     Kind kind = Kind::None;
     String text;                 // Text: what to show; Qr: the encoded data
     std::vector<uint8_t> image;  // Image: PNG / JPG / BMP bytes
+    // Panel (ui package): an interactive page; choosing emits ui://panel/<panel>.
+    String panel;
+    String title;
+    std::vector<String> lines;
+    std::vector<String> choices;
+    // Canvas (ui package): drawing operations; `image` holds a drawImage file.
+    std::vector<ui_canvas::Op> canvas;
+    int image_x = 0;
+    int image_y = 0;
+    uint32_t frame_ms = 0;  // animation: 0 = still
+    uint32_t frames = 0;    // 0 = until closed
+    int step = 1;           // {t} = frame × step
 };
 void post_overlay(Overlay&& overlay);
 bool take_overlay(Overlay& overlay);
-String overlay_kind();  // "" | "text" | "qr" | "image" (what is on screen now)
+String overlay_kind();  // "" | "text" | "qr" | "image" | "panel:<name>" (what is on screen now)
+String open_panel();    // name of the panel or canvas on screen, "" when none
+// The last choice made on each panel (kept until restart).
+void set_panel_choice(const String& panel, const String& choice);
+String panel_choice(const String& panel);
 void set_overlay_kind(const String& kind);
 
 }  // namespace vat::ui

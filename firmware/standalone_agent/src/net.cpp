@@ -4,7 +4,9 @@
 #include <NetworkClientSecure.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <sdkconfig.h>
 
+#include "arena.h"
 #include "common.h"
 #include "storage.h"
 
@@ -17,13 +19,21 @@ WifiState wifi_state = WifiState::Off;
 // use fragments the heap until no such block is left even with 90 KB free, so
 // two blocks are claimed while the heap is still clean and handed back only
 // for the duration of a TLS connection.
-constexpr std::size_t kTlsReserveBytes = 17920;
+// One block per mbedTLS record buffer, each sized from the build's
+// configuration: the receive buffer (16 KB + headroom) and the send buffer,
+// which the custom libraries cut to 4 KB.  The reserve used to keep 17.5 KB for
+// both: 12.5 KB held for nothing with the custom libraries.
+constexpr std::size_t kTlsReserveBytes[2] = {CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN + 1536,
+                                             CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN + 1024};
 void* tls_reserve[2] = {nullptr, nullptr};
 
 void reserve_blocks() {
-    for (auto& block : tls_reserve) {
-        if (!block) block = heap_caps_malloc(kTlsReserveBytes, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    std::size_t held = 0;
+    for (int i = 0; i < 2; ++i) {
+        if (!tls_reserve[i]) tls_reserve[i] = heap_caps_malloc(kTlsReserveBytes[i], MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (tls_reserve[i]) held += kTlsReserveBytes[i];
     }
+    arena::note("tls_reserve", held);
 }
 
 void release_blocks() {
@@ -31,6 +41,7 @@ void release_blocks() {
         free(block);
         block = nullptr;
     }
+    arena::give_back("tls_reserve");
 }
 String setup_ap_name;
 constexpr uint32_t kSampleRate = 16000;
@@ -304,6 +315,13 @@ bool retryable(const HttpResult& result) {
 
 }  // namespace
 
+void* reserve_block(int index, std::size_t& bytes) {
+    if (index < 0 || index > 1) return nullptr;
+    reserve_blocks();
+    bytes = tls_reserve[index] ? kTlsReserveBytes[index] : 0;
+    return tls_reserve[index];
+}
+
 void release_reserve() { release_blocks(); }
 void restore_reserve() { reserve_blocks(); }
 
@@ -319,6 +337,7 @@ bool connect_station(const String& ssid, const String& password, uint32_t timeou
         const unsigned long until = millis() + 3000;
         while (WiFi.status() == WL_CONNECTED && millis() < until) delay(50);
     }
+    WiFi.setAutoReconnect(true);  // once joined, a dropped link comes back by itself
     WiFi.begin(ssid.c_str(), password.c_str());
     const unsigned long deadline = millis() + timeout_ms;
     const auto on_it = [&ssid] { return WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid; };
@@ -329,6 +348,10 @@ bool connect_station(const String& ssid, const String& password, uint32_t timeou
         wifi_state = WifiState::Connected;
         return true;
     }
+    // Given up: stop the driver retrying in the background.  While it
+    // retries, every scan fails at once (connecting comes before scanning).
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(false, false);
     wifi_state = WifiState::Off;
     return false;
 }

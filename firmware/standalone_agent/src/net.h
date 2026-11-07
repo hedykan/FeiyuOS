@@ -10,6 +10,10 @@ namespace vat::net {
 // Two large blocks claimed while the heap is still unfragmented.  They are
 // handed back for the duration of a TLS connection or an SSH session (the
 // stages never overlap) so mbedTLS and libssh always find contiguous memory.
+// The TLS reserve while no TLS connection is up (the boot): block 0 (receive
+// buffer size) or 1 (send buffer size), allocated if needed.  Lent to the
+// boot screen, which hands it back before the first connection.
+void* reserve_block(int index, std::size_t& bytes);
 void release_reserve();
 void restore_reserve();
 

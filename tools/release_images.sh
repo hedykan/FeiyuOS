@@ -8,6 +8,7 @@
 #                                        the app so the storage partitions are untouched
 #   feiyuos-<version>-app.bin            upgrade, flash at 0x10000
 #   mascot.bin                           corner mascot, copy to /vat/assets/mascot.bin
+#   boot.bin                             boot animation, copy to /vat/assets/boot.bin
 #   ac.irdb                              air-conditioner IR codes, copy to /vat/ir/ac.irdb
 #   SHA256SUMS.txt
 #
@@ -33,6 +34,7 @@ cmp <(tail -c +$((0x8000 + 1)) "$full" | head -c "$(stat -c %s "$build/$name.ino
     "$build/$name.ino.partitions.bin"
 cp "$app" "$out/feiyuos-$version-app.bin"
 python3 "$root/tools/pack_mascot.py" "$root/assets/mascot" "$out/mascot.bin" >/dev/null
+python3 "$root/tools/pack_mascot.py" --boot "$root/assets/boot" "$out/boot.bin" >/dev/null
 cp "$root/assets/irdb/ac.irdb" "$out/ac.irdb"
 (cd "$out" && sha256sum ./*.bin ./*.irdb | sed 's# \./# #' > SHA256SUMS.txt)
 

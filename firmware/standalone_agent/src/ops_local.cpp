@@ -137,13 +137,13 @@ String settings_json() {
     const auto& cfg = config::get();
     return "{\"brightness\":" + String(cfg.brightness) +
            ",\"screen_timeout_seconds\":" + String(cfg.screen_timeout_seconds) +
-           ",\"volume\":" + String(cfg.volume) + "}";
+           ",\"volume\":" + String(cfg.volume) + ",\"context_kb\":" + String(cfg.context_kb) + "}";
 }
 
 String resources_json() {
     return "[\"device://local/status\",\"device://local/settings\",\"device://local/battery\","
            "\"device://local/display/brightness\",\"device://local/display/timeout\","
-           "\"device://local/display/power\",\"device://local/audio/volume\","
+           "\"device://local/display/power\",\"device://local/audio/volume\",\"device://local/context/length\","
            "\"device://local/clipboard\",\"memory://recent-tasks\",\"memory://notes\"]";
 }
 
@@ -161,6 +161,9 @@ String tool_read(const cJSON* arguments) {
         return "息屏时间 " + String(config::get().screen_timeout_seconds) + " 秒";
     }
     if (target == "device://local/audio/volume") return "音量 " + String(config::get().volume) + "%";
+    if (target == "device://local/context/length") {
+        return "对话记忆 " + String(config::get().context_kb) + " KB（短 32 / 中 64 / 长 96；越长越慢、越费 token）";
+    }
     if (target == "device://local/clipboard") {
         const String value = clipboard();
         return value.isEmpty() ? String("剪贴板为空") : value;
@@ -186,6 +189,16 @@ String tool_write(const cJSON* arguments) {
         ui::post_brightness(value);
         return config::save_ui_number("brightness", value) ? "屏幕亮度已设置为 " + String(value)
                                                             : String("亮度生效但保存失败");
+    }
+    if (target == "device://local/context/length") {
+        String v = content;
+        v.trim();
+        const int asked = v == "短" ? 32 : v == "中" ? 64 : v == "长" ? 96 : static_cast<int>(v.toInt());
+        const int value = asked <= 0 ? 64 : asked < 48 ? 32 : asked < 80 ? 64 : 96;
+        cfg.context_kb = value;
+        return config::save_ui_number("context_kb", value)
+                   ? "对话记忆已设为 " + String(value) + " KB" + (value == 96 ? "（每轮会慢一些、更费 token）" : "")
+                   : String("设置生效但保存失败");
     }
     if (target == "device://local/display/timeout") {
         const int value = constrain(content.toInt(), 0, 1800);

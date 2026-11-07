@@ -2,6 +2,15 @@
 """Pack corner-mascot frames into the device's mascot.bin (see src/ui_mascot.cpp).
 
     python3 tools/pack_mascot.py <art-dir> [out.bin]
+    python3 tools/pack_mascot.py --boot <art-dir> [boot.bin]
+
+--boot packs the boot screen's states instead (enter_left, enter_right,
+enter_top, enter_bottom: the mascot entering from that side, played once;
+wait: the loop while the device boots), with a palette of its own, into
+format version 2: version 1 plus each frame's offset from where the mascot
+lands (animation.json states.<state>.offsets_px, [dx, dy] in art pixels,
+-128..127), so an entrance can move as it was drawn.  The art lives in
+assets/boot.
 
 <art-dir> holds frames/<state>/*.png for the states idle, recognize,
 understand, execute and error (frame order = file name order, at most 8 per
@@ -25,6 +34,7 @@ from pathlib import Path
 from PIL import Image
 
 STATES = ["idle", "recognize", "understand", "execute", "error"]
+BOOT_STATES = ["enter_left", "enter_right", "enter_top", "enter_bottom", "wait"]
 SIZE = 32
 MAX_FRAMES = 8
 MAX_COLORS = 64
@@ -36,24 +46,34 @@ def rgb565(r: int, g: int, b: int) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    boot = bool(args) and args[0] == "--boot"
+    if boot:
+        args = args[1:]
+    if not args:
         print(__doc__)
         return 2
-    art = Path(sys.argv[1])
-    out = Path(sys.argv[2] if len(sys.argv) > 2 else "mascot.bin")
+    states = BOOT_STATES if boot else STATES
+    art = Path(args[0])
+    out = Path(args[1] if len(args) > 1 else ("boot.bin" if boot else "mascot.bin"))
     meta = {}
     if (art / "animation.json").exists():
         meta = json.loads((art / "animation.json").read_text(encoding="utf-8")).get("states", {})
 
     palette = [0]  # index 0: transparent
     index_of: dict[int, int] = {}
-    counts, durations, frames = [], [], []
-    for state in STATES:
+    counts, durations, offsets, frames = [], [], [], []
+    for state in states:
         files = sorted((art / "frames" / state).glob("*.png"))
         if not 1 <= len(files) <= MAX_FRAMES:
             raise SystemExit(f"{state}: need 1-{MAX_FRAMES} frames, found {len(files)}")
         ms = list(meta.get(state, {}).get("durations_ms", []))
         ms = (ms + [DEFAULT_MS] * MAX_FRAMES)[:len(files)]
+        moves = [tuple(m) for m in meta.get(state, {}).get("offsets_px", [])]
+        moves = (moves + [(0, 0)] * MAX_FRAMES)[:len(files)]
+        if any(not -128 <= v <= 127 for m in moves for v in m):
+            raise SystemExit(f"{state}: offsets_px out of -128..127")
+        offsets.append(moves + [(0, 0)] * (MAX_FRAMES - len(files)))
         counts.append(len(files))
         durations.append(ms + [0] * (MAX_FRAMES - len(files)))
         for path in files:
@@ -79,12 +99,17 @@ def main() -> int:
             frames.append(bytes(data))
 
     header = bytearray(b"VATM")
-    header += bytes([1, SIZE, len(STATES), len(palette)])
+    header += bytes([2 if boot else 1, SIZE, len(states), len(palette)])
     header += bytes(counts + [0] * (8 - len(counts)))
     for state_ms in durations + [[0] * MAX_FRAMES] * (8 - len(durations)):
         header += struct.pack("<8H", *[min(int(v), 0xFFFF) for v in state_ms])
     header += struct.pack(f"<{MAX_COLORS}H", *(palette + [0] * (MAX_COLORS - len(palette))))
     assert len(header) == 272, len(header)
+    if boot:  # version 2: int8 dx, dy per frame, [8 states][8 frames]
+        for state_moves in offsets + [[(0, 0)] * MAX_FRAMES] * (8 - len(offsets)):
+            for dx, dy in state_moves:
+                header += struct.pack("<bb", int(dx), int(dy))
+        assert len(header) == 400, len(header)
     out.write_bytes(bytes(header) + b"".join(frames))
     print(f"{out}: {len(frames)} frames, {len(palette) - 1} colours, {out.stat().st_size} bytes")
     return 0

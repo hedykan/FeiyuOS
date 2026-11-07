@@ -29,6 +29,9 @@ String canonical_action(String action) {
     for (const char* a : {"ac", "空调", "aircon", "air_conditioner"}) {
         if (action == a) return "ac";
     }
+    for (const char* a : {"try", "试码", "选码", "换码"}) {
+        if (action == a) return "try";
+    }
     return action;
 }
 
@@ -41,7 +44,7 @@ bool yes(String answer) {
 }
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "红外遥控电视用 write target=ir://电器名/动作（power、volume_up、volume_down、mute），电器名逐字保留，首次 content 填品牌，没说品牌留空。空调用 write target=ir://电器名/ac，content 写要的状态或变化，如 奥克斯 开 制冷 26 自动风、关、+1、除湿、高风，首次带品牌，自动模式写 mode=auto，自动风写 fan=auto；用户说生效或没反应时 write ir://电器名/confirm，content 为 yes 或 no；列出红外电器用 read ir://list。查到某设备的红外码（如联网搜到后）用 write target=ir://send，content 为「协议 地址 命令」，协议支持 NEC/SAMSUNG/SONY/RC5，如 content 为 NEC 0x04 0x08。";
+constexpr char kUsage[] = "红外遥控电视用 write target=ir://电器名/动作（power、volume_up、volume_down、mute），电器名逐字保留，首次 content 填品牌，没说品牌留空。空调用 write target=ir://电器名/ac，content 写要的状态或变化，如 奥克斯 开 制冷 26 自动风、关、+1、除湿、高风，首次带品牌，自动模式写 mode=auto，自动风写 fan=auto；用户说生效或没反应时 write ir://电器名/confirm，content 为 yes 或 no；用户要换到上一套、下一套或第几套码时 write ir://电器名/try，content 为 上一套、下一套、重发 或编号数字；列出红外电器用 read ir://list。查到某设备的红外码（如联网搜到后）用 write target=ir://send，content 为「协议 地址 命令」，协议支持 NEC/SAMSUNG/SONY/RC5，如 content 为 NEC 0x04 0x08。";
 
 class IrPackage : public Package {
 public:
@@ -72,6 +75,9 @@ public:
         const String action = slash < 0 ? String("power") : canonical_action(rest.substring(slash + 1));
         if (action == "confirm") return ac::is_ac(name) ? ac::confirm(name, yes(content)) : ir::confirm(name, yes(content));
         if (action == "ac") return ac::send(name, content);
+        if (action == "try") {
+            return ac::is_ac(name) ? ac::choose(name, content) : "ERROR: 「" + name + "」不是空调，换码只用于空调";
+        }
         return ir::send(name, action, content);
     }
 
@@ -86,6 +92,7 @@ public:
             {"ir://电器名/power", "ir：write 发电源码（也可 volume_up/volume_down/mute），首次 content 填品牌"},
             {"ir://电器名/ac", "ir：write 控制空调，content 为状态或变化（奥克斯 开 制冷 26 / 关 / +1 / 除湿 / 高风），首次带品牌"},
             {"ir://电器名/confirm", "ir：用户说生效或没反应时 write，content 为 yes/no"},
+            {"ir://电器名/try", "ir：空调换到指定的码，write content 为 上一套 / 下一套 / 重发 / 编号数字"},
             {"ir://send", "ir：write 发任意红外码（需确认），content 为「协议 地址 命令」如 NEC 0x04 0x08"},
         };
         for (const auto& item : items) {

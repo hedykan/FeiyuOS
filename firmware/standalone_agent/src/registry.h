@@ -61,6 +61,7 @@ public:
         String name;
         String value;
         String example;
+        String package;  // filled in by registry::hints()
     };
     virtual void hints(std::vector<Hint>& out) {}
 
@@ -119,6 +120,8 @@ String needs_secret(const String& tool, const cJSON* arguments);
 bool reversible(const String& tool, const cJSON* arguments);
 String execute(const String& tool, const cJSON* arguments, bool approved, const String& secret = String());
 std::vector<Package::Hint> hints();
+// A package's summary and usage (what the agent is told), for the help page.
+String package_help(const String& id);
 
 // Event hooks, dispatched to whichever package owns the target.
 String watch(const String& target, String& normalized);  // "" when accepted

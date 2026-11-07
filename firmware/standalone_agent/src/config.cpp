@@ -86,6 +86,8 @@ String load() {
             next.volume = constrain(json_int(ui, "volume", next.volume), 0, 100);
             const long font = json_int(ui, "terminal_font", next.terminal_font);
             next.terminal_font = font == 10 || font == 14 ? font : 12;
+            const long context_kb = json_int(ui, "context_kb", next.context_kb);
+            next.context_kb = context_kb == 32 || context_kb == 96 ? context_kb : 64;
         }
         if (cJSON* gps = json_obj(config, "gps")) next.gps_enabled = json_bool(gps, "enabled", true);
         if (cJSON* lora = json_obj(config, "lora")) {

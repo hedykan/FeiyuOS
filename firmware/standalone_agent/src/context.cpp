@@ -7,6 +7,7 @@
 #include <set>
 
 #include "common.h"
+#include "config.h"
 #include "storage.h"
 
 namespace vat::context {
@@ -217,7 +218,7 @@ bool owns_target(const String& target) {
     }
     return false;
 }
-std::size_t budget() { return on_card() ? kBudgetCard : kBudgetFlash; }
+std::size_t budget() { return on_card() ? config::get().context_kb * 1000u : kBudgetFlash; }
 
 // ---- window ------------------------------------------------------------------
 

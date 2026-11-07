@@ -1,3 +1,4 @@
+#include "web_token.h"
 #include "settings_page.h"
 
 #include <WiFi.h>
@@ -20,8 +21,8 @@
 namespace vat::ui::settings {
 namespace {
 
-enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal };
-const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal"};
+enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context };
+const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal", "webtoken", "context"};
 
 struct Field {
     String label;
@@ -44,8 +45,8 @@ struct MenuItem {
     View view;
 };
 const MenuItem kMenu[] = {{"WiFi", View::WifiList}, {"Key", View::Keys},   {"SSH 主机", View::Hosts},
-                          {"LoRa", View::Lora},     {"终端字号", View::Font}, {"存储", View::Storage},
-                          {"手机设置（扫码）", View::Portal}};
+                          {"LoRa", View::Lora},     {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
+                          {"手机设置（扫码）", View::Portal}, {"网页令牌", View::WebToken}};
 constexpr int kMenuCount = sizeof(kMenu) / sizeof(kMenu[0]);
 
 struct Provider {
@@ -55,6 +56,7 @@ struct Provider {
 const Provider kProviders[] = {{"qwen", "千问（语音识别）"}, {"deepseek", "DeepSeek（Agent）"}, {"openrouter", "OpenRouter（备用语音）"}, {"amap", "高德（位置）"}};
 constexpr int kProviderCount = 4;
 const uint8_t kFontSizes[] = {10, 12, 14};
+const uint8_t kContextKb[] = {32, 64, 96};
 
 bool is_open = false;
 String reason;
@@ -172,6 +174,8 @@ String section_title() {
         case View::Message: return "设置";
         case View::Host: return "设置 · " + host_id;
         case View::PublicKey: return "设置 · 设备公钥";
+        case View::Context: return "设置 · 对话记忆";
+        case View::WebToken: return "设置 · 网页令牌";
         default: return String("设置 · ") + kMenu[menu_index(view)].label;
     }
 }
@@ -209,8 +213,11 @@ void draw_page() {
                 String(cfg.profiles.size()) + " 台",
                 !lora::cap_present() ? String("无 Cap") : !cfg.lora.enabled ? String("关") : cfg.lora.frequency_mhz <= 0 ? String("缺频点") : String("开"),
                 String(cfg.terminal_font) + " 号",
+                String(cfg.context_kb) + " KB",
                 storage::kind() == "tf" ? String("TF 卡") : storage::degraded() ? String("板载（降级）") : String("板载"),
-                portal::active() ? String("热点开") : String("")};
+                portal::active() ? String("热点开") : String(""),
+                String("")};
+            static_assert(sizeof(values) / sizeof(values[0]) == kMenuCount, "one value per menu row");
             std::vector<Line> lines;
             for (int i = 0; i < kMenuCount; ++i) lines.push_back({kMenu[i].label, values[i]});
             list(g, lines);
@@ -308,6 +315,26 @@ void draw_page() {
             footer(g, "Enter 删除  ` 返回");
             break;
         }
+        case View::WebToken: {  // full height like the public key: no title bar over the code
+            const String token = web_token::token();
+            const String ip = net::ip();
+            g.fillScreen(kBg);
+            const int x = qr_panel(g, ip.isEmpty() ? token : "http://" + ip + "/?token=" + token);
+            g.setFont(&fonts::efontCN_10);
+            g.setTextColor(kAccent, kBg);
+            g.drawString("网页令牌", x, 2);
+            g.setTextColor(kText, kBg);
+            int y = 16;
+            for (const auto& line : wrap_text(g, token, kWidth - x - 2)) {
+                g.drawString(line, x, y);
+                y += 11;
+            }
+            g.setTextColor(kMuted, kBg);
+            g.drawString(ip.isEmpty() ? "未联网" : "手机扫码登录", x, y + 4);
+            if (!ip.isEmpty()) g.drawString(ip, x, y + 15);
+            g.drawString("R 换新令牌  ` 返回", x, kHeight - 12);
+            break;
+        }
         case View::PublicKey: {
             if (public_key.isEmpty()) {
                 String error;
@@ -336,6 +363,20 @@ void draw_page() {
             list(g, lora_lines());
             footer(g, "; . 选择  Enter 修改  ` 返回");
             break;
+        case View::Context: {
+            static const char* const kNames[] = {"短", "中（默认）", "长"};
+            std::vector<Line> lines;
+            for (int i = 0; i < 3; ++i) {
+                lines.push_back({String(kNames[i]) + "  " + String(kContextKb[i]) + " KB",
+                                 config::get().context_kb == kContextKb[i] ? "当前" : ""});
+            }
+            list(g, lines);
+            g.setTextColor(kMuted, kBg);
+            g.drawString("保留原文的对话量；越长记得越多，", kPad, kTop + 3 * kLine + 6);
+            g.drawString("每轮也越慢、越费 token", kPad, kTop + 4 * kLine + 6);
+            footer(g, "; . 选择  Enter 使用  ` 返回");
+            break;
+        }
         case View::Font: {
             std::vector<Line> lines;
             for (const uint8_t size : kFontSizes) {
@@ -426,6 +467,7 @@ void open_wifi_list() {
     for (std::size_t i = 0; i < networks.size(); ++i) {
         if (networks[i].ssid == net::ssid()) cursor = i;
     }
+    dirty = true;  // show the result now, not at the next key
 }
 
 void connect(const String& ssid, const String& password, bool from_form) {
@@ -511,6 +553,7 @@ int item_count() {
         case View::Hosts: return config::get().profiles.size() + 2;
         case View::Lora: return 4;
         case View::Font: return 3;
+        case View::Context: return 3;
         default: return 1;
     }
 }
@@ -553,6 +596,10 @@ void enter() {
                 portal_clients = -1;
                 return go(View::Portal);
             }
+            if (to == View::Context) {
+                const uint8_t kb = config::get().context_kb;
+                return go(View::Context, kb == 32 ? 0 : kb == 96 ? 2 : 1);
+            }
             if (to == View::Font) {
                 const uint8_t f = config::get().terminal_font;
                 return go(View::Font, f == 10 ? 0 : f == 14 ? 2 : 1);
@@ -578,6 +625,11 @@ void enter() {
         case View::Lora: return lora_enter();
         case View::Font:
             settings_store::set_terminal_font(kFontSizes[cursor]);
+            return;
+        case View::Context:
+            config::get().context_kb = kContextKb[cursor];
+            config::save_ui_number("context_kb", kContextKb[cursor]);
+            dirty = true;
             return;
         default: return;
     }
@@ -630,6 +682,13 @@ void handle(const Keyboard_Class::KeysState& state) {
     if (view == View::WifiList && state.fn && has_char(state, 'r')) return open_wifi_list();
     if (view == View::Portal) {
         if (has_char(state, ';') || has_char(state, '.')) portal_step = 1 - portal_step;
+        return;
+    }
+    if (view == View::WebToken) {
+        if (has_char(state, 'r')) {
+            web_token::regenerate();
+            dirty = true;
+        }
         return;
     }
     const int count = item_count();

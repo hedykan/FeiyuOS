@@ -88,7 +88,9 @@ cJSON* json_arr(const cJSON* object, const char* key) {
 String json_print(const cJSON* value) {
     if (!value) return "null";
     char* printed = cJSON_PrintUnformatted(value);
-    if (!printed) return "null";
+    // Out of memory: "" (not "null", which callers cannot tell from a real
+    // null and would send on as a message).
+    if (!printed) return "";
     String result(printed);
     cJSON_free(printed);
     return result;

@@ -37,6 +37,19 @@ String fit(Gfx& g, const String& text, int max_px) {
     return out + "…";
 }
 
+String fit_tail(Gfx& g, const String& text, int max_px) {
+    if (g.textWidth(text) <= max_px) return text;
+    const int ellipsis = g.textWidth("…");
+    int start = static_cast<int>(text.length());
+    while (start > 0) {
+        int prev = start - 1;
+        while (prev > 0 && (static_cast<unsigned char>(text[prev]) & 0xC0) == 0x80) --prev;  // whole UTF-8 characters
+        if (g.textWidth(text.substring(prev)) + ellipsis > max_px) break;
+        start = prev;
+    }
+    return "…" + text.substring(start);
+}
+
 int qr_panel(Gfx& g, const String& data) {
     const int side = kHeight - 4;
     g.fillRect(0, 0, side + 4, kHeight, TFT_WHITE);

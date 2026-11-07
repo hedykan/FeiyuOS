@@ -7,10 +7,11 @@
 set -u
 DEVICE=${1:-${VAT_DEVICE:-http://vat.local}}
 LIMIT=${2:-90}
+TOKEN=${VAT_TOKEN:-$(cat "$HOME/.config/feiyuos/device_token" 2>/dev/null || true)}
 start=$(date +%s)
 while :; do
     waited=$(( $(date +%s) - start ))
-    if body=$(curl -s -m 3 "$DEVICE/api/status") && python3 -c '
+    if body=$(curl -s -m 3 -H "Authorization: Bearer $TOKEN" "$DEVICE/api/status") && python3 -c '
 import json, sys
 d = json.loads(sys.argv[1], strict=False)
 sys.exit(0 if d.get("config_ready") and d.get("uptime_s", 1 << 30) <= int(sys.argv[2]) + 5 else 1)

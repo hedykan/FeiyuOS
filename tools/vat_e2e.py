@@ -11,6 +11,7 @@ point at, e.g.:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import os
@@ -28,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests" / "cases"
 PCM = ROOT / "tests" / "pcm"
-ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10"]
+ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"]
 # quick: a representative case or two per phase (~3 min, after every flash);
 # normal: impacted phases (auto) or a named list; all: everything (release).
 TIER = "normal"
@@ -42,6 +43,9 @@ ONLY: list[str] = []  # --only: substrings of case ids; empty = every case
 # What each changed path puts at risk (docs/E2E "改了什么跑什么").  S0 always runs.
 # Longest prefix wins; a path that matches nothing selects nothing.
 IMPACT = {
+    "firmware/standalone_agent/src/packages/ui_package.cpp": ["s11"],
+    "firmware/standalone_agent/src/web": ["s0", "s11"],
+    "firmware/standalone_agent/src/arena": ["s11"],
     "firmware/standalone_agent/src/ops_lora.": ["s9"],
     "firmware/standalone_agent/src/ops_gps.": ["s9"],
     "firmware/standalone_agent/src/packages/gps_package": ["s9"],
@@ -115,6 +119,8 @@ class Device:
     def __init__(self, base: str) -> None:
         self.base = base.rstrip("/")
         self.expected_reboots = 0  # reboots the script itself requested
+        token_file = os.path.expanduser("~/.config/feiyuos/device_token")
+        self.token = os.environ.get("VAT_TOKEN") or (open(token_file).read().strip() if os.path.exists(token_file) else "")
 
     def _request(self, method: str, path: str, data: bytes | None = None,
                  headers: dict | None = None, timeout: float = 15, attempts: int = 6):
@@ -122,7 +128,7 @@ class Device:
         for attempt in range(attempts):
             try:
                 request = urllib.request.Request(self.base + path, data=data, method=method,
-                                                 headers=headers or {})
+                                                 headers={**(headers or {}), "Authorization": f"Bearer {self.token}"})
                 with urllib.request.urlopen(request, timeout=timeout) as response:
                     return response.status, response.read()
             except urllib.error.HTTPError as exc:
@@ -149,9 +155,9 @@ class Device:
     def status(self) -> dict:
         for _ in range(30):
             status = self.get_json("/api/status")
-            if not status.get("low_memory"):
+            if isinstance(status, dict) and "error" not in status and not status.get("low_memory"):
                 return status
-            time.sleep(0.5)  # a TLS handshake is in progress; full status comes back after it
+            time.sleep(0.5)  # a TLS handshake is in progress (or the heap is short); full status comes back after it
         return status
 
     def read_file(self, path: str, tail: int = 0) -> str:
@@ -364,6 +370,47 @@ TEST_BOX = "vat-e2e-box"           # docker: linuxserver/openssh-server on :2222
 TEST_BOX_PASSWORD = "vat-e2e-pass"  # throwaway credential of the disposable container
 
 
+PROFILE_TEMPLATE = ROOT / "tests" / "e2e_profiles.example.json"
+
+
+def local_ip_towards(device_url: str) -> str:
+    """This host's address on the device's network (the source of a route to it)."""
+    import socket
+    target = urllib.parse.urlparse(device_url).hostname or ""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect((target, 80))  # no packet is sent: this only picks the route
+        return s.getsockname()[0]
+
+
+def sync_profiles(device: Device, device_url: str) -> str:
+    """Test profiles of the template whose host is <this-host-ip> follow this
+    host's current LAN address on the device (a network change otherwise
+    breaks S2, S4 and S7).  Only private addresses are rewritten, so a profile
+    set by hand to a public address (a tunnel) is left alone; keys are not
+    touched.  Returns a line for the log."""
+    template = json.loads(PROFILE_TEMPLATE.read_text())
+    ids = {p["id"] for p in template["profiles"] if p.get("host") == "<this-host-ip>"}
+    ip = local_ip_towards(device_url)
+    text = device.read_file("/vat/ssh/profiles.json")
+    if not text:
+        return "profiles: none on the device"
+    data = json.loads(text)
+    changed = []
+    for p in data.get("profiles", []):
+        try:
+            private = ipaddress.ip_address(p.get("host", "")).is_private
+        except ValueError:
+            private = False  # a host name: leave it
+        if p.get("id") in ids and private and p["host"] != ip:
+            p["host"] = ip
+            changed.append(p["id"])
+    if not changed:
+        return f"profiles: test hosts already at {ip}"
+    device.write_file("/vat/ssh/profiles.json", json.dumps(data, ensure_ascii=False, indent=2))
+    device.post("/api/reload")
+    return f"profiles: {', '.join(changed)} -> {ip}"
+
+
 def phase_s0(device: Device, report: Report) -> None:
     status = device.status()
     missing = [p for p in REQUIRED_PROFILES if p not in status.get("profiles", "").split(", ")]
@@ -413,7 +460,11 @@ def settings_portal(device: Device, report: Report) -> None:
     if not wanted("settings"):
         return
     device.key("fn+w")
-    screen = device.key(";")                  # last menu item: 手机设置
+    device.key(";")                           # last menu item: 网页令牌
+    screen = device.key("enter")
+    token_view = screen.get("settings", {}).get("view") == "webtoken"
+    device.key("esc")
+    screen = device.key(";")                  # the one before: 手机设置
     screen = device.key("enter")
     opened = screen.get("settings", {}).get("view") == "portal"
     status = device.status()
@@ -428,6 +479,7 @@ def settings_portal(device: Device, report: Report) -> None:
     closed = not device.key("esc")["setup"]
     report.add("S0", "settings_portal", opened and closed and hints_ok and not leaked_key and not leaked_status,
                f"opened={opened} closed={closed} hints_ok={hints_ok} key_leak={leaked_key} pw_in_status={leaked_status}")
+    report.add("S0", "settings_web_token_view", token_view)
 
 
 def settings_forms(device: Device, report: Report) -> None:
@@ -725,10 +777,10 @@ def phase_s4(device: Device, report: Report) -> None:
         for _ in range(20):
             time.sleep(4)
             screen = device.job("observe").get("reply", "")
-            if "Voice Agent Terminal" in screen:
+            if "FeiyuOS" in screen or "Voice Agent Terminal" in screen:
                 break
         report.add("S4", f"agent_{name}_start", started, record.get("reply", "")[:120])
-        report.add("S4", f"agent_{name}_answer", "Voice Agent Terminal" in screen, screen[-160:])
+        report.add("S4", f"agent_{name}_answer", "FeiyuOS" in screen or "Voice Agent Terminal" in screen, screen[-160:])
         record = device.text("中断当前 Agent。")
         report.add("S4", f"agent_{name}_interrupt",
                    any(c["arguments"].get("action") == "interrupt" for c in operations(record)),
@@ -837,6 +889,45 @@ def ir_confirm_flow(device: Device, report: Report) -> None:
     device.post("/api/delete", path=path)
 
 
+def ac_choose_flow(device: Device, report: Report) -> None:
+    """ir AC: pick the code set by hand (previous / next / number / resend), not only forward.  Profile removed after."""
+    if not wanted("ir"):
+        return
+    name, path = "e2e空调", "/vat/things/ir/e2e空调.json"
+    device.post("/api/delete", path=path)
+
+    def say(target: str, content: str) -> str:
+        return reply_text(tool_call(device, "write", f"ir://{name}/{target}", content))
+
+    def trying() -> int:
+        try:
+            return json.loads(device.read_file(path)).get("trying", -1)
+        except Exception:  # noqa: BLE001 - missing profile reads as no trial
+            return -1
+
+    steps = []
+    say("ac", "格力 开 制冷 26")  # not the AUX units on the test bench
+    steps.append(("start", trying(), 0))
+    first_prev = say("try", "上一套")
+    steps.append(("prev_at_first", trying(), 0))
+    say("try", "下一套")
+    steps.append(("next", trying(), 1))
+    say("try", "5")
+    steps.append(("number_5", trying(), 4))
+    say("try", "上一套")
+    steps.append(("prev", trying(), 3))
+    say("try", "重发")
+    steps.append(("again", trying(), 3))
+    out_of_range = say("try", "999")
+    steps.append(("out_of_range", trying(), 3))
+    say("confirm", "no")
+    steps.append(("confirm_no_moves_on", trying(), 4))
+    ok = all(got == want for _, got, want in steps) and "前面没有了" in first_prev and "之间" in out_of_range
+    report.add("S6", "ac_choose_code_set", ok,
+               " ".join(f"{k}={got}/{want}" for k, got, want in steps) + f" first_prev={first_prev[:30]!r}")
+    device.post("/api/delete", path=path)
+
+
 def files_timer_grove(device: Device, report: Report) -> None:
     """files (card, secrets refused), grove scan, a 10 s reminder that fires as an overlay."""
     if not wanted("files_timer"):
@@ -941,6 +1032,7 @@ def phase_s6(device: Device, report: Report) -> None:
     hardware_controls(device, report)
     files_timer_grove(device, report)
     ir_confirm_flow(device, report)
+    ac_choose_flow(device, report)
     if quick():
         return
 
@@ -1213,7 +1305,9 @@ def phase_s8(device: Device, report: Report) -> None:
     device.resolve_all(approve=False)
     searched = any(c["arguments"].get("target", "").startswith("web://search") for c in record.get("calls", []))
     report.add("S8", "web_search", record.get("status") == "done" and searched and "docs.m5stack.com" in everything(record),
-               record.get("reply", "")[:100])
+               f"status={record.get('status')} error={record.get('error', '')[:80]} "
+               f"calls={[c['arguments'].get('target', '')[:40] for c in record.get('calls', [])]} "
+               f"reply={record.get('reply', '')[:80]!r}")
     record = device.text("打开第 1 个结果，这页写的电池容量是多少？", timeout=180)
     device.resolve_all(approve=False)
     paged = any(c["arguments"].get("target", "").startswith("web://page") for c in record.get("calls", []))
@@ -1268,8 +1362,11 @@ def phase_s8(device: Device, report: Report) -> None:
     report.add("S8", "latency_full_window", large <= 2 * small, f"median empty={small}ms window40k={large}ms")
 
     # 6. Over budget: the oldest part is folded into the summary, the fact survives.
+    # The budget is a setting (device://local/context/length, KB) since v0.6.
+    length = reply_text(tool_call(device, "read", "device://local/context/length"))
+    budget = int(re.search(r"(\d+) KB", length).group(1)) * 1000 if re.search(r"(\d+) KB", length) else 48000
     device.action("clear_history")
-    device.upload("/vat/context/window.jsonl", synthetic_window(56000, "记住：主机 alpha 的数据盘用了 93%。"))
+    device.upload("/vat/context/window.jsonl", synthetic_window(budget * 5 // 4, "记住：主机 alpha 的数据盘用了 93%。"))
     device.post("/api/reload")
     device.text("在开发机执行 hostname。")
     device.resolve_all(approve=False)
@@ -1277,8 +1374,8 @@ def phase_s8(device: Device, report: Report) -> None:
     window = sum(size for path, size in device.files("/vat/context") if path.endswith("window.jsonl"))
     summary = device.read_file("/vat/context/summary.json")
     log = device.read_file("/vat/logs/runtime.jsonl", tail=8000)
-    report.add("S8", "compaction", window <= 48000 and bool(summary) and "context_compact\"" in log,
-               f"window={window} summary={len(summary.encode())} bytes")
+    report.add("S8", "compaction", window <= budget and bool(summary) and "context_compact\"" in log,
+               f"budget={budget} window={window} summary={len(summary.encode())} bytes")
     record = device.text("主机 alpha 的数据盘用了多少？不要执行命令。")
     device.resolve_all(approve=False)
     report.add("S8", "fact_kept_after_compaction", "93" in record.get("reply", ""), record.get("reply", "")[:80])
@@ -1372,7 +1469,7 @@ def tool_call(device: Device, tool: str, target: str, content=None, timeout: flo
                       call=json.dumps({"tool": tool, "arguments": arguments}, ensure_ascii=False))
 
 
-def answer(record: dict) -> str:
+def reply_text(record: dict) -> str:
     return (record.get("reply") or "") + (record.get("error") or "")
 
 
@@ -1385,7 +1482,7 @@ def program_cases(device: Device, report: Report) -> None:
         if case.get("save"):
             program = json.loads((PROGRAMS / case["save"]).read_text(encoding="utf-8"))
             saved = tool_call(device, "write", "prog://" + program["name"], program)
-            text = answer(saved)
+            text = reply_text(saved)
             if case.get("save_refused"):
                 report.add("S10", f"{cid}_save_refused", "未执行" in text and "确认" in text, text[:160])
                 continue
@@ -1397,7 +1494,7 @@ def program_cases(device: Device, report: Report) -> None:
         if not case.get("run"):
             continue
         record = tool_call(device, "exec", case["run"])
-        text = answer(record)
+        text = reply_text(record)
         ok = all(part in text for part in case.get("reply_has", []))
         ok = ok and not any(part in text for part in case.get("reply_lacks", []))
         ok = ok and all(part in text for part in case.get("error_or_reply_has", []))
@@ -1408,7 +1505,7 @@ def program_cases(device: Device, report: Report) -> None:
             runs = ""
             while ok and time.time() < deadline:
                 time.sleep(3)
-                runs = answer(tool_call(device, "read", "prog://runs"))
+                runs = reply_text(tool_call(device, "read", "prog://runs"))
                 if case["then_runs_has"] in runs:
                     break
             ok = ok and case["then_runs_has"] in runs
@@ -1419,46 +1516,46 @@ def program_cases(device: Device, report: Report) -> None:
 def trigger_cases(device: Device, report: Report) -> None:
     # One-off: fires by itself, runs a program, then disappears from the list.
     if wanted("trigger_once"):
-        made = answer(tool_call(device, "write", "trigger://new",
+        made = reply_text(tool_call(device, "write", "trigger://new",
                                 {"when": "time://in/8s", "run": {"exec": "prog://测试-灯"}}))
         tid = re.search(r"#(\d+)", made)
         report.add("S10", "trigger_once_created", "已新建触发" in made and bool(tid), made[:160])
         time.sleep(20)
-        runs = answer(tool_call(device, "read", "prog://runs"))
-        listed = answer(tool_call(device, "read", "trigger://list"))
+        runs = reply_text(tool_call(device, "read", "prog://runs"))
+        listed = reply_text(tool_call(device, "read", "trigger://list"))
         fired = bool(tid) and f"触发 #{tid.group(1)} 完成" in runs
         gone = bool(tid) and f"#{tid.group(1)} " not in listed
         report.add("S10", "trigger_once_fired_and_removed", fired and gone, (runs + " | " + listed)[:200])
 
     # Daily: pause / resume without confirmation; deleting needs the user.
     if wanted("trigger_daily"):
-        made = answer(tool_call(device, "write", "trigger://new",
+        made = reply_text(tool_call(device, "write", "trigger://new",
                                 {"when": "time://every/03:33", "run": {"write": "device://local/led", "content": "off"}}))
         tid = re.search(r"#(\d+)", made)
         report.add("S10", "trigger_daily_created", "每天 03:33" in made and bool(tid), made[:160])
         if not tid:
             return
         n = tid.group(1)
-        paused = answer(tool_call(device, "write", f"trigger://{n}/pause"))
-        resumed = answer(tool_call(device, "write", f"trigger://{n}/resume"))
+        paused = reply_text(tool_call(device, "write", f"trigger://{n}/pause"))
+        resumed = reply_text(tool_call(device, "write", f"trigger://{n}/resume"))
         report.add("S10", "trigger_pause_resume", "已停用" in paused and "已停用" not in resumed, (paused + " | " + resumed)[:160])
-        refused = answer(tool_call(device, "write", f"trigger://{n}/delete"))
+        refused = reply_text(tool_call(device, "write", f"trigger://{n}/delete"))
         report.add("S10", "trigger_delete_needs_confirm", "未执行" in refused, refused[:160])
         device.action("clear_history")
         device.text(f"删除触发 #{n}")
         device.resolve_all(approve=True)
-        listed = answer(tool_call(device, "read", "trigger://list"))
+        listed = reply_text(tool_call(device, "read", "trigger://list"))
         report.add("S10", "trigger_deleted_after_confirm", f"#{n} " not in listed, listed[:160])
 
 
 def program_reads(device: Device, report: Report) -> None:
-    listed = answer(tool_call(device, "read", "prog://list"))
+    listed = reply_text(tool_call(device, "read", "prog://list"))
     report.add("S10", "list_shows_signatures", "测试-被调(x, y=默认)" in listed and "调用：测试-被调" in listed, listed[:200])
-    outline = answer(tool_call(device, "read", "prog://测试-调用"))
+    outline = reply_text(tool_call(device, "read", "prog://测试-调用"))
     report.add("S10", "outline", "运行 测试-被调" in outline and "→ r" in outline, outline[:200])
-    helped = answer(tool_call(device, "read", "prog://help"))
+    helped = reply_text(tool_call(device, "read", "prog://help"))
     report.add("S10", "help_examples", "【例子】" in helped and "trigger://new" in helped, helped[:80])
-    refused = answer(tool_call(device, "write", "prog://测试-坏/delete"))
+    refused = reply_text(tool_call(device, "write", "prog://测试-坏/delete"))
     report.add("S10", "delete_needs_confirm", "未执行" in refused, refused[:160])
 
 
@@ -1478,7 +1575,7 @@ def program_intents(device: Device, report: Report) -> None:
                  for c in record.get("calls", [])]
         made = any(t == "trigger://new" and "time://every/03:44" in str(content) for _, t, content in calls)
         report.add("S10", "intent_daily_trigger", made, str(calls)[:200])
-        listed = answer(tool_call(device, "read", "trigger://list"))
+        listed = reply_text(tool_call(device, "read", "trigger://list"))
         found = re.search(r"#(\d+) 每天 03:44", listed)
         if found:  # clean up: deleting needs the user's confirmation
             device.action("clear_history")
@@ -1498,15 +1595,98 @@ def phase_s10(device: Device, report: Report) -> None:
     tool_call(device, "write", "device://local/led", "off")
 
 
+def phase_s11(device: Device, report: Report) -> None:
+    """v0.6: the web token, the arena report, the context length, ui panels
+    (choice, refused fields, choice as a trigger) and local apps (Fn+A)."""
+    device.wait_idle()
+
+    def status_code(headers: dict) -> int:
+        try:
+            request = urllib.request.Request(device.base + "/api/status", headers=headers)
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+    report.add("S11", "token_required", status_code({}) == 401)
+    report.add("S11", "token_wrong_refused", status_code({"Authorization": "Bearer " + "A" * 26}) == 401)
+    report.add("S11", "token_accepted", status_code({"Authorization": f"Bearer {device.token}"}) == 200)
+    try:
+        urllib.request.urlopen(device.base + "/m", timeout=10)
+        phone_code = 200
+    except urllib.error.HTTPError as exc:
+        phone_code = exc.code
+    report.add("S11", "phone_page_refused_without_token", phone_code == 401, str(phone_code))
+
+    arena = device.status().get("arena") or {}
+    leases = [lease.get("name") for lease in arena.get("leases", [])]
+    report.add("S11", "arena_reported", arena.get("floor") == 48000 and "tls_reserve" in leases,
+               json.dumps(arena, ensure_ascii=False)[:160])
+    text = reply_text(tool_call(device, "read", "device://local/context/length"))
+    report.add("S11", "context_length_read", "KB" in text, text[:60])
+
+    panel = {"title": "E2E 面板", "lines": ["选一个"], "choices": ["甲", "乙", "丙"]}
+    text = reply_text(tool_call(device, "write", "ui://panel/e2e面板", json.dumps(panel, ensure_ascii=False)))
+    report.add("S11", "panel_shown", "已显示面板" in text, text[:60])
+    time.sleep(2)
+    report.add("S11", "panel_on_screen", device.status()["screen"].get("overlay") == "panel",
+               str(device.status()["screen"].get("overlay")))
+    device.key(".")
+    device.key("enter")
+    time.sleep(1)
+    text = reply_text(tool_call(device, "read", "ui://panel/e2e面板"))
+    report.add("S11", "panel_choice_read", "乙" in text, text[:60])
+    text = reply_text(tool_call(device, "write", "ui://panel/e2e坏", json.dumps({"title": "x", "script": "rm"})))
+    report.add("S11", "panel_unknown_field_refused", "不认识的字段" in text, text[:60])
+
+    # A choice is an event: a trigger runs a step with {event.choice}.
+    trigger = {"when": "ui://panel/e2e触发", "run": {"write": "memory://notes", "mode": "append",
+                                                    "content": "E2E 面板选了 {event.choice}"}}
+    text = reply_text(tool_call(device, "write", "trigger://new", json.dumps(trigger, ensure_ascii=False)))
+    trigger_id = re.search(r"#?(\d+)", text)
+    report.add("S11", "panel_trigger_saved", "触发" in text and trigger_id is not None, text[:80])
+    tool_call(device, "write", "ui://panel/e2e触发", json.dumps({"choices": ["红", "绿"]}, ensure_ascii=False))
+    time.sleep(2)
+    device.key("enter")
+    noted = False
+    for _ in range(20):
+        time.sleep(1)
+        if "E2E 面板选了 红" in device.read_file("/vat/memory/notes.txt", tail=2000):
+            noted = True
+            break
+    report.add("S11", "panel_choice_runs_trigger", noted)
+    if trigger_id:
+        device.wait_idle()
+        device.post("/api/job", kind="call", call=json.dumps(
+            {"tool": "write", "arguments": {"target": f"trigger://{trigger_id.group(1)}/pause", "confirm_required": False}}))
+
+    app = {"title": "电量", "source": {"read": "device://local/battery", "every": "10s"}}
+    text = reply_text(tool_call(device, "write", "ui://apps/e2e应用", json.dumps(app, ensure_ascii=False)))
+    report.add("S11", "app_saved", "应用" in text, text[:60])
+    text = reply_text(tool_call(device, "read", "ui://apps"))
+    report.add("S11", "app_listed", "e2e应用" in text, text[:80])
+    device.key("fn+a")
+    time.sleep(2.5)
+    menu = device.status()["screen"].get("overlay")
+    device.key("enter")
+    time.sleep(13)
+    opened = device.status()["screen"].get("overlay")
+    device.key("esc")
+    report.add("S11", "apps_menu_fn_a_open", menu == "panel" and opened == "panel", f"{menu} -> {opened}")
+    device.post("/api/delete", path="/vat/things/apps/e2e应用.json")
+    report.add("S11", "heap_after", device.status().get("free_heap", 0) > 60000, str(device.status().get("free_heap")))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default=os.environ.get("VAT_DEVICE", "http://vat.local"))
     parser.add_argument("--phases", default="auto",
                         help="'quick' (a case or two per phase, ~3 min), 'auto' (phases impacted by "
-                             "git diff --since), 'all' (release), or a comma list of s0,s1,s2,s2i,s3..s10")
+                             "git diff --since), 'all' (release), or a comma list of s0,s1,s2,s2i,s3..s11")
     parser.add_argument("--since", default="HEAD~1", help="git ref for --phases auto (default HEAD~1)")
     parser.add_argument("--only", default="", help="comma list of case-id substrings for the S1/S2 matrices")
     parser.add_argument("--out", default=str(ROOT / "logs"))
+    parser.add_argument("--no-sync-profiles", action="store_true",
+                        help="leave the device's test SSH profiles as they are (default: point them at this host)")
     args = parser.parse_args()
     ONLY.extend(part for part in args.only.split(",") if part)
     global TIER
@@ -1524,6 +1704,8 @@ def main() -> int:
     seconds = {}
     device = Device(args.device)
     report = Report()
+    if not args.no_sync_profiles:
+        print(sync_profiles(device, args.device), flush=True)
     started = time.time()
     try:
         for phase in phases:

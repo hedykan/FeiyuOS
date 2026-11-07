@@ -17,7 +17,7 @@ namespace vat::agent {
 namespace {
 
 constexpr int kMaxDiscoverCalls = 2;
-constexpr std::size_t kDiscoverResultBytes = 2000;  // the package list grows with packages
+constexpr std::size_t kDiscoverResultBytes = 2600;  // the package list grows with packages
 constexpr int kMaxCallsPerRound = 3;
 constexpr std::size_t kLegacyHistoryChars = 8000;  // reading the pre-v0.4 history once
 constexpr std::size_t kMaxReplyBytes = 1500;
@@ -240,6 +240,9 @@ struct Task {
     unsigned long model_ms = 0;  // time in model requests: the task's budget
     unsigned long tool_ms = 0;   // time running tools: not budgeted (each has its own timeout)
     bool broken = false;      // a message failed to serialise (low memory)
+    String last_error;        // the latest ERROR a tool returned
+    String last_error_call;   // the call (name + arguments) that returned it
+    bool stuck = false;       // the same call failed the same way twice: stop retrying
 };
 Task task;
 
@@ -271,7 +274,12 @@ cJSON* ask_model(const String& tool_choice, String& error, long budget_ms) {
     const std::size_t summary_bytes = storage::size(context::kSummary);
     const std::size_t window_bytes = context::window_bytes();
     const std::size_t window_from = context::tail_offset(context::budget() * 3 / 2);
-    const String user = "," + to_json(chat_message("user", task.transcript));
+    const String user_json = to_json(chat_message("user", task.transcript));
+    if (user_json.isEmpty() || user_json == "null") {  // out of memory: never send a broken request
+        error = "设备内存不足，这一轮没有发出，请重试";
+        return nullptr;
+    }
+    const String user = "," + user_json;
     static constexpr char kTail[] = "],\"tools\":";
     // System prompt: core rules + each package's usage, all streamed from flash.
     std::vector<net::Segment> parts = {
@@ -407,6 +415,33 @@ void record_result(const QueuedCall& call, const String& decision, const String&
     }
     task.calls.push_back(record);
     task_message(tool_result(call.id, utf8_sanitize(in_context)));
+    if (result.startsWith("ERROR")) {
+        const String key = call.name + call.arguments;
+        if (key == task.last_error_call && result == task.last_error) task.stuck = true;
+        task.last_error = result;
+        task.last_error_call = key;
+    } else {
+        task.last_error_call = "";
+    }
+}
+
+// What went wrong, for a reply that has nothing better to say.
+String failure_reply(const String& why) {
+    String error = task.last_error;
+    if (error.startsWith("ERROR:")) error = error.substring(6);
+    error.trim();
+    return "这次没做成：" + (error.isEmpty() ? why : error + "（" + why + "）");
+}
+
+// DeepSeek sometimes writes a tool call into the text as markup
+// (<｜｜DSML｜｜ calls>…) when it may not call tools: never show that.
+String clean_reply(String content) {
+    const int mark = content.indexOf("DSML");
+    if (mark < 0) return content;
+    const int open = content.lastIndexOf('<', mark);
+    content = content.substring(0, open >= 0 ? open : mark);
+    content.trim();
+    return content.isEmpty() ? failure_reply("步数用完了还想继续调用工具") : content;
 }
 
 // Runs queued calls of the current round.  Returns true when it paused.
@@ -467,6 +502,7 @@ Outcome advance(const String* secret, const Progress& progress) {
         const bool stop = drain_queue(paused, secret, progress);
         task.tool_ms += millis() - tools_from;
         if (stop) return paused;
+        if (task.stuck) return finish(failure_reply("同样的调用连续两次出错，已停止重试"));
         secret = nullptr;
         if (cancel::requested()) return fail("已取消");
         // Only model time is budgeted; tools, and waiting for the user, are not.
@@ -486,7 +522,7 @@ Outcome advance(const String* secret, const Progress& progress) {
             String content = json_str(message, "content");
             content.trim();
             cJSON_Delete(message);
-            return finish(content);
+            return finish(clean_reply(content));
         }
         // Queue this round's calls (at most three).
         cJSON* assistant = cJSON_CreateObject();

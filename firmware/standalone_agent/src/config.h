@@ -66,6 +66,9 @@ struct Config {
     uint32_t screen_timeout_seconds = 60;
     uint8_t volume = 40;
     uint8_t terminal_font = 12;  // SSH page: 10 | 12 | 14
+    // Conversation kept verbatim with a card, in KB (32 | 64 | 96); older
+    // turns are summarised.  Longer costs tokens and time every round.
+    uint8_t context_kb = 64;
     // ssh
     std::vector<SshProfile> profiles;
     String default_profile;

@@ -7,6 +7,7 @@
 #include <math.h>
 #include <vector>
 
+#include "arena.h"
 #include "common.h"
 #include "net.h"
 #include "storage.h"
@@ -22,7 +23,7 @@ constexpr std::size_t kWarmupChunks = 4;
 constexpr std::size_t kFadeSamples = 64;
 constexpr unsigned long kMaxRecordMsTf = 30000;
 constexpr unsigned long kMaxRecordMsFlash = 20000;
-constexpr std::size_t kMinRecordSamples = kSampleRate / 5;
+constexpr std::size_t kMinRecordSamples = kSampleRate * 3 / 10;  // 0.3 s: a tap is not speech
 
 int16_t audio_chunk[kChunkSamples];
 
@@ -110,13 +111,16 @@ bool record(bool (*held)()) {
     std::size_t ram_budget = 0;
     if (!to_card) {
         net::release_reserve();  // the TLS reserve is idle while recording
-        const std::size_t free_heap = ESP.getFreeHeap();
-        ram_budget = free_heap > 48000 ? std::min<std::size_t>(free_heap - 48000, 160000) : 0;
+        ram_budget = std::min<std::size_t>(arena::room(), 160000);
+        if (!arena::take("recording", ram_budget)) ram_budget = 0;
     }
     auto release_blocks = [&]() {
         for (auto* block : blocks) free(block);
         blocks.clear();
-        if (!to_card) net::restore_reserve();
+        if (!to_card) {
+            arena::give_back("recording");
+            net::restore_reserve();
+        }
     };
 
     M5Cardputer.Mic.begin();

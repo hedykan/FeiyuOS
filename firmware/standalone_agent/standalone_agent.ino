@@ -14,6 +14,7 @@
 #include "src/config.h"
 #include "src/context.h"
 #include "src/net.h"
+#include "src/web_token.h"
 #include "src/ops_gps.h"
 #include "src/ops_lora.h"
 #include "src/ops_wifi.h"
@@ -24,6 +25,7 @@
 #include "src/registry.h"
 #include "src/storage.h"
 #include "src/ui.h"
+#include "src/ui_splash.h"
 #include "src/web.h"
 #include "src/worker.h"
 
@@ -41,49 +43,89 @@ void setup() {
     M5Cardputer.Display.setBrightness(128);
     vat::local::probe_hardware();
     // The microphone is started only while recording (see ui.cpp record()).
-    vat::ui::show_boot("BOOT", "正在挂载存储…", TFT_YELLOW);
+    constexpr int kBootSteps = 12;
+    vat::ui::splash::begin();  // bubbles until the card is mounted
+    vat::ui::splash::step("card", 0, kBootSteps);
 
     if (!vat::storage::begin()) {
-        vat::ui::show_boot("STORAGE ERROR", "TF 与板载 Flash 均不可用", TFT_RED);
+        vat::ui::splash::problem("TF 卡和板载存储都不可用");
         return;
     }
+    vat::ui::splash::card_ready();  // the mascot comes in
+    vat::ui::splash::step("config", 1, kBootSteps);
     const String problem = vat::config::load();
+    // For tools/device_token.sh: whoever can reach the USB port can reflash anyway.
+    Serial.println("{\"event\":\"web_token\",\"detail\":\"" + vat::web_token::token() + "\"}");
     M5Cardputer.Display.setBrightness(vat::config::get().brightness);
     vat::runtime_event("boot", vat::storage::kind() + " " + (problem.isEmpty() ? String("config ok") : problem) +
                                    " reset=" + vat::reset_reason());
 
+    // Free heap after each step of the boot (boot_heap event at ready): what
+    // every subsystem keeps resident.
+    String heap_steps;
+    uint32_t heap_before = ESP.getFreeHeap();
+    int boot_step = 2;
+    const auto heap_mark = [&](const char* step) {
+        static const char* const kNext[][2] = {{"registry", "context"}, {"context", "agent"},
+                                               {"agent", "radio"},       {"lora", "radio"}, {"gps", "worker"},
+                                               {"worker", "wifi"},      {"wifi", "time"},  {"timer", "ssh"},
+                                               {"ssh", "web"},          {"web", "ready"},  {"ready", "ready"}};
+        for (const auto& next : kNext) {
+            if (strcmp(next[0], step) == 0) vat::ui::splash::step(next[1], ++boot_step, kBootSteps);
+        }
+        const uint32_t now = ESP.getFreeHeap();
+        heap_steps += String(heap_steps.isEmpty() ? "" : " ") + step + "=" + String((static_cast<int32_t>(heap_before) - static_cast<int32_t>(now)) / 1024.0f, 1);
+        heap_before = now;
+    };
+    vat::ui::splash::step("packages", boot_step, kBootSteps);
     vat::registry::register_builtin();
+    heap_mark("registry");
     vat::ui::begin();
+    heap_mark("ui");
     vat::context::begin();
+    heap_mark("context");
     vat::agent::begin();
+    heap_mark("agent");
     const String lora_state = vat::lora::begin();  // stays off (radio in reset) unless enabled
     if (!lora_state.isEmpty()) vat::runtime_event("lora", lora_state);
+    heap_mark("lora");
     const String gps_state = vat::gps::begin();
+    heap_mark("gps");
     if (!gps_state.isEmpty()) vat::runtime_event("gps", gps_state);
     vat::worker::begin();
+    heap_mark("worker");
 
     bool online = false;
     if (vat::config::network_ready()) {
-        vat::ui::show_boot("WIFI", "正在连接 " + vat::config::get().wifi_ssid + "…", TFT_YELLOW);
+        // (the splash already says it is looking for a signal)
         online = vat::wifi::connect_at_boot(18000);  // primary, then the other saved networks
+        heap_mark("wifi");
     }
     if (!online) {
         vat::net::start_setup_ap();
         vat::web::begin();
+        vat::ui::splash::finish();
         vat::ui::enter_setup(vat::config::network_ready() ? "WiFi 连接失败" : "首次配置");
         return;
     }
     configTzTime("CST-8", "ntp.aliyun.com", "pool.ntp.org");  // timeline clock
     vat::timer::begin();
+    heap_mark("timer");
     vat::ssh::begin();
+    heap_mark("ssh");
     vat::web::begin();
+    heap_mark("web");
     if (!problem.isEmpty()) {
+        vat::ui::splash::finish();
         vat::ui::enter_setup(problem);
         return;
     }
+    vat::ui::splash::finish();
     vat::ui::show_ready();
     if (vat::storage::degraded()) vat::ui::set_notice("TF 卡不可用：已用板载备份启动，长上下文暂停", true);
     vat::runtime_event("ready", vat::net::ip());
+    heap_mark("ready");
+    vat::runtime_event("boot_heap", heap_steps + " (KB)");
     vat::events::emit("device://boot");
 }
 

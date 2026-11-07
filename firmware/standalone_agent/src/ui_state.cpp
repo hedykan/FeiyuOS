@@ -279,6 +279,7 @@ bool has_pending() {
 
 void set_terminal(const String& title, const String& text, bool password_prompt) {
     Lock lock;
+    if (model.terminal_title == title && model.terminal_text == text && model.terminal_password == password_prompt) return;
     model.terminal_title = title;
     model.terminal_text = text;
     model.terminal_password = password_prompt;
@@ -289,6 +290,28 @@ void set_draft(const String& text) {
     Lock lock;
     model.terminal_draft = text;
     ++model.version;
+}
+
+void append_agent_draft(const String& text) {
+    Lock lock;
+    if (text.isEmpty()) return;
+    if (!model.agent_draft.isEmpty()) model.agent_draft += "，";
+    model.agent_draft += text;
+    ++model.version;
+}
+
+void set_agent_draft(const String& text) {
+    Lock lock;
+    model.agent_draft = text;
+    ++model.version;
+}
+
+String take_agent_draft() {
+    Lock lock;
+    String draft = model.agent_draft;
+    model.agent_draft = "";
+    ++model.version;
+    return draft;
 }
 
 String take_draft() {
@@ -360,6 +383,35 @@ String overlay_kind() {
 void set_overlay_kind(const String& kind) {
     Lock lock;
     overlay_shown = kind;
+}
+
+String open_panel() {
+    Lock lock;
+    if (overlay_shown.startsWith("panel:")) return overlay_shown.substring(6);
+    if (overlay_shown.startsWith("canvas:")) return overlay_shown.substring(7);
+    return {};
+}
+
+std::vector<std::pair<String, String>> panel_choices;
+
+void set_panel_choice(const String& panel, const String& choice) {
+    Lock lock;
+    for (auto& entry : panel_choices) {
+        if (entry.first == panel) {
+            entry.second = choice;
+            return;
+        }
+    }
+    if (panel_choices.size() >= 16) panel_choices.erase(panel_choices.begin());
+    panel_choices.push_back({panel, choice});
+}
+
+String panel_choice(const String& panel) {
+    Lock lock;
+    for (const auto& entry : panel_choices) {
+        if (entry.first == panel) return entry.second;
+    }
+    return {};
 }
 
 }  // namespace vat::ui

@@ -3,7 +3,9 @@
 `tools/vat_e2e.py` 是单机版的自动验收。它运行在设备 SSH profile 指向的那台主机上，**只通过 Wi-Fi 调用设备自己的 Web API**，同时在主机上核对真实副作用（文件、目录、tmux 会话、命令输出）。设备上的全部工作——语音识别、模型调用、Policy、SSH、tmux——都由固件完成，测试脚本不参与任何一步。
 
 ```sh
-# 设备已配置 tests/e2e_profiles.example.json 中的 profile（地址和用户换成运行脚本的这台主机）
+# 设备已配置 tests/e2e_profiles.example.json 中的 profile（用户换成运行脚本的这台主机的用户）；
+# 地址不用手改：每次开跑前，模板里写 <this-host-ip> 且设备上是局域网地址的测试 profile 会自动改成本机当前 IP
+# （换了网络也能直接跑；公网地址的 profile 不动；--no-sync-profiles 跳过）
 # 新扩展包必须在这里补用例，见 docs/EXTENSION_PACKAGE_GUIDE.zh-CN.md §6
 export VAT_DEVICE=http://<设备 IP>                                       # 不设时默认 http://vat.local
 python3 tools/vat_e2e.py                                                  # 默认 auto：按改动挑阶段

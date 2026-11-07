@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { changeLog } from './release_notes.mjs';
 
 const API = 'https://burner.m5stack.com/api/v1';
 const TOKEN_FILE = join(homedir(), '.config/feiyuos/m5burner_web_token');
@@ -117,8 +118,10 @@ async function list() {
   const rows = data.rows ?? data.data?.rows ?? data.data ?? [];
   if (!rows.length) console.log('no firmware uploaded yet');
   for (const f of rows) {
-    const pick = ({ firmwareId, firmwareName, currentVersion, visibility, status, auditStatus, reviewStatus }) =>
-      ({ firmwareId, firmwareName, currentVersion, visibility, status, auditStatus, reviewStatus });
+    // One row per version: PENDING = waiting for M5Stack review (the public
+    // page keeps showing the last PUBLISHED version until then).
+    const pick = ({ firmwareId, versionName, uploadedAt, visibility, status, reviewReason }) =>
+      ({ firmwareId, versionName, uploadedAt, visibility, status, reviewReason });
     console.log(JSON.stringify(pick(f)));
   }
 }
@@ -148,7 +151,14 @@ async function upload(version, firmwarePath, coverPath, isPublic) {
 // The web app adds a version by uploading under the existing firmware name.
 async function version(name, firmwarePath, isPublic) {
   if (!name || !firmwarePath) die('usage: version <version> <firmware.bin> [public]');
+  let notes;
+  try {
+    notes = changeLog(name);  // docs/releases/<version>.md: what this version changed
+  } catch (error) {
+    die(error.message);
+  }
   const { config, form } = fields(name, isPublic);
+  form.append('versionDescription', notes);
   form.append('firmwareName', config.name);
   form.append('categoryIds', JSON.stringify(WEB.categoryIds));
   form.append('deviceIds', JSON.stringify(WEB.deviceIds));

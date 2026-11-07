@@ -159,6 +159,7 @@ String start_agent(const String& provider, const String& project, const String& 
     const String path_project = project_path(project, profile, error);
     if (!error.isEmpty()) return error;
     const auto found = ssh::run(profile, "sh -lc " + shell_quote(discovery_script(provider)), nullptr, 10000);
+    if (!found.ok && found.out.isEmpty()) return "连不上 " + profile + "，没能查找 " + provider + "：" + found.message();
     String program = found.out;
     const int last_newline = program.lastIndexOf('\n');
     if (last_newline >= 0) program = program.substring(last_newline + 1);
@@ -350,7 +351,11 @@ String tmux_list(const String& target) {
     if (!config::find_profile(profile)) return "未知 SSH profile: " + profile;
     const auto result =
         ssh::run(profile, "tmux list-sessions -F '#{session_name} #{session_windows}'", nullptr, 6000);
-    if (!result.ok) return result.err.indexOf("no server") >= 0 ? String("没有 tmux 会话") : result.message();
+    if (!result.ok) {
+        return result.err.indexOf("no server") >= 0
+                   ? "没有 tmux 会话（要终端就 session connect ssh://" + profile + "，会自动新建 vat-shell 会话）"
+                   : result.message();
+    }
     String text;
     int n = 0;
     int start = 0;
@@ -368,7 +373,8 @@ String tmux_list(const String& target) {
         text += String(++n) + ". " + name + "（" + windows + " 个窗口" +
                 (has_current() && active.profile == profile && active.name == name ? "，当前" : "") + "）\n";
     }
-    return text.isEmpty() ? String("没有 tmux 会话") : profile + " 上的 tmux 会话：\n" + text;
+    return text.isEmpty() ? "没有 tmux 会话（要终端就 session connect ssh://" + profile + "，会自动新建 vat-shell 会话）"
+                          : profile + " 上的 tmux 会话：\n" + text;
 }
 
 String tmux_create(const String& target) {

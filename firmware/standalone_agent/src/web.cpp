@@ -1,3 +1,6 @@
+#include "web_token_core.h"
+#include "web_token.h"
+#include "arena.h"
 #include "web.h"
 
 #include <ESPmDNS.h>
@@ -74,12 +77,19 @@ void handle_status() {
         return;
     }
     cJSON* root = cJSON_Parse(local::status_json().c_str());
+    if (!root) return send_error(503, "status unavailable (low memory), retry");  // was answered with null
     cJSON_AddBoolToObject(root, "busy", worker::busy());
     cJSON_AddBoolToObject(root, "config_ready", config::providers_ready());
     cJSON_AddStringToObject(root, "profiles", config::profile_names().c_str());
     cJSON_AddNumberToObject(root, "history_messages", agent::history_messages());
     cJSON_AddItemToObject(root, "screen", cJSON_Parse(ui::screen_text().c_str()));
-    send_json(200, json_print(root));
+    cJSON_AddItemToObject(root, "arena", cJSON_Parse(arena::status_json().c_str()));
+    const String body = json_print(root);
+    if (body.isEmpty()) {  // out of memory while printing
+        cJSON_Delete(root);
+        return send_error(503, "status unavailable (low memory), retry");
+    }
+    send_json(200, body);
     cJSON_Delete(root);
 }
 
@@ -278,6 +288,10 @@ void handle_reload() {
 // key injection for whoever joins it.
 bool from_hotspot() { return portal::from_portal(server.client().localIP()); }
 
+bool authorized() {
+    return web_token::accepts(web_token::presented(server.header("Authorization"), server.header("Cookie"), server.arg("token")));
+}
+
 void api_on(const char* path, HTTPMethod method, std::function<void()> handler) {
     server.on(path, method, [handler] {
         if (from_hotspot()) return send_error(403, "phone settings: use /m");
@@ -304,9 +318,36 @@ void to_phone_page() {
 
 }  // namespace
 
+constexpr char kLoginPage[] =
+    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+    "<title>FeiyuOS</title><body style='font-family:sans-serif;padding:2em'>"
+    "<h3>需要网页令牌</h3><p>在设备上按 Fn+W，进入「网页令牌」，用手机扫码登录；"
+    "或在地址后加上 ?token=令牌。</p>";
+
 void begin() {
+    static const char* kHeaders[] = {"Authorization", "Cookie"};
+    server.collectHeaders(kHeaders, 2);
+    // Every /api/* call needs the token; so does the phone page unless it
+    // comes through the setup hotspot (joining it means being at the device).
+    server.addMiddleware([](WebServer& s, Middleware::Callback next) {
+        const String uri = s.uri();
+        const bool api = uri.startsWith("/api/");
+        const bool phone = (uri == "/m" || uri.startsWith("/m/")) && !from_hotspot();
+        if ((api || phone) && !authorized()) {
+            send_error(401, "token required (device: Fn+W, web token)");
+            return true;
+        }
+        return next();
+    });
     server.on("/", HTTP_GET, [] {
         if (from_hotspot()) return to_phone_page();
+        const String arg = server.arg("token");
+        if (!arg.isEmpty() && web_token::accepts(arg)) {  // the login QR: keep it as a cookie
+            server.sendHeader("Set-Cookie", "vat_token=" + arg + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000");
+            server.sendHeader("Location", "/", true);
+            return server.send(302, "text/plain", "");
+        }
+        if (!authorized()) return server.send(401, "text/html; charset=utf-8", kLoginPage);
         server.send(200, "text/html; charset=utf-8", kPage);
     });
     web_portal::register_routes(server);

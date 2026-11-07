@@ -19,6 +19,9 @@ bool is_ac(const String& name);
 String send(const String& name, const String& words);
 // The person's answer to the last send: yes keeps the remote, no tries the next.
 String confirm(const String& name, bool worked);
+// Picks the remote to try by hand and resends the current state with it:
+// "上一套" / "下一套" / "重发" or its number ("5", "第5套").  Waits for confirm.
+String choose(const String& name, const String& words);
 String summary(const cJSON* profile);  // one line for ir://list
 String brands_text();                  // brands in the database, most common first
 

@@ -3,6 +3,7 @@
 #include <functional>
 
 #include "ac_core.h"
+#include "arena.h"
 #include "common.h"
 #include "ops_ir.h"
 #include "storage.h"
@@ -62,6 +63,11 @@ bool transmit(const Remote& remote, std::size_t blob, State& state, uint8_t key,
         error = "读不到红外码（" + remote.id + "）";
         return false;
     }
+    const arena::Hold buffer("ir_decode", 4096 + remote.length);
+    if (!buffer.ok()) {
+        error = "内存不够，稍后再试";
+        return false;
+    }
     std::vector<uint16_t> pulses;
     if (!encode(code, state, key, pulses, error)) return false;
     ir::transmit_pulses(pulses.data(), pulses.size(), kCarrierKhz);
@@ -95,8 +101,22 @@ void set_number(cJSON* profile, const char* key, double value) {
 }
 
 String ask_text(const String& name) {
-    return "。请看空调有没有响应（滴一声或开始运转），告诉我生效了或没反应（没反应会换下一套）\n（给模型：用户回答后 write ir://" +
-           name + "/confirm，content 为 yes 或 no）";
+    return "。请看空调有没有响应（滴一声或开始运转），告诉我生效了或没反应（没反应会换下一套；也可以说上一套、下一套或第几套）\n"
+           "（给模型：用户回答后 write ir://" + name + "/confirm，content 为 yes 或 no；要换到指定的码用 write ir://" + name +
+           "/try，content 为 上一套、下一套、重发 或编号数字）";
+}
+
+// From remote `from`, moving by `step` (+1 / -1, 0: that one only), the
+// first one that can encode the profile's state; it is sent.  -1 when none.
+int send_from(cJSON* profile, const Brand& brand, std::size_t blob, int from, int step, State& state, String& error) {
+    const uint8_t key = static_cast<uint8_t>(json_int(profile, "pending_key", 0));
+    const int count = static_cast<int>(brand.remotes.size());
+    for (int i = from; i >= 0 && i < count; i += step) {
+        state = from_json(json_obj(profile, "state"));
+        if (transmit(brand.remotes[i], blob, state, key, error)) return i;
+        if (step == 0) break;
+    }
+    return -1;
 }
 
 }  // namespace
@@ -221,14 +241,9 @@ String confirm(const String& name_in, bool worked) {
         result = "已记住：「" + name + "」用" + which(brand, index) + "（" + brand.remotes[index].id + "）";
     } else {
         // The next remote that can encode the state (one may lack the mode).
-        const uint8_t key = static_cast<uint8_t>(json_int(profile, "pending_key", 0));
-        int next = index + 1;
         State state;
-        for (; next < static_cast<int>(brand.remotes.size()); ++next) {
-            state = from_json(json_obj(profile, "state"));
-            if (transmit(brand.remotes[next], blob, state, key, error)) break;
-        }
-        if (next < static_cast<int>(brand.remotes.size())) {
+        const int next = send_from(profile, brand, blob, index + 1, 1, state, error);
+        if (next >= 0) {
             set_number(profile, "trying", next);
             record(profile, state, json_str(profile, "last_action"));
             result = "换了" + which(brand, next) + "，又发了一次：" + describe(state) + ask_text(name);
@@ -243,6 +258,67 @@ String confirm(const String& name_in, bool worked) {
     ir::save_profile(name, profile);
     cJSON_Delete(profile);
     return result;
+}
+
+String choose(const String& name_in, const String& words_in) {
+    const String name = ir::safe_name(name_in);
+    cJSON* profile = ir::load_profile(name);
+    if (json_str(profile, "kind") != "ac" || !json_obj(profile, "state")) {
+        cJSON_Delete(profile);
+        return "ERROR: 「" + name + "」还没控制过，先 write ir://" + name + "/ac 带上品牌发一次";
+    }
+    Brand brand;
+    String error;
+    std::size_t blob = 0;
+    if (!find_brand(json_str(profile, "brand"), brand, blob, error)) {
+        cJSON_Delete(profile);
+        return "ERROR: " + error;
+    }
+    const int count = static_cast<int>(brand.remotes.size());
+    const cJSON* trying = cJSON_GetObjectItemCaseSensitive(profile, "trying");
+    int current = cJSON_IsNumber(trying) ? trying->valueint : remote_index(brand, json_str(profile, "remote"));
+    if (current < 0 || current >= count) current = 0;
+    String words = words_in;
+    words.trim();
+    int from = current, step = 0;
+    if (words.indexOf("上") >= 0 || words.indexOf("前") >= 0 || words == "prev" || words == "previous") {
+        from = current - 1;
+        step = -1;
+    } else if (words.indexOf("下") >= 0 || words.indexOf("后") >= 0 || words == "next") {
+        from = current + 1;
+        step = 1;
+    } else if (words.indexOf("重") < 0 && words != "again") {
+        String digits;
+        for (unsigned i = 0; i < words.length(); ++i) {
+            if (isdigit(static_cast<unsigned char>(words[i]))) digits += words[i];
+        }
+        if (digits.isEmpty()) {
+            cJSON_Delete(profile);
+            return "ERROR: content 写 上一套、下一套、重发 或编号数字（1 到 " + String(count) + "）";
+        }
+        from = digits.toInt() - 1;
+        if (from < 0 || from >= count) {
+            cJSON_Delete(profile);
+            return "ERROR: " + brand.name + "只有 " + String(count) + " 套码，编号要在 1 到 " + String(count) + " 之间";
+        }
+    }
+    if (from < 0 || from >= count) {
+        cJSON_Delete(profile);
+        return "已经是" + which(brand, current) + "，" + (step < 0 ? "前面" : "后面") + "没有了";
+    }
+    State state;
+    const int index = send_from(profile, brand, blob, from, step, state, error);
+    if (index < 0) {
+        cJSON_Delete(profile);
+        return step == 0 ? "ERROR: " + which(brand, from) + "发不了当前状态：" + error
+                         : "ERROR: " + String(step < 0 ? "前面" : "后面") + "的码都发不了当前状态（" + error + "）";
+    }
+    cJSON_DeleteItemFromObject(profile, "remote");  // chosen by hand: confirm it again
+    set_number(profile, "trying", index);
+    record(profile, state, json_str(profile, "last_action"));
+    ir::save_profile(name, profile);
+    cJSON_Delete(profile);
+    return "换到" + which(brand, index) + "，发了一次：" + describe(state) + ask_text(name);
 }
 
 String summary(const cJSON* profile) {

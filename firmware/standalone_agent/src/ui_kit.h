@@ -37,6 +37,8 @@ constexpr int kPad = 4;
 
 // `text` cut with "…" to fit `max_px` in the current font.
 String fit(Gfx& g, const String& text, int max_px);
+// The end of `text` that fits, "…" in front (for text that grows at the end).
+String fit_tail(Gfx& g, const String& text, int max_px);
 // Lines of `text` no wider than `width`; breaks at '\n' and between UTF-8 characters.
 std::vector<String> wrap_text(Gfx& g, const String& text, int width);
 // Full-height QR code on a white square at the left; returns the x where the
