@@ -75,6 +75,7 @@ Cap LoRa-1262（GPS 与 LoRa 在同一个 Cap 上，可以同时工作）：
 |:--|:--|:--|
 | GPS（ATGM336H） | ✅ `gps` 包（TinyGPSPlus 1.0.3）：位置、海拔、在用/可见卫星、HDOP、UTC 时间、NMEA 计数；UART1 115200（G15 收/G13 发），2 KB 接收缓冲，主循环每次最多解析 512 字节；默认开启，“关闭”只停止读取（Cap 不给软件断 GNSS 电源）。遵循提示词已有的传感器约定 | `sensor://gps/location` `sensor://gps/satellites` `sensor://gps/time` |
 | LoRa（SX1262） | 驱动与 `lora` 包已写，**待实测**（RadioLib 7.8.1）：默认关闭、芯片保持复位不占总线；`session connect lora://` 或 `write lora://settings/enabled on` 开始接收；收到的消息是编号清单（`read lora://messages`），存 `/vat/things/lora/inbox.jsonl`；`write lora://send` 需确认，且频点已设、天线已确认才会发射；`write lora://settings/frequency|power|sf|bandwidth|cr|antenna` | `lora://status` `lora://messages` `lora://send` |
+| 蓝牙 BLE（ESP32-S3 内置） | `ble` 包（NimBLE-Arduino 2.5.2，四个角色）：默认关闭，设置 → 蓝牙打开后**重启生效**，开机时先占好内存（约 50 KB，待实测），关闭也要重启；扫描附近设备（固定 40 条的设备表，信号、名字、厂商、服务；`write ble://scan/log 秒数` 把每条广播写进 `/vat/ble/scan-*.jsonl`）；广播名字、厂商数据或 iBeacon；连接设备（最多 2 个）读写特征、订阅通知；当蓝牙键盘往电脑打字（只能打英文、数字和符号，中文靠电脑的输入法），只在配对窗口（默认 60 秒）里接受新电脑，窗口外配对的会被删掉并断开，按键只发给已配对且加密的连接。写入、打字、按键、配对、开关都要确认，确认框里显示要打的内容。流：`ble://nearby`（设备数、最强信号）、`ble://rssi/地址`、`ble://notify/地址/服务/特征`（长度 + 前 7 个字节） | `ble://scan` `ble://device/地址[/services]` `ble://gatt/地址/服务/特征` `ble://notify/…` `ble://advertise` `ble://hid/pair|type|key|forget` `ble://status` `ble://power` |
 | Grove 口（G1/G2） | ✅ `grove` 包：扫描 Ex_I2C，按地址推测型号 | `sensor://grove` |
 
 设备档案（`/vat/things/`）——有持久数据的包都存这里，一个设备一个文件（目前已用：`ir/`、`timers/`；下面其余为设计）：

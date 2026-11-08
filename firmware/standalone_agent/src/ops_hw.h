@@ -20,6 +20,10 @@ String set_led(const String& color);
 String led_text();
 
 String imu_text();  // orientation, tilt and whether the device is moving
+// The latest IMU reading for streams: acceleration in g, rotation in °/s.
+// Reads the sensor at most every 5 ms (the three IMU streams share one
+// reading); UI task.  false when the IMU is off or the read failed.
+bool imu_latest(float accel[3], float gyro[3]);
 
 // Speaker: the UI task plays queued beeps between recordings.
 String request_beep(int count);

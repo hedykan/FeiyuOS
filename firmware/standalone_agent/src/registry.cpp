@@ -1,6 +1,7 @@
 #include "registry.h"
 
 #include <algorithm>
+#include <mutex>
 
 #include "common.h"
 #include "ops_ssh.h"
@@ -9,6 +10,103 @@ namespace vat::registry {
 namespace {
 
 std::vector<Package*> installed;
+
+// Open streams: requested by any task, opened and sampled on the UI task.
+struct OpenStream {
+    String target;
+    Package* owner = nullptr;
+    Package::StreamSpec spec{};
+    Package::StreamValue value;
+    bool opened = false;
+    bool have = false;
+    String error;
+    unsigned long last_sample = 0;
+    unsigned long last_read = 0;
+};
+std::vector<OpenStream> open_streams;
+std::mutex streams_lock;
+TaskHandle_t ui_task = nullptr;  // the task that runs loop(): it samples
+constexpr unsigned long kStreamIdleMs = 10000;
+
+String stream_base(const String& target) {
+    const int q = target.indexOf('?');
+    return q < 0 ? target : target.substring(0, q);
+}
+
+// A declared target ending in '*' stands for every target with that prefix
+// (ble://rssi/* covers ble://rssi/aa:bb:…); otherwise the target itself.
+bool stream_matches(const String& base, const char* declared) {
+    const size_t n = strlen(declared);
+    if (n > 0 && declared[n - 1] == '*') return base.length() >= n && strncmp(base.c_str(), declared, n - 1) == 0;
+    return base == declared;
+}
+
+bool find_stream(const String& target, Package::StreamSpec& spec, Package** owner) {
+    const String base = stream_base(target);
+    for (auto* package : installed) {
+        std::vector<Package::StreamSpec> specs;
+        package->streams(specs);
+        for (const auto& s : specs) {
+            if (stream_matches(base, s.target)) {
+                spec = s;
+                if (owner) *owner = package;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+String number_text(double v) {
+    char text[32];
+    snprintf(text, sizeof(text), "%.6f", v);
+    String s(text);
+    while (s.endsWith("0")) s.remove(s.length() - 1);
+    if (s.endsWith(".")) s.remove(s.length() - 1);
+    return s == "-0" ? String("0") : s;
+}
+
+String value_json(const Package::StreamSpec& spec, const Package::StreamValue& value) {
+    String out = "{";
+    String fields = spec.fields;
+    int i = 0;
+    while (fields.length() > 0 && i < value.count) {
+        fields.trim();
+        const int space = fields.indexOf(' ');
+        const String name = space < 0 ? fields : fields.substring(0, space);
+        fields = space < 0 ? String() : fields.substring(space + 1);
+        if (name.isEmpty()) continue;
+        out += String(i ? "," : "") + "\"" + name + "\":" + number_text(value.v[i]);
+        ++i;
+    }
+    return out + "}";
+}
+
+void sample_streams() {
+    std::lock_guard<std::mutex> guard(streams_lock);
+    const unsigned long now = millis();
+    for (std::size_t i = 0; i < open_streams.size();) {
+        OpenStream& s = open_streams[i];
+        if (s.opened && now - s.last_read > kStreamIdleMs) {  // nobody reads it any more
+            s.owner->close_stream(s.target);
+            open_streams.erase(open_streams.begin() + i);
+            continue;
+        }
+        if (!s.opened && s.error.isEmpty()) {
+            s.error = s.owner->open_stream(s.target);
+            s.opened = s.error.isEmpty();
+        }
+        if (s.opened && (!s.have || now - s.last_sample >= s.spec.period_ms)) {
+            Package::StreamValue v;
+            if (s.owner->sample(s.target, v)) {
+                s.value = v;
+                s.have = true;
+            }
+            s.last_sample = now;
+        }
+        ++i;
+    }
+}
 
 bool is_cjk_token(const String& token, std::vector<String>& chars) {
     chars.clear();
@@ -100,6 +198,14 @@ String discover_resources(const String& query, int limit) {
         for (const auto& spec : events) {
             if (!add_resource(list, remaining, spec.target, (String("事件：") + spec.description).c_str())) break;
         }
+        std::vector<Package::StreamSpec> specs;
+        entry.second->streams(specs);
+        for (const auto& spec : specs) {
+            const String kind = String("流：") + spec.description + "；字段 " + spec.fields +
+                                (spec.unit[0] ? String("（") + spec.unit + "）" : String()) + "，约每 " +
+                                String(spec.period_ms) + "ms 一个新值";
+            if (!add_resource(list, remaining, spec.target, kind.c_str())) break;
+        }
     }
     String text;
     int n = 0;
@@ -110,6 +216,7 @@ String discover_resources(const String& query, int limit) {
         if (cJSON_IsBool(connected)) text += cJSON_IsTrue(connected) ? "（已连接）" : "（未连接）";
         const String kind = json_str(item, "kind");
         if (kind.startsWith("事件：")) text += "（" + kind + "，可作触发）";
+        if (kind.startsWith("流：")) text += "（" + kind + "；程序里用 {\"stream\": 它, \"as\": 名字} 取最新值）";
         text += "\n";
     }
     cJSON_Delete(list);
@@ -317,7 +424,65 @@ String confirm_summary(const String& tool, const cJSON* arguments) {
 }
 
 void loop() {
+    ui_task = xTaskGetCurrentTaskHandle();
     for (auto* package : installed) package->loop();
+    sample_streams();
+}
+
+bool stream_spec(const String& target, Package::StreamSpec& spec) { return find_stream(target, spec, nullptr); }
+
+String stream_names() {
+    String names;
+    for (auto* package : installed) {
+        std::vector<Package::StreamSpec> specs;
+        package->streams(specs);
+        for (const auto& s : specs) names += String(names.isEmpty() ? "" : "、") + s.target;
+    }
+    return names.isEmpty() ? String("（没有）") : names;
+}
+
+bool read_stream(const String& target, String& out, uint32_t wait_ms) {
+    Package::StreamSpec spec{};
+    Package* owner = nullptr;
+    if (!find_stream(target, spec, &owner)) {
+        out = "ERROR: " + stream_base(target) + " 不是流；可订阅的有：" + stream_names();
+        return false;
+    }
+    const String base = stream_base(target);
+    const unsigned long deadline = millis() + wait_ms;
+    while (true) {
+        {
+            std::lock_guard<std::mutex> guard(streams_lock);
+            OpenStream* found = nullptr;
+            for (auto& s : open_streams) {
+                if (s.target == base) found = &s;
+            }
+            if (!found) {
+                OpenStream s;
+                s.target = base;
+                s.owner = owner;
+                s.spec = spec;
+                open_streams.push_back(s);
+                found = &open_streams.back();
+            }
+            found->last_read = millis();
+            if (!found->error.isEmpty()) {
+                out = "ERROR: " + base + " 打不开：" + found->error;
+                open_streams.erase(open_streams.begin() + (found - open_streams.data()));  // try again next time
+                return false;
+            }
+            if (found->have) {
+                out = value_json(spec, found->value);
+                return true;
+            }
+        }
+        if (static_cast<long>(millis() - deadline) >= 0) {
+            out = "ERROR: " + base + " 暂时没有数据（如 GPS 还没定位）";
+            return false;
+        }
+        if (xTaskGetCurrentTaskHandle() == ui_task) sample_streams();  // on the UI task: nobody else will
+        else delay(20);                                                 // the UI task opens and samples it
+    }
 }
 
 String execute(const String& tool, const cJSON* arguments, bool approved, const String& secret) {

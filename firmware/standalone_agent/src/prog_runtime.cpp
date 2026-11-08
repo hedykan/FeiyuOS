@@ -244,6 +244,15 @@ String sensitive_steps(const cJSON* steps, std::vector<uint32_t>& prints, std::v
     prog::for_each_action(steps, [&](const String&, const cJSON* step) {
         String tool;
         cJSON* args = prog::action_arguments(step, tool);
+        if (tool == "stream") {  // read-only: nothing to confirm, but it must be a declared stream
+            registry::Package::StreamSpec spec{};
+            const String target = json_str(args, "target");
+            if (!registry::stream_spec(target, spec) && error.isEmpty()) {
+                error = "「" + target + "」不是流；可订阅的有：" + registry::stream_names();
+            }
+            cJSON_Delete(args);
+            return;
+        }
         const auto verdict = policy::evaluate(tool, args);
         if (verdict.decision == policy::Decision::Deny && error.isEmpty()) {
             error = "「" + describe_args(tool, args) + "」会被拒绝：" + verdict.reason;
@@ -415,6 +424,7 @@ public:
 
     bool call(const String& program, const String& tool, const cJSON* arguments, const cJSON* step,
               String& out) override {
+        if (tool == "stream") return registry::read_stream(json_str(arguments, "target"), out);  // read-only, no Policy
         const auto verdict = policy::evaluate(tool, arguments);
         if (verdict.decision == policy::Decision::Deny) {
             out = "ERROR: 已拒绝：" + verdict.reason;

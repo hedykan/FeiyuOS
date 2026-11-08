@@ -42,6 +42,7 @@ constexpr char kHelp[] = R"HELP(程序（prog://）与触发（trigger://）说�
 - {"if": "变量名", "is" | "not" | "has" | "above" | "below": 值, "then": [步骤…], "else": [步骤…]}  变量名不加花括号；has 是包含；above/below 按数字比较。
 - {"repeat": 次数(1-10), "steps": [步骤…]}
 - {"wait": "25m"}  单位 s/m/h，最长 24h；等待时不占设备，到点从原处继续。
+- {"stream": "sensor://imu/acceleration", "as": "a"}  取一个流的最新值，之后用 {a.x} {a.y}；可用的流见 discover(resources) 里标「流」的项（姿态、加速度、GPS 位置…）。
 任何动作可加 "as": "名字"（把结果存成变量）和 "on_error": "continue"（失败也继续；默认失败就停）。
 变量：{名字} 是 as 存的结果，{input.名字} 是参数，{event.字段} 是触发事件的数据，{error} 是上一个失败的原因，{now} 是当前时间。
 问大肥鱼：{"write": "ask://", "content": "问题，只答 是/否", "as": "x"}，再用 if 判断 x。能用确定的步骤完成的不要用 ask://（每次都要联网、调用一次模型）；ask:// 里不能执行需要确认的操作。

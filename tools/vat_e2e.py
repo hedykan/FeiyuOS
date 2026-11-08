@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone Cardputer end-to-end acceptance (S0-S9).
+"""Standalone Cardputer end-to-end acceptance (S0-S11, S2I).
 
 The device does all the work.  This script only talks to the device's own
 web API over Wi-Fi (no USB data link) and checks real side effects on the
@@ -7,6 +7,15 @@ SSH host it runs on.  Run it on the machine that the device's SSH profiles
 point at, e.g.:
 
     VAT_DEVICE=http://<device-ip> python3 tools/vat_e2e.py --phases all
+
+Tiers (docs/E2E.zh-CN.md):
+  quick   every phase but S2I, one or two cases each (<= 5 min, after every flash)
+  auto / a comma list   the named phases, whole (S1: the core recordings)
+  all     release (<= 15 min): every phase; S1 core recordings, S2I a sample on
+          the device while tools/prompt_lab.py checks every intent case on the
+          host in parallel, fewer repeats in S3/S5/S8
+  full    everything on the device: every recording, all 58 S2I cases, 20
+          rounds, the case-file reboot (the old `all`, ~30 min)
 """
 from __future__ import annotations
 
@@ -15,6 +24,7 @@ import ipaddress
 import json
 import re
 import os
+import socket
 import statistics
 import subprocess
 import sys
@@ -30,14 +40,35 @@ ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests" / "cases"
 PCM = ROOT / "tests" / "pcm"
 ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"]
-# quick: a representative case or two per phase (~3 min, after every flash);
-# normal: impacted phases (auto) or a named list; all: everything (release).
+# quick: a representative case or two per phase (<= 5 min, after every flash);
+# normal: impacted phases (auto) or a named list, run whole;
+# all: release (<= 15 min); full: everything on the device (the old `all`).
 TIER = "normal"
 # Voice cases that test speech itself (device settings and recognition
-# corrections); the other recordings repeat S2i intents and run only in `all`.
+# corrections); the other recordings repeat S2i intents and run only in `full`
+# (in `all`, prompt_lab checks their intents on the host).
 CORE_PCM = ["local_status", "local_settings", "set_brightness_96", "set_timeout_180", "local_history",
             "read_hostname", "start_codex_agent", "tmux_create", "restart_nginx", "docker_logs"]
+REMOTE_AGENT_PCM = {"start_codex_agent", "start_claude_agent", "start_pi_agent"}  # not in voice_latency
 QUICK_PCM = ["local_status", "read_hostname"]
+# S2I on the device in `all`: one case per tool family.  Every intent case
+# (these, the rest of S2I, v0.5 cases, PCM expectations) runs in prompt_lab.
+S2I_SAMPLE = [
+    "connect_profile",                             # session ssh://
+    "read_remote_file",                            # read ssh://
+    "overwrite_remote_file",                       # write ssh://
+    "safe_readonly_command",                       # exec, runs outright
+    "destructive_command_requires_confirmation",   # exec, needs confirmation
+    "tmux_create",                                 # session tmux://
+    "current_tui_ctrl_c",                          # input tui://
+    "start_remote_agent",                          # session, remote agent
+    "missing_profile_clarification",               # no tool: asks back
+    "battery_status",                              # read device://
+    "remember_note",                               # write memory://
+    "read_humidity",                               # an unknown sensor
+]
+# S10 in `quick`: saves the programs program_reads and trigger_cases rely on.
+QUICK_PROGRAMS = ["led", "branch", "callee", "caller", "broken"]
 ONLY: list[str] = []  # --only: substrings of case ids; empty = every case
 
 # What each changed path puts at risk (docs/E2E "改了什么跑什么").  S0 always runs.
@@ -107,6 +138,27 @@ def quick() -> bool:
     return TIER == "quick"
 
 
+def release() -> bool:
+    """`all`: the release tier, trimmed to fit 15 minutes."""
+    return TIER == "all"
+
+
+def full() -> bool:
+    """Every case of a phase: `full`, or phases named by hand / picked by auto."""
+    return TIER in ("full", "normal")
+
+
+def until(check, timeout: float, interval: float = 0.2):
+    """Poll check() until it returns something truthy or timeout passes; the
+    last value is returned (checked once more at the deadline)."""
+    deadline = time.time() + timeout
+    while True:
+        value = check()
+        if value or time.time() >= deadline:
+            return value
+        time.sleep(min(interval, max(0.0, deadline - time.time())))
+
+
 def wanted(case_id: str) -> bool:
     return not ONLY or any(part in case_id for part in ONLY)
 HOST_TMP = "/tmp/vat-e2e"
@@ -115,9 +167,31 @@ HOME = os.path.expanduser("~")
 
 # --------------------------------------------------------------------------- device client
 
+def resolve_once(base: str) -> str:
+    """http://vat.local -> http://192.168.x.y, looked up once over IPv4.
+
+    urllib resolves the name on every request and waits about 5 s for an IPv6
+    answer that never comes for .local names: 3-4 requests per step made each
+    step 15-20 s slower (2026-11-08).  An address is returned unchanged.
+    """
+    parts = urllib.parse.urlsplit(base)
+    host = parts.hostname or ""
+    try:
+        ipaddress.ip_address(host)
+        return base
+    except ValueError:
+        pass
+    try:
+        ip = socket.getaddrinfo(host, parts.port or 80, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    except OSError:
+        return base
+    netloc = ip + (f":{parts.port}" if parts.port else "")
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+
+
 class Device:
     def __init__(self, base: str) -> None:
-        self.base = base.rstrip("/")
+        self.base = resolve_once(base.rstrip("/"))
         self.expected_reboots = 0  # reboots the script itself requested
         token_file = os.path.expanduser("~/.config/feiyuos/device_token")
         self.token = os.environ.get("VAT_TOKEN") or (open(token_file).read().strip() if os.path.exists(token_file) else "")
@@ -184,17 +258,25 @@ class Device:
     def reboot(self) -> dict:
         """Reboot the device and wait until it is back on Wi-Fi."""
         self.expected_reboots += 1
+        try:
+            before = self.status().get("uptime_s")
+        except RuntimeError:
+            before = None
         self.post("/api/reboot")
-        time.sleep(8)
+        # Polled instead of a fixed 8 s: back means the uptime restarted (lower
+        # than before the request), so a status answered before the reset does
+        # not count.  Same overall bound as before (8 s + 30 x 2 s).
+        deadline = time.time() + 68
         after = {}
-        for _ in range(30):
+        while time.time() < deadline:
+            time.sleep(1)
             try:
                 after = self.status()
-                if after.get("uptime_s", 9999) < 120:
-                    break
             except RuntimeError:
-                pass
-            time.sleep(2)
+                continue
+            uptime = after.get("uptime_s", 9999)
+            if uptime < 120 and (before is None or uptime < before):
+                break
         return after
 
     def files(self, root: str = "/vat") -> list[tuple[str, int]]:
@@ -537,7 +619,7 @@ def phase_s1(device: Device, report: Report) -> None:
     standalone = json.loads((PCM / "standalone_manifest.json").read_text())
     manifest = json.loads((PCM / "manifest.json").read_text())
     latencies, stt = [], []
-    keep = None if TIER == "all" else QUICK_PCM if quick() else CORE_PCM
+    keep = None if TIER == "full" else QUICK_PCM if quick() else CORE_PCM
     for case in standalone + manifest:
         if not wanted(case["id"]) or (keep is not None and case["id"] not in keep):
             continue
@@ -562,7 +644,10 @@ def phase_s1(device: Device, report: Report) -> None:
         elif "expect" not in case and record.get("status") == "done":
             if record.get("reply", "").startswith(("ERROR", "Agent")):
                 failures.append("operation failed")
-        latencies.append(record.get("elapsed_ms", 0))
+        # Launching a remote Agent measures the host (18-24 s), not the voice path;
+        # with only CORE_PCM it alone would be the P95.  0 = not measured.
+        if case["id"] not in REMOTE_AGENT_PCM and record.get("elapsed_ms"):
+            latencies.append(record["elapsed_ms"])
         stt.append(record.get("stt_ms", 0))
         report.add("S1", f"pcm:{case['id']}", not failures, "; ".join(failures) or transcript,
                    elapsed_ms=record.get("elapsed_ms"), stt_ms=record.get("stt_ms"),
@@ -588,6 +673,8 @@ def phase_s2i(device: Device, report: Report) -> None:
     for name in ("ssh_intent_cases.json", "daily_intent_cases.json"):
         for case in json.loads((CASES / name).read_text()):
             if not wanted(case["id"]):
+                continue
+            if release() and case["id"] not in S2I_SAMPLE:  # the rest: prompt_lab on the host
                 continue
             # Intent cases are independent single turns, like the reference evaluation.
             device.wait_idle()
@@ -679,7 +766,11 @@ def phase_s3(device: Device, report: Report) -> None:
         ("df", "在开发机执行 df -h。", "Filesystem", "contains"),
         ("read_hostname", "读取开发机上的 /etc/hostname 文件。", Path("/etc/hostname").read_text().strip(), "exact"),
     ]
-    for case_id, text, expected, mode in expectations[:2] if quick() else expectations:
+    if quick():
+        expectations = expectations[:2]
+    elif release():  # hostname, pwd, uptime, df repeat whoami's path (S2, S5 run them too)
+        expectations = [e for e in expectations if e[0] in ("whoami", "uname", "read_hostname")]
+    for case_id, text, expected, mode in expectations:
         record = device.text(text)
         reply = final(record)
         ok = reply == expected if mode == "exact" else expected in reply
@@ -696,8 +787,10 @@ def phase_s3(device: Device, report: Report) -> None:
     expected = host("docker ps --format '{{.Names}}' | head -1").stdout.strip()
     report.add("S3", "docker_ps", "CONTAINER ID" in raw(record) and expected in raw(record),
                record.get("reply", "")[:100])
-    for text, word in (("连接 SSH 配置开发机。", "已连接"), ("列出当前 SSH 连接。", "开发机"),
-                       ("断开开发机的 SSH 连接。", "断开")):
+    sessions = (("连接 SSH 配置开发机。", "已连接"), ("列出当前 SSH 连接。", "开发机"),
+                ("断开开发机的 SSH 连接。", "断开"))
+    # Connect / list / disconnect: S2 runtime and S4 connect, S2I samples the intent.
+    for text, word in () if release() else sessions:
         record = device.text(text)
         report.add("S3", f"session:{word}", word in everything(record), record.get("reply", "")[:100])
     record = device.text(f"在开发机执行 git status，工作目录是 {ROOT}。")
@@ -734,11 +827,12 @@ def phase_s4(device: Device, report: Report) -> None:
     time.sleep(1)
     observed = device.job("observe").get("reply", "")
     report.add("S4", "terminal_input_observe", observed.count(mark) >= 2, observed[-120:])
-    record = device.text("在当前终端输入 Control C。")
-    keys = [c["arguments"].get("keys") for c in operations(record)]
-    report.add("S4", "agent_ctrl_c", any(k and "CTRL_C" in [x.upper() for x in k] for k in keys), str(keys))
-    record = device.text("查看当前终端的输出。")
-    report.add("S4", "agent_observe", mark in raw(record), record.get("reply", "")[-80:])
+    if not quick():  # two model turns; the input / observe path itself is checked just above
+        record = device.text("在当前终端输入 Control C。")
+        keys = [c["arguments"].get("keys") for c in operations(record)]
+        report.add("S4", "agent_ctrl_c", any(k and "CTRL_C" in [x.upper() for x in k] for k in keys), str(keys))
+        record = device.text("查看当前终端的输出。")
+        report.add("S4", "agent_observe", mark in raw(record), record.get("reply", "")[-80:])
 
     # UI pages through the same actions as Btn0 / Fn+Btn0.
     device.action("page_ssh")
@@ -774,13 +868,14 @@ def phase_s4(device: Device, report: Report) -> None:
                              timeout=180)
         started = tmux_has(session)
         screen = ""
-        for _ in range(20):
+        for _ in range(20 if started else 0):  # not started: nothing will answer, skip the ~100 s of polling
             time.sleep(4)
             screen = device.job("observe").get("reply", "")
             if "FeiyuOS" in screen or "Voice Agent Terminal" in screen:
                 break
         report.add("S4", f"agent_{name}_start", started, record.get("reply", "")[:120])
-        report.add("S4", f"agent_{name}_answer", "FeiyuOS" in screen or "Voice Agent Terminal" in screen, screen[-160:])
+        report.add("S4", f"agent_{name}_answer", "FeiyuOS" in screen or "Voice Agent Terminal" in screen,
+                   screen[-160:] if started else "skipped: the agent did not start")
         record = device.text("中断当前 Agent。")
         report.add("S4", f"agent_{name}_interrupt",
                    any(c["arguments"].get("action") == "interrupt" for c in operations(record)),
@@ -828,7 +923,8 @@ def phase_s5(device: Device, report: Report) -> None:
 
     latencies, failures, summaries = [], 0, []
     start_uptime = device.status()["uptime_s"]
-    for index in range(20):
+    rounds = 20 if full() else 10  # release: 10 rounds (P50/P95 and the heap floor still show)
+    for index in range(rounds):
         text = ["在开发机执行 uptime。", "查看这台 Cardputer 的本机状态。", "在开发机执行 whoami。",
                 "再查看这台机器的主机名。"][index % 4]
         record = device.text(text)
@@ -837,7 +933,8 @@ def phase_s5(device: Device, report: Report) -> None:
         failures += 0 if record.get("status") == "done" and record.get("reply") else 1
         summaries.append(len(record.get("reply", "")))
     status = device.status()
-    report.add("S5", "twenty_rounds", failures == 0 and status["uptime_s"] > start_uptime,
+    name = "twenty_rounds" if rounds == 20 else "ten_rounds"
+    report.add("S5", name, failures == 0 and status["uptime_s"] > start_uptime,
                f"failures={failures} P50={percentile(latencies, .5)}ms P95={percentile(latencies, .95)}ms "
                f"reply_chars_max={max(summaries) if summaries else 0} "
                f"min_free_heap={status.get('min_free_heap')}")
@@ -968,13 +1065,19 @@ def hardware_controls(device: Device, report: Report) -> None:
     report.add("S6", "battery_fields", status.get("battery_mv", 0) > 3000 and "usb_host" in status,
                f"mv={status.get('battery_mv')} usb={status.get('usb_host')}")
     results = {}
-    for key, text in (("led", "把本机的 RGB 灯调成绿色"), ("imu", "设备现在是平放的吗"),
-                      ("beep", "响一声提示音"), ("led_off", "把本机 RGB 灯关掉")):
+    turns = (("led", "把本机的 RGB 灯调成绿色"), ("imu", "设备现在是平放的吗"),
+             ("beep", "响一声提示音"), ("led_off", "把本机 RGB 灯关掉"))
+    for key, text in turns[:1] if quick() else turns:  # quick: one LED turn
         device.wait_idle()
         device.action("clear_history")
         record = device.text(text)
         results[key] = (record.get("status"), raw(record))
         device.resolve_all(approve=False)
+    if quick():
+        tool_call(device, "write", "device://local/led", "off")  # turned off directly, no model turn
+        report.add("S6", "led_local", results["led"][0] == "done" and "RGB 灯已设为" in results["led"][1],
+                   str(results["led"][0]))
+        return
     report.add("S6", "led_local", results["led"][0] == "done" and "RGB 灯已设为" in results["led"][1]
                and "RGB 灯已关闭" in results["led_off"][1], f"{results['led'][0]} / {results['led_off'][0]}")
     report.add("S6", "imu_orientation", results["imu"][0] == "done" and ("俯仰" in results["imu"][1]),
@@ -1021,20 +1124,21 @@ def phase_s6(device: Device, report: Report) -> None:
     report.add("S6", "wifi_scan_voice", bool(scanned) and current in raw(record) and bool(record.get("reply")),
                f"calls={[c['arguments'].get('target') for c in calls]} summary={record.get('reply', '')[:60]!r}")
 
-    device.action("clear_history")
-    record = device.text("现在连的是哪个 WiFi？")
-    calls = operations(record)
-    report.add("S6", "wifi_status_voice",
-               bool(calls) and calls[0]["arguments"].get("target") in ("wifi://status", "wifi://scan")
-               and current in raw(record) + record.get("reply", ""),
-               record.get("reply", "")[:80])
+    if not quick():
+        device.action("clear_history")
+        record = device.text("现在连的是哪个 WiFi？")
+        calls = operations(record)
+        report.add("S6", "wifi_status_voice",
+                   bool(calls) and calls[0]["arguments"].get("target") in ("wifi://status", "wifi://scan")
+                   and current in raw(record) + record.get("reply", ""),
+                   record.get("reply", "")[:80])
     display_overlay(device, report)
-    hardware_controls(device, report)
+    hardware_controls(device, report)  # quick: battery fields and one LED turn
+    if quick():  # IR, AC code sets, files / timer / grove, IMU, beep: normal and up
+        return
     files_timer_grove(device, report)
     ir_confirm_flow(device, report)
     ac_choose_flow(device, report)
-    if quick():
-        return
 
     device.action("clear_history")
     secrets_before = device.read_file("/vat/secrets.json")
@@ -1093,18 +1197,31 @@ def phase_s6(device: Device, report: Report) -> None:
                raw(record)[:80])
 
 
+def ssh_banner(port: int = 2222) -> bool:
+    """sshd on this host answers with its version line (it accepts logins)."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.settimeout(2)
+            return s.recv(64).startswith(b"SSH-")
+    except OSError:
+        return False
+
+
 def fresh_test_box() -> bool:
-    """A disposable SSH host that needs a password for login and sudo."""
-    host(f"docker rm -f {TEST_BOX} >/dev/null 2>&1")
-    started = host(f"docker run -d --name {TEST_BOX} -p 2222:2222 -e PUID=1000 -e PGID=1000 -e USER_NAME=vat "
-                   f"-e USER_PASSWORD={TEST_BOX_PASSWORD} -e PASSWORD_ACCESS=true -e SUDO_ACCESS=true "
-                   "linuxserver/openssh-server:latest").returncode == 0
-    for _ in range(30):
-        if host("docker logs vat-e2e-box 2>&1 | grep -q 'sshd is listening\\|Server listening\\|ready'").returncode == 0:
-            break
-        time.sleep(1)
-    time.sleep(3)
-    return started
+    """A disposable SSH host that needs a password for login and sudo.
+
+    A running box is reused (it is left running after a run): only the key the
+    device installed last time is removed, so the login still asks for the
+    password.  Otherwise it is created; ready = sshd answers (no fixed wait)."""
+    running = host(f"docker inspect -f '{{{{.State.Running}}}}' {TEST_BOX} 2>/dev/null").stdout.strip() == "true"
+    reset = running and host(f"docker exec -u vat {TEST_BOX} sh -c 'rm -f \"$HOME/.ssh/authorized_keys\"'").returncode == 0
+    started = reset
+    if not reset:
+        host(f"docker rm -f {TEST_BOX} >/dev/null 2>&1")
+        started = host(f"docker run -d --name {TEST_BOX} -p 2222:2222 -e PUID=1000 -e PGID=1000 -e USER_NAME=vat "
+                       f"-e USER_PASSWORD={TEST_BOX_PASSWORD} -e PASSWORD_ACCESS=true -e SUDO_ACCESS=true "
+                       "linuxserver/openssh-server:latest").returncode == 0
+    return started and bool(until(ssh_banner, 33, 1))
 
 
 def secret_job(device: Device, value: str) -> dict:
@@ -1180,9 +1297,12 @@ def phase_s7(device: Device, report: Report) -> None:
     report.add("S7", "multistep_reject", not exists and record.get("status") == "done",
                f"exists={exists} reply={record.get('reply', '')[:60]!r}")
 
-    # Secrets on a disposable host that needs passwords.
+    # Secrets on a disposable host that needs passwords.  Outside `full`, the
+    # leak scan below reads only files that appeared or changed size from here
+    # on: a password typed in this phase can only reach a file written after it.
+    files_before = None if full() else dict(device.files("/vat"))
     if not fresh_test_box():
-        report.add("S7", "test_box", False, "docker run failed")
+        report.add("S7", "test_box", False, "docker run failed or its sshd never answered")
         return
     device.action("clear_history")
     record = device.text("连接测试机。", timeout=120)
@@ -1211,16 +1331,23 @@ def phase_s7(device: Device, report: Report) -> None:
     report.add("S7", "secret_wrong_sudo_password", "root" not in raw(record) and "密码" in raw(record) + record.get("reply", ""),
                raw(record)[:80])
 
-    # Every file the device stored, read whole (the file API streams any size).
-    leaks, scanned = [], 0
+    # Every file the device stored (`full`), or every file written since the
+    # secrets started, read whole (the file API streams any size).
+    leaks, scanned, total = [], 0, 0
     for path, size in device.files("/vat"):
         if path.endswith(".pcm"):
+            continue
+        total += 1
+        if files_before is not None and files_before.get(path) == size:
             continue
         scanned += 1
         if TEST_BOX_PASSWORD in device.read_file(path):
             leaks.append(path)
-    report.add("S7", "secret_never_stored", scanned > 10 and not leaks,
-               f"scanned={scanned} files found_in={leaks or 'nowhere'}")
+    # The secret steps always write (runtime log, timeline, window): none changed means the scan saw nothing.
+    enough = total > 10 and (scanned > 10 if files_before is None else scanned > 0)
+    report.add("S7", "secret_never_stored", enough and not leaks,
+               f"scanned={scanned}/{total} files{'' if files_before is None else ' (changed this phase)'} "
+               f"found_in={leaks or 'nowhere'}")
 
     # Terminal password prompt: the SSH page switches to masked input.
     host("tmux kill-session -t vat-pw 2>/dev/null")
@@ -1299,6 +1426,11 @@ def phase_s8(device: Device, report: Report) -> None:
     report.add("S8", "full_output_stored", meta.get("bytes", 0) >= 262144 and "只保存了前 262144 字节" in stored,
                f"out#{newest} bytes={meta.get('bytes')} file={len(stored.encode())}")
 
+    if quick():  # web search / page reading (two slow cloud turns): normal and up
+        heap = device.status()
+        report.add("S8", "heap_low_water", heap["min_free_heap"] >= 40000, f"min_free_heap={heap['min_free_heap']}")
+        return
+
     # 2. Web search and page reading (DeepSeek Search / Fetch).
     device.action("clear_history")
     record = device.text("联网搜一下 M5Stack Cardputer Adv 的官方文档网址。", timeout=180)
@@ -1314,11 +1446,6 @@ def phase_s8(device: Device, report: Report) -> None:
     report.add("S8", "web_page", record.get("status") == "done" and paged and "mAh" in record.get("reply", ""),
                record.get("reply", "")[:100])
 
-    if quick():
-        heap = device.status()
-        report.add("S8", "heap_low_water", heap["min_free_heap"] >= 40000, f"min_free_heap={heap['min_free_heap']}")
-        return
-
     # 3. After the window is cleared, the answer is only in the archive.
     device.action("clear_history")
     record = device.text("我之前查过一个 long.log，第 4 个 ERROR 的错误码是什么？不要重新读取文件。", timeout=180)
@@ -1328,6 +1455,8 @@ def phase_s8(device: Device, report: Report) -> None:
                not any(t.startswith("ssh://") for t in targets), f"targets={targets} reply={record.get('reply', '')[:80]!r}")
 
     # 4. A case survives a reboot and comes back into the conversation by itself.
+    # The reboot only in `full`: S5 already checks that a reboot restores the
+    # conversation; elsewhere the case must come back after clear_history alone.
     device.action("clear_history")
     device.text("开始一个叫 e2e-排查 的案卷。")
     device.resolve_all(approve=True)
@@ -1335,11 +1464,13 @@ def phase_s8(device: Device, report: Report) -> None:
     device.resolve_all(approve=True)
     findings = device.read_file("/vat/cases/e2e-排查/findings.jsonl")
     report.add("S8", "case_finding_written", fourth in findings, findings[:100])
-    device.reboot()
+    if full():
+        device.reboot()
     device.action("clear_history")
     record = device.text("当前案卷里记录了哪个错误码？直接回答。")
     device.resolve_all(approve=False)
-    report.add("S8", "case_after_reboot", fourth in record.get("reply", ""), record.get("reply", "")[:80])
+    report.add("S8", "case_after_reboot" if full() else "case_recall", fourth in record.get("reply", ""),
+               record.get("reply", "")[:80])
     device.text("结束 e2e-排查 这个案卷。")
     device.resolve_all(approve=True)
     state = json.loads(device.read_file("/vat/context/state.json") or "{}")
@@ -1353,12 +1484,13 @@ def phase_s8(device: Device, report: Report) -> None:
             device.resolve_all(approve=False)
             times.append(r.get("elapsed_ms", 0))
         return int(statistics.median(times))
+    repeats = 3 if full() else 2
     device.action("clear_history")
-    small = timed(3)
+    small = timed(repeats)
     device.action("clear_history")
     device.upload("/vat/context/window.jsonl", synthetic_window(40000, "记住：主机 alpha 的数据盘用了 93%。"))
     device.post("/api/reload")  # re-reads the context files
-    large = timed(3)
+    large = timed(repeats)
     report.add("S8", "latency_full_window", large <= 2 * small, f"median empty={small}ms window40k={large}ms")
 
     # 6. Over budget: the oldest part is folded into the summary, the fact survives.
@@ -1439,9 +1571,11 @@ def phase_s9(device: Device, report: Report) -> None:
 
 
 def cleanup() -> None:
-    host("tmux kill-session -t vat-e2e 2>/dev/null; tmux kill-session -t vat-pi-voice-agent-terminal 2>/dev/null;"
+    # The test box is reused within a run (fresh_test_box) but never left behind:
+    # it takes a fixed password and has sudo, on the LAN.
+    host(f"docker rm -f {TEST_BOX} >/dev/null 2>&1;"
+         " tmux kill-session -t vat-e2e 2>/dev/null; tmux kill-session -t vat-pi-voice-agent-terminal 2>/dev/null;"
          " tmux kill-session -t vat-shell 2>/dev/null; tmux kill-session -t vat-pw 2>/dev/null;"
-         f" docker rm -f {TEST_BOX} >/dev/null 2>&1;"
          " tmux kill-session -t vat-codex-voice-agent-terminal 2>/dev/null;"
          " tmux kill-session -t vat-claude-voice-agent-terminal 2>/dev/null;"
          f" rm -rf {HOST_TMP}")
@@ -1477,7 +1611,7 @@ def program_cases(device: Device, report: Report) -> None:
     cases = json.loads((PROGRAMS / "cases.json").read_text(encoding="utf-8"))
     for case in cases:
         cid = case["id"]
-        if not wanted(cid):
+        if not wanted(cid) or (quick() and cid not in QUICK_PROGRAMS):
             continue
         if case.get("save"):
             program = json.loads((PROGRAMS / case["save"]).read_text(encoding="utf-8"))
@@ -1504,7 +1638,7 @@ def program_cases(device: Device, report: Report) -> None:
             deadline = time.time() + case.get("within_s", 60)
             runs = ""
             while ok and time.time() < deadline:
-                time.sleep(3)
+                time.sleep(1)
                 runs = reply_text(tool_call(device, "read", "prog://runs"))
                 if case["then_runs_has"] in runs:
                     break
@@ -1520,11 +1654,18 @@ def trigger_cases(device: Device, report: Report) -> None:
                                 {"when": "time://in/8s", "run": {"exec": "prog://测试-灯"}}))
         tid = re.search(r"#(\d+)", made)
         report.add("S10", "trigger_once_created", "已新建触发" in made and bool(tid), made[:160])
-        time.sleep(20)
-        runs = reply_text(tool_call(device, "read", "prog://runs"))
-        listed = reply_text(tool_call(device, "read", "trigger://list"))
-        fired = bool(tid) and f"触发 #{tid.group(1)} 完成" in runs
-        gone = bool(tid) and f"#{tid.group(1)} " not in listed
+        # Polled (was a fixed 20 s): within the same 20 s it must have fired and left the list.
+        deadline = time.time() + 20
+        runs = listed = ""
+        fired = gone = False
+        while bool(tid):
+            runs = reply_text(tool_call(device, "read", "prog://runs"))
+            listed = reply_text(tool_call(device, "read", "trigger://list"))
+            fired = f"触发 #{tid.group(1)} 完成" in runs
+            gone = f"#{tid.group(1)} " not in listed
+            if (fired and gone) or time.time() >= deadline:
+                break
+            time.sleep(1)
         report.add("S10", "trigger_once_fired_and_removed", fired and gone, (runs + " | " + listed)[:200])
 
     # Daily: pause / resume without confirmation; deleting needs the user.
@@ -1627,13 +1768,16 @@ def phase_s11(device: Device, report: Report) -> None:
     panel = {"title": "E2E 面板", "lines": ["选一个"], "choices": ["甲", "乙", "丙"]}
     text = reply_text(tool_call(device, "write", "ui://panel/e2e面板", json.dumps(panel, ensure_ascii=False)))
     report.add("S11", "panel_shown", "已显示面板" in text, text[:60])
-    time.sleep(2)
-    report.add("S11", "panel_on_screen", device.status()["screen"].get("overlay") == "panel",
-               str(device.status()["screen"].get("overlay")))
+    on_screen = until(lambda: device.status()["screen"].get("overlay") == "panel", 2)  # within the 2 s it used to wait
+    report.add("S11", "panel_on_screen", on_screen, str(device.status()["screen"].get("overlay")))
     device.key(".")
     device.key("enter")
-    time.sleep(1)
-    text = reply_text(tool_call(device, "read", "ui://panel/e2e面板"))
+    deadline = time.time() + 1  # polled for the 1 s it used to wait before one read
+    while True:
+        text = reply_text(tool_call(device, "read", "ui://panel/e2e面板"))
+        if "乙" in text or time.time() >= deadline:
+            break
+        time.sleep(0.2)
     report.add("S11", "panel_choice_read", "乙" in text, text[:60])
     text = reply_text(tool_call(device, "write", "ui://panel/e2e坏", json.dumps({"title": "x", "script": "rm"})))
     report.add("S11", "panel_unknown_field_refused", "不认识的字段" in text, text[:60])
@@ -1645,14 +1789,9 @@ def phase_s11(device: Device, report: Report) -> None:
     trigger_id = re.search(r"#?(\d+)", text)
     report.add("S11", "panel_trigger_saved", "触发" in text and trigger_id is not None, text[:80])
     tool_call(device, "write", "ui://panel/e2e触发", json.dumps({"choices": ["红", "绿"]}, ensure_ascii=False))
-    time.sleep(2)
+    until(lambda: device.status()["screen"].get("overlay") == "panel", 2)  # the panel is up before the key
     device.key("enter")
-    noted = False
-    for _ in range(20):
-        time.sleep(1)
-        if "E2E 面板选了 红" in device.read_file("/vat/memory/notes.txt", tail=2000):
-            noted = True
-            break
+    noted = bool(until(lambda: "E2E 面板选了 红" in device.read_file("/vat/memory/notes.txt", tail=2000), 20, 1))
     report.add("S11", "panel_choice_runs_trigger", noted)
     if trigger_id:
         device.wait_idle()
@@ -1665,9 +1804,10 @@ def phase_s11(device: Device, report: Report) -> None:
     text = reply_text(tool_call(device, "read", "ui://apps"))
     report.add("S11", "app_listed", "e2e应用" in text, text[:80])
     device.key("fn+a")
-    time.sleep(2.5)
-    menu = device.status()["screen"].get("overlay")
+    menu = "panel" if until(lambda: device.status()["screen"].get("overlay") == "panel", 2.5) else device.status()["screen"].get("overlay")
     device.key("enter")
+    # Kept fixed on purpose: the app reads every 10 s and the case checks it is
+    # still open after one refresh; the screen model shows no refresh to wait on.
     time.sleep(13)
     opened = device.status()["screen"].get("overlay")
     device.key("esc")
@@ -1676,25 +1816,76 @@ def phase_s11(device: Device, report: Report) -> None:
     report.add("S11", "heap_after", device.status().get("free_heap", 0) > 60000, str(device.status().get("free_heap")))
 
 
+def start_prompt_lab(device: Device, out_dir: Path) -> dict:
+    """Release tier: every intent case through tools/prompt_lab.py on this host,
+    in the background while the device runs its phases.  The SSH profile names
+    and the agent model come from the device here (prompt_lab's own device
+    reads carry no token), so prompt_lab runs offline: no device requests,
+    discover answered from tests/fixtures/discover_cache.json."""
+    names = device.status().get("profiles", "")
+    try:
+        model = json.loads(device.read_file("/vat/config.json") or "{}").get("agent", {}).get("model", "")
+    except ValueError:
+        model = ""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result, log = out_dir / f"prompt-lab-{stamp}.json", out_dir / f"prompt-lab-{stamp}.log"
+    command = [sys.executable, str(ROOT / "tools" / "prompt_lab.py"), "--json", str(result)]
+    if names:
+        command += ["--profiles", names]
+    if model:
+        command += ["--model", model]
+    with open(log, "w") as stream:
+        process = subprocess.Popen(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
+    print(f"prompt_lab: every intent case on the host in the background -> {log}", flush=True)
+    return {"process": process, "result": result, "log": log, "started": time.time()}
+
+
+def finish_prompt_lab(lab: dict, report: Report, timeout: float = 600) -> None:
+    """One S2I result: every prompt_lab case passed (a flaky case fails it, like on the device)."""
+    process = lab["process"]
+    try:
+        process.wait(timeout=max(1, lab["started"] + timeout - time.time()))
+    except subprocess.TimeoutExpired:
+        process.kill()
+        report.add("S2I", "prompt_lab_all_intents", False, f"timed out after {timeout:.0f} s; log={lab['log']}")
+        return
+    try:
+        results = json.loads(lab["result"].read_text())
+    except (OSError, ValueError):
+        results = []
+    failed = sorted({r["id"] for r in results if not r.get("passed")})
+    passed = sum(1 for r in results if r.get("passed"))
+    tail = lab["log"].read_text(errors="replace").strip().splitlines()[-1:] if lab["log"].exists() else []
+    report.add("S2I", "prompt_lab_all_intents", process.returncode == 0 and bool(results) and not failed,
+               f"passed {passed}/{len(results)} exit={process.returncode} failed={failed} "
+               f"seconds={round(time.time() - lab['started'])} {tail[0][:80] if tail else ''} log={lab['log']}",
+               failed=failed)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--device", default=os.environ.get("VAT_DEVICE", "http://vat.local"))
     parser.add_argument("--phases", default="auto",
-                        help="'quick' (a case or two per phase, ~3 min), 'auto' (phases impacted by "
-                             "git diff --since), 'all' (release), or a comma list of s0,s1,s2,s2i,s3..s11")
+                        help="'quick' (a case or two per phase, <= 5 min), 'auto' (phases impacted by "
+                             "git diff --since), 'all' (release, <= 15 min: trimmed, S2I sampled on the device "
+                             "plus prompt_lab on the host), 'full' (every case on the device, the old 'all', "
+                             "~30 min), or a comma list of s0,s1,s2,s2i,s3..s11")
     parser.add_argument("--since", default="HEAD~1", help="git ref for --phases auto (default HEAD~1)")
     parser.add_argument("--only", default="", help="comma list of case-id substrings for the S1/S2 matrices")
     parser.add_argument("--out", default=str(ROOT / "logs"))
     parser.add_argument("--no-sync-profiles", action="store_true",
                         help="leave the device's test SSH profiles as they are (default: point them at this host)")
+    parser.add_argument("--no-prompt-lab", action="store_true",
+                        help="'all' only: skip tools/prompt_lab.py (needs ../.deepseek_key and the model API)")
     args = parser.parse_args()
     ONLY.extend(part for part in args.only.split(",") if part)
     global TIER
     if args.phases == "quick":
         TIER = "quick"
         phases = [p for p in ALL_PHASES if p != "s2i"]
-    elif args.phases == "all":
-        TIER = "all"
+    elif args.phases in ("all", "full"):
+        TIER = args.phases
         phases = ALL_PHASES
     elif args.phases == "auto":
         phases = impacted_phases(args.since)
@@ -1707,6 +1898,9 @@ def main() -> int:
     if not args.no_sync_profiles:
         print(sync_profiles(device, args.device), flush=True)
     started = time.time()
+    lab = None
+    if release() and "s2i" in phases and not ONLY and not args.no_prompt_lab:
+        lab = start_prompt_lab(device, Path(args.out))
     try:
         for phase in phases:
             before = device.status()
@@ -1720,6 +1914,11 @@ def main() -> int:
             report.add(phase.upper(), "no_unexpected_reboot", not unexpected,
                        f"uptime {before['uptime_s']}s -> {after['uptime_s']}s reset={after.get('reset_reason')}")
     finally:
+        if lab:
+            try:
+                finish_prompt_lab(lab, report)
+            except Exception as exc:  # noqa: BLE001 - the evidence file is written regardless
+                report.add("S2I", "prompt_lab_all_intents", False, f"{type(exc).__name__}: {exc}")
         cleanup()
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         out = Path(args.out) / f"standalone-e2e-{stamp}.json"

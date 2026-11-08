@@ -119,6 +119,28 @@ void prog_validation() {
     cJSON_Delete(p);
 }
 
+void prog_stream() {
+    // Validation: a stream needs `as`, a fixed target, and {a.x} only after it.
+    CHECK(has(check(R"({"name":"a","steps":[{"stream":"sensor://imu/acceleration"}]})"), "要写 as"));
+    CHECK(has(check(R"({"name":"a","steps":[{"read":"x://1","as":"t"},{"stream":"sensor://{t}","as":"a"}]})"), "不能用变量"));
+    CHECK(has(check(R"({"name":"a","steps":[{"write":"x://{a.x}"}]})"), "没有用 as 定义"));
+    CHECK(check(R"({"name":"a","steps":[{"stream":"sensor://imu/acceleration","as":"a"},{"write":"x://{a.x}"}]})").isEmpty());
+
+    // Run: the value is a JSON object; {a.x} reads a field, if compares it.
+    FakeHost host;
+    host.programs["倾斜"] = R"({"name":"倾斜","steps":[
+        {"stream":"sensor://imu/acceleration","as":"a"},
+        {"if":"a.z","above":"0.9","then":[{"write":"device://local/led","content":"green"}],
+                                  "else":[{"write":"device://local/led","content":"red"}]},
+        {"write":"device://local/display/text","content":"x={a.x} y={a.y} w={a.w}"}]})";
+    host.answers = {{"sensor://imu/acceleration", R"({"x":0.1,"y":-0.25,"z":0.98})"}};
+    Result r = run_through(host, "倾斜");
+    CHECK(r.status == Status::Done);
+    CHECK(called(host, "stream sensor://imu/acceleration"));
+    CHECK(called(host, "write device://local/led|green"));
+    CHECK(called(host, "write device://local/display/text|x=0.1 y=-0.25 w="));
+}
+
 void prog_run_basic() {
     FakeHost host;
     host.programs["早安"] = R"({"name":"早安","steps":[
@@ -266,6 +288,7 @@ void prog_helpers() {
 
 void prog_engine() {
     prog_validation();
+    prog_stream();
     prog_run_basic();
     prog_run_waits();
     prog_run_calls();

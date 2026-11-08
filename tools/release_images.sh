@@ -3,13 +3,12 @@
 #
 #   tools/release_images.sh <build-dir> <out-dir> <version>
 #
-#   feiyuos-<version>-cardputer-adv.bin  first install, flash at 0x0: bootloader,
+#   feiyuos-<version>-cardputer-adv.bin  install and upgrade, flash at 0x0: bootloader,
 #                                        partition table and app, cut at the end of
 #                                        the app so the storage partitions are untouched
-#   feiyuos-<version>-app.bin            upgrade, flash at 0x10000
-#   mascot.bin                           corner mascot, copy to /vat/assets/mascot.bin
-#   boot.bin                             boot animation, copy to /vat/assets/boot.bin
-#   ac.irdb                              air-conditioner IR codes, copy to /vat/ir/ac.irdb
+#   feiyuos-<version>-sd.zip             card files laid out as on the card; unzip at
+#                                        the card root: vat/assets/mascot.bin,
+#                                        vat/assets/boot.bin, vat/ir/ac.irdb
 #   SHA256SUMS.txt
 #
 # Fails when gitleaks or ../.publish_denylist (private hostnames, addresses,
@@ -32,17 +31,19 @@ cmp <(tail -c "$app_size" "$full") "$app"
 cmp <(head -c "$(stat -c %s "$build/$name.ino.bootloader.bin")" "$full") "$build/$name.ino.bootloader.bin"
 cmp <(tail -c +$((0x8000 + 1)) "$full" | head -c "$(stat -c %s "$build/$name.ino.partitions.bin")") \
     "$build/$name.ino.partitions.bin"
-cp "$app" "$out/feiyuos-$version-app.bin"
-python3 "$root/tools/pack_mascot.py" "$root/assets/mascot" "$out/mascot.bin" >/dev/null
-python3 "$root/tools/pack_mascot.py" --boot "$root/assets/boot" "$out/boot.bin" >/dev/null
-cp "$root/assets/irdb/ac.irdb" "$out/ac.irdb"
-(cd "$out" && sha256sum ./*.bin ./*.irdb | sed 's# \./# #' > SHA256SUMS.txt)
+# The card files, laid out as they go on the card, zipped after the checks.
+text=$(mktemp -d)
+sd=$(mktemp -d)
+trap 'rm -rf "$text" "$sd"' EXIT
+mkdir -p "$sd/vat/assets" "$sd/vat/ir"
+python3 "$root/tools/pack_mascot.py" "$root/assets/mascot" "$sd/vat/assets/mascot.bin" >/dev/null
+python3 "$root/tools/pack_mascot.py" --boot "$root/assets/boot" "$sd/vat/assets/boot.bin" >/dev/null
+cp "$root/assets/irdb/ac.irdb" "$sd/vat/ir/ac.irdb"
+images=("$full" "$sd"/vat/assets/*.bin "$sd"/vat/ir/*.irdb)
 
 command -v gitleaks >/dev/null || { echo "gitleaks not installed" >&2; exit 1; }
 # gitleaks skips binary files: scan the text inside the images instead.
-text=$(mktemp -d)
-trap 'rm -rf "$text"' EXIT
-for image in "$out"/*.bin "$out"/*.irdb; do strings -n 8 "$image" > "$text/$(basename "$image").txt"; done
+for image in "${images[@]}"; do strings -n 8 "$image" > "$text/$(basename "$image").txt"; done
 gitleaks dir --no-banner --exit-code 0 --report-format json --report-path "$text/report.json" "$text" >/dev/null 2>&1
 # The SSH and TLS libraries carry PEM markers ("-----BEGIN OPENSSH PRIVATE KEY-----")
 # to recognise key formats; a marker with no base64 body after it is not a key.
@@ -64,12 +65,14 @@ hits=0
 if [ -f "$denylist" ]; then
   while read -r pattern; do
     case "$pattern" in ''|'#'*) continue ;; esac
-    n=$(strings -n 6 "$out"/*.bin "$out"/*.irdb | grep -cE -- "$pattern" || true)
+    n=$(strings -n 6 "${images[@]}" | grep -cE -- "$pattern" || true)
     hits=$((hits + n))
   done < "$denylist"
 fi
-n=$(strings -n 6 "$out"/*.bin "$out"/*.irdb | grep -cF -- "$HOME" || true)
+n=$(strings -n 6 "${images[@]}" | grep -cF -- "$HOME" || true)
 hits=$((hits + n))
 [ "$hits" -eq 0 ] || { echo "private strings in the images: $hits (denylist or $HOME)" >&2; exit 1; }
+python3 "$root/tools/pack_sd.py" "$sd" "$out/feiyuos-$version-sd.zip"
+(cd "$out" && sha256sum ./*.bin ./*.zip | sed 's# \./# #' > SHA256SUMS.txt)
 ls -l "$out" | awk 'NR > 1 {print $5, $9}'
 echo "release images ready: $out"

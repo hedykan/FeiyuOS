@@ -103,5 +103,26 @@
   "id": "invalid",
   "save": "invalid.json",
   "save_error_has": "没有用 as 定义"
+ },
+ {
+  "id": "stream",
+  "save": "stream.json",
+  "run": "prog://测试-流",
+  "reply_has": [
+   "z=",
+   "pitch=",
+   "roll="
+  ],
+  "reply_lacks": [
+   "z=;",
+   "pitch=;",
+   "roll=;",
+   "ERROR"
+  ]
+ },
+ {
+  "id": "stream_invalid",
+  "save": "badstream.json",
+  "save_error_has": "不是流"
  }
 ]

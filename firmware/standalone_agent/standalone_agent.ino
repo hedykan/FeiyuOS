@@ -15,6 +15,7 @@
 #include "src/context.h"
 #include "src/net.h"
 #include "src/web_token.h"
+#include "src/ops_ble.h"
 #include "src/ops_gps.h"
 #include "src/ops_lora.h"
 #include "src/ops_wifi.h"
@@ -43,7 +44,7 @@ void setup() {
     M5Cardputer.Display.setBrightness(128);
     vat::local::probe_hardware();
     // The microphone is started only while recording (see ui.cpp record()).
-    constexpr int kBootSteps = 12;
+    constexpr int kBootSteps = 13;
     vat::ui::splash::begin();  // bubbles until the card is mounted
     vat::ui::splash::step("card", 0, kBootSteps);
 
@@ -67,7 +68,7 @@ void setup() {
     int boot_step = 2;
     const auto heap_mark = [&](const char* step) {
         static const char* const kNext[][2] = {{"registry", "context"}, {"context", "agent"},
-                                               {"agent", "radio"},       {"lora", "radio"}, {"gps", "worker"},
+                                               {"agent", "radio"},       {"lora", "radio"}, {"gps", "bluetooth"}, {"ble", "worker"},
                                                {"worker", "wifi"},      {"wifi", "time"},  {"timer", "ssh"},
                                                {"ssh", "web"},          {"web", "ready"},  {"ready", "ready"}};
         for (const auto& next : kNext) {
@@ -92,6 +93,10 @@ void setup() {
     const String gps_state = vat::gps::begin();
     heap_mark("gps");
     if (!gps_state.isEmpty()) vat::runtime_event("gps", gps_state);
+    // Bluetooth takes its memory here, while the heap is still in one piece
+    // (off unless turned on in the settings; a restart releases it).
+    vat::ble::begin();
+    heap_mark("ble");
     vat::worker::begin();
     heap_mark("worker");
 
@@ -154,6 +159,7 @@ void loop() {
     }
     vat::lora::loop();
     vat::gps::loop();
+    vat::ble::loop();
     vat::ui::loop();
     delay(2);
 }

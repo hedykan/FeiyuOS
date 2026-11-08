@@ -1,0 +1,11 @@
+# FeiyuOS: one app partition of 6.4 MB (no OTA: the firmware never updates
+# itself, so the second 3.2 MB slot of default_8MB sat empty).  nvs, otadata,
+# LittleFS (spiffs) and coredump keep their default_8MB offsets, so what is
+# stored on the device survives.  Coming from v0.6 or earlier, flash the full
+# image at 0x0 once (it carries this table).
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x660000,
+spiffs,   data, spiffs,  0x670000, 0x180000,
+coredump, data, coredump,0x7F0000, 0x10000,

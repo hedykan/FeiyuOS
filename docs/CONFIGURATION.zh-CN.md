@@ -109,6 +109,7 @@
 | 方法 | 路径 | 说明 |
 |:--|:--|:--|
 | GET | `/api/status` | 存储、网络、堆与最大连续块、socket 数、worker 栈余量、重启原因、电量、忙碌状态、当前屏幕内容（空闲堆不足时只返回精简字段） |
+| GET | `/api/mem` | 内存诊断：堆总量与碎片、按大小分档的块统计、每个任务的栈大小与最低余量、512 字节以上的已分配块（地址与大小，不含内容），隔一段时间读两次对比可找出常驻的分配 |
 | GET/POST | `/api/file?path=` | 读写 `/vat` 下的文件。GET 分块流式返回，任意大小；`tail=N` 从最后 N 字节内的行首开始，`offset=&length=` 读一段。POST 需 `Content-Type: text/plain`，只适合小文件 |
 | POST | `/api/upload?path=` | multipart 上传二进制（私钥、测试音频） |
 | POST | `/api/delete?path=` · GET `/api/ls?path=` | 删除 / 列目录 |

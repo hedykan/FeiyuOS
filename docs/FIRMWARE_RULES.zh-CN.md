@@ -14,7 +14,7 @@ Cardputer Adv 没有 PSRAM，只有约 320 KB 内部 RAM。下面每一条都来
 | 大文件（窗口、输出、网页、日志）不读成 String：发请求用文件片段，收响应用 `post_json_to_file`，Web API 分块发送，长输出用分页 | Arduino `String` 分配失败时静默变成空串：`/api/file?tail=60000` 曾一直返回空，让 E2E 的密钥扫描假通过 |
 | SSH 长输出不调大单次读取上限，用 `run_keeping` + `fetch_output` 每次取 12 KB | 见上一条 libssh 规则 |
 | cJSON 在内存不足时会**静默**失败（返回空、字段缺失）。凡是要落盘或发给模型的结构，写入前和读回后都要校验（参考 `agent.cpp` 的 `valid_turn`） | 残缺的历史记录落盘后，之后每次请求都返回 422 |
-| worker 任务栈 32 KB（实测峰值约 15.7 KB）。新增深递归或大的栈上缓冲区前，先看 `/api/status` 里的 `worker_stack_free_min` | 栈溢出会悄悄覆盖相邻的堆对象 |
+| worker 任务栈 24 KB（实测峰值约 15.8 KB）。新增深递归或大的栈上缓冲区前，先看 `/api/status` 里的 `worker_stack_free_min` | 栈溢出会悄悄覆盖相邻的堆对象 |
 
 ## 2. 音频与存储
 
@@ -75,6 +75,7 @@ Cardputer Adv 没有 PSRAM，只有约 320 KB 内部 RAM。下面每一条都来
 | 接口 | 用途 |
 |:--|:--|
 | `/api/status` | `free_heap` `max_block` `min_free_heap` `open_sockets` `worker_stack_free_min` `reset_reason` |
+| `/api/mem` | 每个任务的 `stack` / `stack_free_min`，堆块 `blocks`（`stack_of` 标出任务栈），`buckets` 看碎片 |
 | `/api/action?name=mic_test` | 不写文件地采集 0.3 s，检查麦克风 |
 | `/api/action?name=record_test` | 完整走一遍“按住 Enter 2 秒”的录音流程 |
 | `/api/screenshot` | 当前屏幕的 BMP 截图，用来远程检查界面 |

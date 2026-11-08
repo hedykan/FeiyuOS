@@ -35,6 +35,12 @@ struct LoraSettings {
     bool antenna_confirmed = false;
 };
 
+// Bluetooth LE (ops_ble).  Off by default; read once at boot, so a change
+// takes effect after a restart.
+struct BleSettings {
+    bool enabled = false;
+};
+
 struct Config {
     // network
     String wifi_ssid;
@@ -74,6 +80,7 @@ struct Config {
     String default_profile;
     // extensions
     LoraSettings lora;
+    BleSettings ble;
     bool gps_enabled = true;  // receive-only; reading the UART costs almost nothing
 };
 

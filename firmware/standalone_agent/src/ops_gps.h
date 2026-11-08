@@ -16,6 +16,10 @@ void loop();     // UI task: feeds pending NMEA bytes to the parser
 String status_text();
 // Current fix as decimal degrees (WGS-84); false when there is no recent fix.
 bool location(double& lat, double& lon);
+// The current fix for the position stream: degrees, km/h, satellites in
+// use; false without a fix in the last 10 s.
+bool fix(double& lat, double& lon, double& speed_kmh, int& satellites);
+bool active();  // reading the receiver
 // Reverse geocoding of the current fix (OpenStreetMap Nominatim): road,
 // district, city and the nearest named place.  Sends the coordinates to
 // nominatim.openstreetmap.org, so it runs only when asked; cached 60 s.

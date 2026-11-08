@@ -6,7 +6,7 @@
 namespace vat::prog {
 namespace {
 
-const char* const kActions[] = {"read", "write", "exec", "observe", "input", "session"};
+const char* const kActions[] = {"read", "write", "exec", "observe", "input", "session", "stream"};
 const char* const kControls[] = {"if", "repeat", "wait"};
 const char* const kCompare[] = {"is", "not", "has", "above", "below"};
 constexpr std::size_t kMaxLog = 40;
@@ -33,7 +33,10 @@ String text_of(const cJSON* value) {
     if (cJSON_IsNumber(value)) {
         const double d = value->valuedouble;
         if (d == static_cast<double>(static_cast<long>(d))) return String(static_cast<long>(d));
-        return String(d, 6);
+        String s(d, 6);  // 0.1, not 0.100000
+        while (s.endsWith("0")) s.remove(s.length() - 1);
+        if (s.endsWith(".")) s.remove(s.length() - 1);
+        return s;
     }
     if (cJSON_IsBool(value)) return cJSON_IsTrue(value) ? "true" : "false";
     return "";
@@ -126,6 +129,8 @@ struct Checker {
             return "";
         }
         if (is_defined(name)) return "";
+        const int dot = name.indexOf('.');  // {a.x}: field x of the JSON object in a (a stream value)
+        if (dot > 0 && is_defined(name.substring(0, dot))) return "";
         return "变量「" + name + "」在使用前没有用 as 定义过";
     }
 
@@ -145,7 +150,7 @@ struct Checker {
                 if (one_of(item->string, kActions) || one_of(item->string, kControls)) ++primaries;
             }
             if (primaries != 1) {
-                return at + "必须有且只有一个动作（read/write/exec/observe/input/session）或流程关键字（if/repeat/wait）";
+                return at + "必须有且只有一个动作（read/write/exec/observe/input/session/stream）或流程关键字（if/repeat/wait）";
             }
             const String err = one(step, depth, at);
             if (!err.isEmpty()) return err;
@@ -160,6 +165,10 @@ struct Checker {
             if (target.isEmpty()) return at + "的 " + tool + " 要写 target（字符串）";
             const cJSON* as = cJSON_GetObjectItemCaseSensitive(step, "as");
             if (as && (!cJSON_IsString(as) || !valid_var(as->valuestring))) return at + "的 as 不是合法的变量名";
+            if (tool == "stream") {
+                if (!as) return at + "的 stream 要写 as（之后用 {名字.字段} 取值）";
+                if (target.indexOf('{') >= 0) return at + "：stream 的目标不能用变量";
+            }
             const cJSON* on_error = cJSON_GetObjectItemCaseSensitive(step, "on_error");
             if (on_error && text_of(on_error) != "stop" && text_of(on_error) != "continue") {
                 return at + "的 on_error 只能是 stop 或 continue";
@@ -462,6 +471,13 @@ String Run::lookup(const Frame& frame, const String& name, Host& host) const {
     if (name.startsWith("event.")) return text_of(cJSON_GetObjectItemCaseSensitive(event_, name.substring(6).c_str()));
     if (name.startsWith("input.")) {
         return text_of(cJSON_GetObjectItemCaseSensitive(json_obj(frame.vars, "input"), name.substring(6).c_str()));
+    }
+    const int dot = name.indexOf('.');
+    if (dot > 0) {  // {a.x}: a field of a variable holding a JSON object (a stream value)
+        cJSON* object = cJSON_Parse(text_of(cJSON_GetObjectItemCaseSensitive(frame.vars, name.substring(0, dot).c_str())).c_str());
+        const String value = text_of(cJSON_GetObjectItemCaseSensitive(object, name.substring(dot + 1).c_str()));
+        cJSON_Delete(object);
+        return value;
     }
     return text_of(cJSON_GetObjectItemCaseSensitive(frame.vars, name.c_str()));
 }

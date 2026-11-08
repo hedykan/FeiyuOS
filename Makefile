@@ -8,11 +8,14 @@ DEVICE ?= http://vat.local
 DEVICE_TOKEN ?= $(shell cat $(HOME)/.config/feiyuos/device_token 2>/dev/null)
 AUTH = -H 'Authorization: Bearer $(DEVICE_TOKEN)'
 PHASES ?= auto
+# firmware/standalone_agent/partitions.csv: one 6.4 MB app partition (0x660000).
+APP_SIZE := 6684672
+BUILD_PROPS := --build-property upload.maximum_size=$(APP_SIZE)
 
 .PHONY: build upload flash wait-ready host-test mascot mascot-upload irdb-upload device-token release m5burner monitor clean e2e serial-log serial-stop probe-hardware probe-sd libs-status libs-custom libs-stock
 
 build:
-	arduino-cli compile -b '$(FQBN)' --build-path '$(BUILD_DIR)' '$(SKETCH)'
+	arduino-cli compile -b '$(FQBN)' $(BUILD_PROPS) --build-path '$(BUILD_DIR)' '$(SKETCH)'
 
 upload: build serial-stop
 	arduino-cli upload -b '$(FQBN)' -p '$(PORT)' --input-dir '$(BUILD_DIR)'
@@ -67,7 +70,7 @@ device-token:
 VERSION ?= $(shell git describe --tags --abbrev=0)
 PREFIX_MAP := -fmacro-prefix-map=$(HOME)/=~/ -fmacro-prefix-map=$(CURDIR)/=./
 release:
-	arduino-cli compile -b '$(FQBN)' --build-path build/release/build \
+	arduino-cli compile -b '$(FQBN)' $(BUILD_PROPS) --build-path build/release/build \
 		--build-property 'compiler.c.extra_flags=$(PREFIX_MAP)' \
 		--build-property 'compiler.cpp.extra_flags=$(PREFIX_MAP)' '$(SKETCH)'
 	tools/release_images.sh build/release/build 'build/release/$(VERSION)' '$(VERSION)'

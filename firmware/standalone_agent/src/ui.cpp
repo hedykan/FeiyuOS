@@ -1096,6 +1096,7 @@ String screen_text() {
     cJSON_AddStringToObject(root, "mascot", mascot_live || strcmp(mascot_name, "off") == 0 ? mascot_name : "hidden");
     String header = current_page == Page::Agent ? String("Agent") : "SSH " + model.terminal_title;
     cJSON_AddStringToObject(root, "header", header.c_str());
+    cJSON_AddStringToObject(root, "notice", model.notice.c_str());  // the bottom line ("" when none)
     String body;
     if (current_page == Page::Terminal) {
         body = model.terminal_text;

@@ -114,6 +114,23 @@ String imu_text() {
     return text;
 }
 
+bool imu_latest(float accel[3], float gyro[3]) {
+    static float a[3], g[3];
+    static unsigned long read_at = 0;
+    static bool ok = false;
+    if (!M5.Imu.isEnabled()) return false;
+    if (!ok || millis() - read_at >= 5) {
+        M5.Imu.update();
+        ok = M5.Imu.getAccel(&a[0], &a[1], &a[2]) && M5.Imu.getGyro(&g[0], &g[1], &g[2]);
+        read_at = millis();
+    }
+    for (int i = 0; i < 3; ++i) {
+        accel[i] = a[i];
+        gyro[i] = g[i];
+    }
+    return ok;
+}
+
 String request_beep(int count) {
     count = std::max(1, std::min(count, 5));
     ui::post_beep(count);

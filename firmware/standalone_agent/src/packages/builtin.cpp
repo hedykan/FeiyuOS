@@ -15,6 +15,7 @@ Package* make_wifi_package();
 Package* make_web_package();
 Package* make_lora_package();
 Package* make_gps_package();
+Package* make_ble_package();
 Package* make_place_package();
 Package* make_display_package();
 Package* make_hardware_package();
@@ -40,6 +41,7 @@ void register_builtin() {
     add(make_web_package());
     add(make_lora_package());
     add(make_gps_package());
+    add(make_ble_package());
     add(make_place_package());
     add(make_files_package());
     add(make_timer_package());

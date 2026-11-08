@@ -12,6 +12,7 @@
 #include "common.h"
 #include "config.h"
 #include "context.h"
+#include "diag_mem.h"
 #include "ops_local.h"
 #include "ops_portal.h"
 #include "storage.h"
@@ -352,6 +353,12 @@ void begin() {
     });
     web_portal::register_routes(server);
     api_on("/api/status", HTTP_GET, handle_status);
+    // DIAG: heap blocks and task stacks; compare two readings to find what stays allocated.
+    api_on("/api/mem", HTTP_GET, [] {
+        const String body = diag::mem_json();
+        if (body.isEmpty()) return send_error(503, "low memory, retry");
+        send_json(200, body);
+    });
     api_on("/api/file", HTTP_GET, handle_file_get);
     api_on("/api/file", HTTP_POST, handle_file_post);
     api_on("/api/upload", HTTP_POST, handle_upload_done, handle_upload_data);

@@ -47,13 +47,14 @@
 
 | 类别 | 关键字 | 说明 |
 |:--|:--|:--|
-| 动作（6） | `read` `write` `exec` `observe` `input` `session` | 值是 target，其余字段与该动作平时的参数相同；`mode`、`confirm_required` 等由引擎补齐 |
+| 动作（7） | `read` `write` `exec` `observe` `input` `session` | 值是 target，其余字段与该动作平时的参数相同；`mode`、`confirm_required` 等由引擎补齐 |
+| | `stream` | 取一个流的最新值：`{"stream": "sensor://imu/acceleration", "as": "a"}`，之后用 `{a.x}`。必须写 `as`，目标不能用变量；只读，不需要确认；保存时检查目标是扩展包声明过的流（discover 里标「流」的项） |
 | 流程（3） | `if` `repeat` `wait` | 见 2.2 |
 | 属性（2） | `as` | 把这一步的结果存成变量 |
 | | `on_error` | `stop`（默认）或 `continue` |
 | 比较（5） | `is` `not` `has` `above` `below` | 用于 `if` |
 
-变量：`{名字}`（`as` 存的结果）、`{input.名字}`（参数）、`{event.字段}`（触发事件的数据）、`{error}`（上一个失败步骤的原因）、`{now}`（当前时间 HH:MM）。值一律是文字，`above / below` 两边都是数字时按数字比较；替换进 target 问号后的值会去掉 `&`、`?`，以免弄乱参数。
+变量：`{名字}`（`as` 存的结果）、`{名字.字段}`（结果是 JSON 对象时取其中一个字段，如流的 `{a.x}`；没有这个字段时为空）、`{input.名字}`（参数）、`{event.字段}`（触发事件的数据）、`{error}`（上一个失败步骤的原因）、`{now}`（当前时间 HH:MM）。值一律是文字，`above / below` 两边都是数字时按数字比较；替换进 target 问号后的值会去掉 `&`、`?`，以免弄乱参数。
 
 ### 2.2 流程控制
 

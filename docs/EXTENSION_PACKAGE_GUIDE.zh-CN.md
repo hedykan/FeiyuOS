@@ -157,6 +157,17 @@ public:
 
 登记只放内存；登记方会在开机后重新登记。事件处理函数在发出事件的任务上运行，只能排队，不能做耗时工作。
 
+### 流 `streams()` / `open_stream()` / `close_stream()` / `sample()`
+
+不断变化的量（姿态、加速度、位置）做成流：程序用 `{"stream": target, "as": "a"}` 取最新值，再用 `{a.x}`。**URI 就是资源本身的**，同一个资源 `read` 读一次、`stream` 取最新值，不另设前缀；能不能当流用，只看包有没有在 `streams()` 里声明。
+
+- `streams()`：声明 `{target, fields, unit, period_ms, description}`。`fields` 是空格分隔的字段名（`"x y z"`），就是程序里的 `{a.x}`；`period_ms` 是多久取一次新值。出现在 `discover(resources)` 里并标「流」。
+- `open_stream()`：第一次有人读时调用，打开数据源（传感器、串口）；返回空字符串表示可以，否则返回原因。
+- `sample()`：按 `period_ms` 在 **UI 任务**上调用，把最新值按 `fields` 的顺序填进 `StreamValue::v`。**必须很快、不阻塞、不分配内存**；暂时没有值（如 GPS 未定位）返回 false。
+- `close_stream()`：10 秒没人读时调用，关掉数据源。
+
+注册中心负责打开、按周期采样、缓存最新值、空闲关闭；任何任务读到的都是缓存，不会和 UI 任务同时访问 I2C。现有的流：`sensor://imu/acceleration`、`sensor://imu/gyro`、`sensor://imu/orientation`（hardware 包），`sensor://gps/position`（gps 包，有 Cap 时）。
+
 ### 确认文字 `confirm_summary()`
 
 默认的确认文字是“动作 + target + 内容前 60 字”。内容是 JSON 之类人读不懂的东西时（如保存程序），返回一句人话说明要确认什么。

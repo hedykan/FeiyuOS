@@ -69,6 +69,15 @@ bool location(double& lat, double& lon) {
     return true;
 }
 
+bool fix(double& lat, double& lon, double& speed_kmh, int& satellites) {
+    if (!location(lat, lon)) return false;
+    speed_kmh = parser.speed.isValid() ? parser.speed.kmph() : 0;
+    satellites = parser.satellites.isValid() ? static_cast<int>(parser.satellites.value()) : 0;
+    return true;
+}
+
+bool active() { return running; }
+
 String status_text() {
     if (!running) return "GPS：关闭（" + off_reason + "）";
     if (parser.charsProcessed() == 0) {

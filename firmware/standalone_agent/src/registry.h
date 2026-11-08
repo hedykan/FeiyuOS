@@ -84,6 +84,32 @@ public:
     virtual bool watch(const String& target, String& normalized, String& error) { return false; }
     virtual void unwatch(const String& target) {}
 
+    // Streams: values that keep changing (motion, position), which a program
+    // takes with {"stream": target, "as": "a"} and then uses as {a.x}.  The
+    // URI is the resource's own: `read` it for one reading, `stream` it for
+    // the latest value each time.  The registry samples an open stream on the
+    // UI task every period_ms and keeps the latest value; nobody reading it
+    // for 10 s closes it again.  See the extension package guide.
+    struct StreamSpec {
+        const char* target;       // "sensor://imu/acceleration"
+        const char* fields;       // "x y z": the names programs use ({a.x})
+        const char* unit;         // "g", "度"…, "" when mixed (described below)
+        uint16_t period_ms;       // how often a new value is worth taking
+        const char* description;  // one line for discover
+    };
+    struct StreamValue {
+        static constexpr int kMax = 8;
+        double v[kMax] = {};      // in the order of `fields`
+        uint8_t count = 0;
+    };
+    virtual void streams(std::vector<StreamSpec>& out) const {}
+    // The first reader: start the source; "" when it runs, else why not.
+    virtual String open_stream(const String& target) { return "不是流"; }
+    virtual void close_stream(const String& target) {}
+    // The latest value (UI task, at most every period_ms): quick, no
+    // allocation, no waiting; false when there is none now (no fix yet).
+    virtual bool sample(const String& target, StreamValue& out) { return false; }
+
     // Text shown when an owned call waits for confirmation ("" = the default
     // one-line summary).
     virtual String confirm_summary(const String& tool, const cJSON* arguments) const { return {}; }
@@ -127,7 +153,17 @@ String package_help(const String& id);
 String watch(const String& target, String& normalized);  // "" when accepted
 void unwatch(const String& target);
 String confirm_summary(const String& tool, const cJSON* arguments);
-void loop();  // every package's loop()
+void loop();  // every package's loop(), and sampling of open streams
+
+// The declared stream `target` (query such as ?every=… ignored); false when
+// it is not one.
+bool stream_spec(const String& target, Package::StreamSpec& spec);
+// Every declared stream, "a、b、c" (for error messages).
+String stream_names();
+// The latest value of the stream `target` as a JSON object of its fields
+// ({"x":0.01,"y":0.2,"z":0.98}); opens it on first use and waits up to
+// `wait_ms` for a first value.  false with the reason in `out` otherwise.
+bool read_stream(const String& target, String& out, uint32_t wait_ms = 500);
 
 // Helper shared by packages: profile id of ssh://PROFILE[/path], or "".
 String profile_of(const String& target);

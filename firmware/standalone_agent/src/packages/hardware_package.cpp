@@ -4,6 +4,8 @@
 //   read  device://local/led
 //   write device://local/audio/beep   content: how many beeps (1-5)
 //   read  sensor://imu/orientation|motion|acceleration   (any metric: full status)
+#include <cmath>
+
 #include "../common.h"
 #include "../ops_hw.h"
 #include "../registry.h"
@@ -50,6 +52,32 @@ public:
     void hints(std::vector<Hint>& out) override {
         out.push_back({"RGB 灯", hw::led_text().substring(String("RGB 灯：").length()), "把灯调成绿色"});
         out.push_back({"姿态", "", "设备现在是平放的吗"});
+    }
+
+    void streams(std::vector<StreamSpec>& out) const override {
+        out.push_back({"sensor://imu/acceleration", "x y z", "g", 20, "IMU 加速度，平放时 z 约 1；倾斜设备做重力、水平仪"});
+        out.push_back({"sensor://imu/gyro", "x y z", "度/秒", 20, "IMU 角速度，转动、摇晃的快慢"});
+        out.push_back({"sensor://imu/orientation", "pitch roll", "度", 20, "俯仰角、横滚角，平放时都约为 0"});
+    }
+
+    String open_stream(const String& target) override {
+        float a[3], g[3];
+        return hw::imu_latest(a, g) ? String() : String("IMU（BMI270）读不到");
+    }
+
+    bool sample(const String& target, StreamValue& out) override {
+        float a[3], g[3];
+        if (!hw::imu_latest(a, g)) return false;
+        if (target == "sensor://imu/orientation") {
+            out.v[0] = std::atan2(-a[0], std::sqrt(a[1] * a[1] + a[2] * a[2])) * 180 / PI;  // as imu_text()
+            out.v[1] = std::atan2(a[1], a[2]) * 180 / PI;
+            out.count = 2;
+            return true;
+        }
+        const float* v = target == "sensor://imu/gyro" ? g : a;
+        for (int i = 0; i < 3; ++i) out.v[i] = v[i];
+        out.count = 3;
+        return true;
     }
 
     void resources(cJSON* list, int& remaining) override {

@@ -51,6 +51,28 @@ public:
         out.push_back({"附近", "", "附近有什么咖啡店"});
     }
 
+    void streams(std::vector<StreamSpec>& out) const override {
+        if (!lora::cap_present()) return;
+        out.push_back({"sensor://gps/position", "lat lon speed sats", "", 1000,
+                       "当前位置：纬度、经度（度）、速度（km/h）、在用卫星数；没定位时取不到"});
+    }
+
+    String open_stream(const String&) override {
+        return gps::active() ? String() : String("GPS 没有打开（说「打开 GPS」）");
+    }
+
+    bool sample(const String&, StreamValue& out) override {
+        double lat, lon, speed;
+        int sats;
+        if (!gps::fix(lat, lon, speed, sats)) return false;
+        out.v[0] = lat;
+        out.v[1] = lon;
+        out.v[2] = speed;
+        out.v[3] = sats;
+        out.count = 4;
+        return true;
+    }
+
     void resources(cJSON* list, int& remaining) override {
         if (!lora::cap_present()) return;
         if (!add_resource(list, remaining, "sensor://gps/location", "gps")) return;

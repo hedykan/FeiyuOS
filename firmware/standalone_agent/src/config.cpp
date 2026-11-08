@@ -90,6 +90,7 @@ String load() {
             next.context_kb = context_kb == 32 || context_kb == 96 ? context_kb : 64;
         }
         if (cJSON* gps = json_obj(config, "gps")) next.gps_enabled = json_bool(gps, "enabled", true);
+        if (cJSON* ble = json_obj(config, "ble")) next.ble.enabled = json_bool(ble, "enabled", false);
         if (cJSON* lora = json_obj(config, "lora")) {
             auto number = [lora](const char* key, double fallback) {
                 const cJSON* item = cJSON_GetObjectItemCaseSensitive(lora, key);

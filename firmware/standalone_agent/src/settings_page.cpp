@@ -9,6 +9,7 @@
 #include "common.h"
 #include "config.h"
 #include "net.h"
+#include "ops_ble.h"
 #include "ops_lora.h"
 #include "ops_portal.h"
 #include "ops_ssh.h"
@@ -21,7 +22,7 @@
 namespace vat::ui::settings {
 namespace {
 
-enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context };
+enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context, Ble };
 const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal", "webtoken", "context"};
 
 struct Field {
@@ -45,7 +46,7 @@ struct MenuItem {
     View view;
 };
 const MenuItem kMenu[] = {{"WiFi", View::WifiList}, {"Key", View::Keys},   {"SSH 主机", View::Hosts},
-                          {"LoRa", View::Lora},     {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
+                          {"LoRa", View::Lora},     {"蓝牙", View::Ble},      {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
                           {"手机设置（扫码）", View::Portal}, {"网页令牌", View::WebToken}};
 constexpr int kMenuCount = sizeof(kMenu) / sizeof(kMenu[0]);
 
@@ -180,6 +181,12 @@ String section_title() {
     }
 }
 
+std::vector<Line> ble_lines() {
+    const bool want = config::get().ble.enabled;
+    const String state = want == ble::running() ? String(want ? "已开启" : "已关闭") : String(want ? "开启（待重启）" : "关闭（待重启）");
+    return {{"开关", state}, {"立即重启生效", ""}};
+}
+
 std::vector<Line> lora_lines() {
     const auto& l = config::get().lora;
     const String state = !lora::cap_present() ? String("未检测到 Cap")
@@ -212,6 +219,7 @@ void draw_page() {
                 cfg.deepseek_key.isEmpty() || cfg.qwen_key.isEmpty() ? String("缺 Key") : String("已设置"),
                 String(cfg.profiles.size()) + " 台",
                 !lora::cap_present() ? String("无 Cap") : !cfg.lora.enabled ? String("关") : cfg.lora.frequency_mhz <= 0 ? String("缺频点") : String("开"),
+                cfg.ble.enabled == ble::running() ? String(ble::running() ? "开" : "关") : String(cfg.ble.enabled ? "开（待重启）" : "关（待重启）"),
                 String(cfg.terminal_font) + " 号",
                 String(cfg.context_kb) + " KB",
                 storage::kind() == "tf" ? String("TF 卡") : storage::degraded() ? String("板载（降级）") : String("板载"),
@@ -362,6 +370,12 @@ void draw_page() {
         case View::Lora:
             list(g, lora_lines());
             footer(g, "; . 选择  Enter 修改  ` 返回");
+            break;
+        case View::Ble:
+            list(g, ble_lines());
+            g.setTextColor(kMuted, kBg);
+            g.drawString("开机时先占好约 50 KB 内存，重启才生效", kPad, kTop + 2 * kLine + 4);
+            footer(g, "; . 选择  Enter 切换 / 重启  ` 返回");
             break;
         case View::Context: {
             static const char* const kNames[] = {"短", "中（默认）", "长"};
@@ -552,6 +566,7 @@ int item_count() {
         case View::Keys: return kProviderCount;
         case View::Hosts: return config::get().profiles.size() + 2;
         case View::Lora: return 4;
+        case View::Ble: return 2;
         case View::Font: return 3;
         case View::Context: return 3;
         default: return 1;
@@ -623,6 +638,13 @@ void enter() {
             }
             return show(settings_store::remove_profile(host_id), true, View::Hosts);
         case View::Lora: return lora_enter();
+        case View::Ble:
+            if (cursor == 0) {
+                ble::set_enabled(!config::get().ble.enabled);
+                dirty = true;
+                return;
+            }
+            return finish_online("蓝牙设置已保存");
         case View::Font:
             settings_store::set_terminal_font(kFontSizes[cursor]);
             return;
