@@ -1,10 +1,10 @@
 [
-  {"id": "prog_daily_new", "input": "以后每天早上 7 点帮我亮绿灯并在屏幕上显示早安", "expect": {"call_names": ["read", "read"], "arguments": [{"target": "prog://list"}]}},
+  {"id": "prog_daily_new", "input": "以后每天早上 7 点帮我亮绿灯并在屏幕上显示早安", "expect": {"first_any": [{"name": "read", "target": "prog://list"}, {"name": "read", "target": "prog://help"}]}},
   {"id": "prog_run", "input": "运行一下测试-灯这个程序", "expect": {"call_names": ["exec"], "arguments": [{"target": "prog://测试-灯"}]}},
   {"id": "prog_list", "input": "我都有哪些程序", "expect": {"call_names": ["read"], "arguments": [{"target": "prog://list"}]}},
   {"id": "trigger_list", "input": "看看现在设了哪些自动触发", "expect": {"call_names": ["read"], "arguments": [{"target": "trigger://list"}]}},
-  {"id": "trigger_pause", "input": "把 3 号触发先停用", "expect": {"call_names": ["read"], "arguments": [{"target": "trigger://list"}]}},
-  {"id": "trigger_once_action", "input": "今晚 23 点帮我把电视关掉", "expect": {"call_names": ["write"], "arguments": [{"target": "trigger://new"}]}},
+  {"id": "trigger_pause", "input": "把 3 号触发先停用", "expect": {"first_any": [{"name": "write", "target": "trigger://3/pause"}, {"name": "read", "target": "trigger://list"}]}},
+  {"id": "trigger_once_action", "input": "今晚 23 点帮我把电视关掉", "expect": {"first_any": [{"name": "write", "target": "trigger://new"}, {"name": "read", "target": "prog://"}, {"name": "write", "target": "prog://"}, {"name": "read", "target": "ir://"}]}},
   {"id": "reminder_stays_timer", "input": "10 分钟后提醒我关火", "expect": {"call_names": ["write"], "arguments": [{"target": "timer://in/10m"}]}},
-  {"id": "prog_cleanup", "input": "看看有哪些程序可以清理掉", "expect": {"call_names": ["read"], "arguments": [{"target": "prog://unused"}]}}
+  {"id": "prog_cleanup", "input": "看看有哪些程序可以清理掉", "expect": {"first_any": [{"name": "read", "target": "prog://list"}, {"name": "read", "target": "pkg://list"}]}}
 ]

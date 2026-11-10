@@ -54,6 +54,7 @@ String show_image(const String& path) {
     if (!path.startsWith("/vat/") || path.indexOf("..") >= 0) return "ERROR: 图片路径必须在 /vat/ 下";
     ui::Overlay overlay;
     overlay.kind = ui::Overlay::Kind::Image;
+    overlay.image_path = path;
     if (!storage::read_bytes(path, overlay.image, kMaxImage)) {
         return storage::exists(path) ? "ERROR: 图片超过 32 KB，请缩小后再显示（JPG 最省内存）"
                                      : "ERROR: 找不到图片 " + path;

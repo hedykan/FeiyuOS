@@ -37,7 +37,6 @@ bool fetch_output(const String& profile, const ExecResult& kept, const String& l
 // Connection bookkeeping used by session(connect/disconnect/list).
 String connect(const String& profile);
 String disconnect(const String& profile);
-String states_json();
 String states_text();  // numbered "1. 开发机  已连接"
 bool connected(const String& profile);
 

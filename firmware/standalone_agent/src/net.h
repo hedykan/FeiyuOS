@@ -14,8 +14,12 @@ namespace vat::net {
 // buffer size) or 1 (send buffer size), allocated if needed.  Lent to the
 // boot screen, which hands it back before the first connection.
 void* reserve_block(int index, std::size_t& bytes);
+void end_lending();  // the boot screen is done with the reserve
+// Frees / reclaims the reserve blocks nobody is using (SSH, recording).
 void release_reserve();
 void restore_reserve();
+// mbedTLS allocations served from the reserve, and large ones that were not.
+void reserve_stats(uint32_t& hits, uint32_t& misses);
 
 enum class WifiState { Off, Connecting, Connected, SetupAp };
 
@@ -36,9 +40,6 @@ struct HttpResult {
     bool ok() const { return status >= 200 && status < 300; }
 };
 
-// POST JSON with Bearer auth.  Retries transport errors and 5xx once.
-HttpResult post_json(const String& url, const String& api_key, const String& body,
-                     uint32_t timeout_ms, int attempts = 2);
 // One piece of a streamed request body: `length` bytes from memory, or, when
 // `path` is set, `length` bytes of that file starting at `offset` (read in
 // small blocks while sending, never loaded whole).  A file that turned out
@@ -60,6 +61,22 @@ HttpResult post_json_to_file(const String& url, const String& api_key, const Str
                              const String& save_path, uint32_t timeout_ms, int attempts = 2);
 
 HttpResult get(const String& url, const String& api_key, uint32_t timeout_ms);
+
+// A request of the caller's own (the http package): http:// or https://, any
+// method, the headers as given (a body without Content-Type is sent as JSON
+// when it looks like JSON, else as text).  The response body is kept up to
+// max_body bytes (error "response too large" past it), or a 2xx one is
+// written to save_path.  No retries: the method may not be idempotent.
+struct Request {
+    String method = "GET";
+    String url;
+    std::vector<std::pair<String, String>> headers;
+    String body;
+    String save_path;
+    std::size_t max_body = 16384;
+    uint32_t timeout_ms = 20000;
+};
+HttpResult request(const Request& request);
 
 // POST a body produced as: prefix + base64(wav_header + pcm_file) + suffix.
 // The PCM never has to be duplicated on storage or in RAM.

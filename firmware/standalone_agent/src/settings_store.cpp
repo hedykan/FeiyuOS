@@ -50,6 +50,37 @@ String set_provider_key(const String& provider, const String& key_in) {
     return ok ? String("已保存，下一次请求起生效（") + key_hint(key) + "）" : String("保存失败");
 }
 
+bool http_secret(const String& name, String& value, String& host) {
+    String text = storage::read_text(kSecrets, 32768);
+    cJSON* secrets = cJSON_Parse(text.c_str());
+    wipe(text);
+    const cJSON* entry = json_obj(json_obj(secrets, "http"), name.c_str());
+    value = json_str(entry, "value");
+    host = json_str(entry, "host");
+    cJSON_Delete(secrets);
+    return !value.isEmpty();
+}
+
+String set_http_secret(const String& name, const String& host, const String& value_in) {
+    String value = value_in;
+    value.trim();
+    if (value.isEmpty()) return "没有输入，未保存";
+    if (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) return "密钥不能换行，未保存";
+    String text = storage::read_text(kSecrets, 32768);
+    cJSON* secrets = cJSON_Parse(text.c_str());
+    wipe(text);
+    if (!secrets) secrets = cJSON_CreateObject();
+    cJSON* entry = object_at(object_at(secrets, "http"), name.c_str());
+    cJSON_DeleteItemFromObject(entry, "value");
+    cJSON_DeleteItemFromObject(entry, "host");
+    cJSON_AddStringToObject(entry, "value", value.c_str());
+    cJSON_AddStringToObject(entry, "host", host.c_str());
+    wipe(value);
+    const bool ok = write_json(kSecrets, secrets);
+    cJSON_Delete(secrets);
+    return ok ? String() : String("保存失败");
+}
+
 String add_profile(const String& id_in, const String& host_in, const String& user_in, int port) {
     String id = id_in, host = host_in, user = user_in;
     id.trim();
@@ -107,6 +138,13 @@ String set_terminal_font(int size) {
     config::get().terminal_font = size;
     config::save_ui_number("terminal_font", size);
     ui::apply_terminal_size();
+    return {};
+}
+
+String set_animation(int level) {
+    if (level < 0 || level > 2) return "动画只能是 开 / 减弱 / 关";
+    config::get().animation = level;
+    config::save_ui_number("animation", level);
     return {};
 }
 

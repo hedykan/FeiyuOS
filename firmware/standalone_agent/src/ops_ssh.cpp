@@ -1,3 +1,4 @@
+#include <functional>
 #include "ops_ssh.h"
 
 #include <libssh_esp32.h>
@@ -5,6 +6,7 @@
 
 #include <map>
 
+#include "arena.h"
 #include "common.h"
 #include "config.h"
 #include "context.h"
@@ -50,7 +52,8 @@ void close_cached() {
 ssh_session open_session(const SshProfile& profile, String& error) {
     if (cached && cached_profile == profile.id && ssh_is_connected(cached)) return cached;
     close_cached();
-    net::release_reserve();  // libssh grows its buffers with large reallocs
+    // The TLS reserve stays put: freeing it here let it come back in the middle
+    // of the largest free block after the session (67 -> 32 KB, 2026-11-08).
     ssh_session session = ssh_new();
     if (!session) {
         error = "SSH 内存不足";
@@ -125,12 +128,14 @@ namespace {
 constexpr int kRaw = 1;         // bytes as received: no trailing-newline trim, no truncation note
 constexpr int kKeepRemote = 2;  // leave a long stdout on the remote for fetch_output()
 constexpr std::size_t kInlineOutput = 4096;
-constexpr std::size_t kFetchPage = 12288;  // < 16 KB: see FIRMWARE_RULES §1
 constexpr std::size_t kFullOutputMax = 262144;    // kept on the card
 constexpr std::size_t kRemoteReadMax = 1048576;   // read: never copy more than this into the remote temp file
 
+// `sink`, when given, takes stdout as it arrives (false stops the read)
+// instead of collecting it in result.out.
+using Sink = std::function<bool(const char* data, std::size_t n)>;
 ExecResult run_profile(const SshProfile* profile, const String& command, const String* stdin_data,
-                       uint32_t timeout_ms, std::size_t max_output, int flags = 0);
+                       uint32_t timeout_ms, std::size_t max_output, int flags = 0, const Sink* sink = nullptr);
 
 }  // namespace
 
@@ -148,7 +153,7 @@ ExecResult run(const String& profile_id, const String& command, const String* st
 namespace {
 
 ExecResult run_profile(const SshProfile* profile, const String& command, const String* stdin_data,
-                       uint32_t timeout_ms, std::size_t max_output, int flags) {
+                       uint32_t timeout_ms, std::size_t max_output, int flags, const Sink* sink) {
     ExecResult result;
     if (cancel::requested()) {
         result.error = "已取消";
@@ -206,7 +211,12 @@ ExecResult run_profile(const SshProfile* profile, const String& command, const S
         }
         const int n = ssh_channel_read_timeout(channel, buffer, sizeof(buffer), 0, 200);
         if (n > 0) {
-            result.out.concat(buffer, n);
+            if (!sink) {
+                result.out.concat(buffer, n);
+            } else if (!(*sink)(buffer, n)) {
+                result.error = "写入失败";
+                break;
+            }
             continue;
         }
         const int e = ssh_channel_read_nonblocking(channel, buffer, sizeof(buffer), 1);
@@ -275,14 +285,24 @@ bool fetch_output(const String& profile_id, const ExecResult& kept, const String
     if (!profile || kept.remote_file.isEmpty()) return false;
     storage::remove(local_path);
     const std::size_t wanted = std::min(kept.total_bytes, max_bytes);
-    bool ok = true;
-    for (std::size_t offset = 0; ok && offset < wanted; offset += kFetchPage) {
-        const std::size_t length = std::min(kFetchPage, wanted - offset);
-        const auto page = run_profile(profile,
-                                      "tail -c +" + String(offset + 1) + " " + shell_quote(kept.remote_file) +
-                                          " | head -c " + String(length),
-                                      nullptr, 15000, length, kRaw);
-        ok = page.error.isEmpty() && page.out.length() == length && storage::append(local_path, page.out);
+    // One command, written to the card as it arrives: no page of it is ever
+    // collected in memory (it used to be 12 KB Strings grown chunk by chunk).
+    bool ok = storage::ensure_parent(local_path);
+    fs::File file = ok ? storage::fs().open(local_path, FILE_WRITE) : fs::File();
+    ok = ok && static_cast<bool>(file);
+    std::size_t written = 0;
+    if (ok) {
+        const Sink sink = [&](const char* data, std::size_t n) {
+            const std::size_t take = std::min(n, wanted - written);
+            if (take && file.write(reinterpret_cast<const uint8_t*>(data), take) != take) return false;
+            written += take;
+            return true;
+        };
+        const auto page = run_profile(profile, "head -c " + String(wanted) + " " + shell_quote(kept.remote_file), nullptr,
+                                      15000 + wanted / 20, wanted, kRaw, &sink);
+        ok = page.error.isEmpty() && written == wanted;
+        file.close();
+        storage::changed(local_path);  // written through fs()
     }
     run_profile(profile, "rm -f " + shell_quote(kept.remote_file), nullptr, 8000, 64);
     if (ok && kept.total_bytes > wanted) {
@@ -337,19 +357,6 @@ String states_text() {
         text += String(++n) + ". " + profile.id + (connected(profile.id) ? "  已连接" : "  未连接") + "\n";
     }
     return text.isEmpty() ? String("没有 SSH profile") : text;
-}
-
-String states_json() {
-    cJSON* list = cJSON_CreateArray();
-    for (const auto& profile : config::get().profiles) {
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "profile", profile.id.c_str());
-        cJSON_AddBoolToObject(item, "connected", connected(profile.id));
-        cJSON_AddItemToArray(list, item);
-    }
-    const String json = json_print(list);
-    cJSON_Delete(list);
-    return json;
 }
 
 bool parse_target(const String& target, String& profile, String& path, String& error) {

@@ -234,6 +234,7 @@ public:
 | ID | 认领范围 | 说明 |
 |:--|:--|:--|
 | `memory` | `memory://out` `memory://history` `memory://cases` 的 read；`memory://cases/…` 的 write；session attach/disconnect `memory://cases/…` | 完整输出分页与 grep、历史检索、案卷；需要 TF 卡（注册在 `local` 之前） |
+| `settings` | `settings://`（read）；`settings://animation`、`statusbar`、`font`、`open/<页>`（write） | 0.7：读设置页各行；改动画、顶栏、终端字号；在设备上打开设置页，`open/key/<提供方>` 弹出掩码输入框，Key 不经过模型；`open/portal`、`open/webtoken` 每次确认。全部在 UI 任务里执行 |
 | `local` | `device://local/*`、其余 `memory://*` | 状态、亮度、息屏、音量、剪贴板、记忆笔记、最近任务。事件：`device://boot`（核心在启动就绪时发出） |
 | `ssh` | `ssh://…` 的 read/write/exec；session connect/disconnect/list（`ssh://` 或空） | libssh；输出在远端限长；connect 接入该主机的 `vat-shell` 终端；私钥未被接受时请求一次登录密码并装好设备公钥；需要密码的 sudo 请求 sudo 密码，经 stdin 传入 |
 | `tmux` | observe/input；read `tui://` `agent://`；session create/attach、`tmux://` list/connect | 远端 tmux 观察与输入 |

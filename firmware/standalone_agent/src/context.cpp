@@ -259,10 +259,7 @@ bool drop_before(std::size_t offset) {
     File source = storage::fs().open(kWindow, FILE_READ);
     File target = storage::fs().open(temp, FILE_WRITE);
     storage::changed(temp);  // written through fs(): not "missing" any more
-    bool ok = source && target && source.seek(offset);
-    uint8_t buffer[512];
-    int n;
-    while (ok && (n = source.read(buffer, sizeof(buffer))) > 0) ok = target.write(buffer, n) == static_cast<size_t>(n);
+    const bool ok = source && target && source.seek(offset) && storage::copy_stream(source, target);
     if (source) source.close();
     if (target) target.close();
     if (!ok || !storage::rename(temp, kWindow)) {
@@ -292,10 +289,7 @@ bool commit_task(const String& user_json, const String& answer_json) {
     if (storage::exists(kTask)) {
         File source = storage::fs().open(kTask, FILE_READ);
         File target = storage::fs().open(kWindow, FILE_APPEND);
-        ok = source && target;
-        uint8_t buffer[512];
-        int n;
-        while (ok && (n = source.read(buffer, sizeof(buffer))) > 0) ok = target.write(buffer, n) == static_cast<size_t>(n);
+        ok = source && target && storage::copy_stream(source, target);
         if (source) source.close();
         if (target) target.close();
         storage::changed(kWindow);  // appended through fs()

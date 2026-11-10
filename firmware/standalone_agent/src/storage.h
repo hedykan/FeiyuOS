@@ -41,6 +41,10 @@ bool read_range_bytes(const String& path, std::size_t offset, std::size_t length
 bool read_bytes(const String& path, std::vector<uint8_t>& out, std::size_t max_bytes);
 bool rename(const String& from, const String& to);           // replaces `to`
 bool remove(const String& path);
+// file:///vat/x, /vat/x or x -> /vat/x (no trailing slash).
+String vat_path(const String& target);
+// Why a tool may not read / write `path` (keys, SSH, system files), "" when it may.
+String refused_path(const String& path, bool writing);
 // A file was written outside these functions (e.g. a multipart upload).
 void changed(const String& path);
 // Main loop, only while the worker is idle (remounting under a running job
@@ -54,11 +58,8 @@ uint32_t card_hz();  // SPI clock the card is mounted at (0 when not on a card)
 bool degraded();
 // Storage calls that took over a second since boot: "count/max ms".
 String slow_report();
-// DIAG: remount the card at `hz` and time a fixed mix of operations
-// (append x100, write/read/size x30, remove); returns JSON per operation:
-// count, avg/max ms and how many took >400 ms (a missed 500 ms read token).
-// Only while nothing else uses storage.  Remounts at `hz` and stays there.
-String bench(uint32_t hz);
+// Copies the rest of `from` into `to`; false when a write falls short.
+bool copy_stream(File& from, File& to);
 bool remove_tree(const String& path);
 String list_dir(const String& path);  // JSON array of {name,size,dir}
 

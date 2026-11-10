@@ -1,11 +1,20 @@
 #include "diag_mem.h"
 
+#include "common.h"
+
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "net.h"
+
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+
+#if CONFIG_HEAP_TRACING_STANDALONE
+#include <esp_heap_trace.h>
+#endif
 
 namespace vat::diag {
 namespace {
@@ -118,10 +127,103 @@ String mem_json() {
                 out += ",\"stack_of\":\"" + String(owner->pcTaskName) + "\"";
         out += '}';
     }
-    out += "],\"dropped\":" + String(walk.dropped) + "}";
+    uint32_t hits, misses;
+    net::reserve_stats(hits, misses);
+    out += "],\"dropped\":" + String(walk.dropped) + ",\"tls_reserve\":{\"hits\":" + String(hits) +
+           ",\"misses\":" + String(misses) + "}}";
     free(tasks);
     free(list);
     return out;
 }
+
+namespace {
+volatile uint32_t failed_count = 0;
+volatile uint32_t failed_size = 0;
+volatile uint32_t failed_caps = 0;
+const char* volatile failed_function = nullptr;
+uint32_t failed_reported = 0;
+
+void on_alloc_failed(size_t size, uint32_t caps, const char* function) {
+    failed_size = size;
+    failed_caps = caps;
+    failed_function = function;
+    failed_count = failed_count + 1;
+}
+}  // namespace
+
+void begin() { heap_caps_register_failed_alloc_callback(on_alloc_failed); }
+
+void report() {
+    const uint32_t count = failed_count;
+    if (count == failed_reported) return;
+    const uint32_t missed = count - failed_reported - 1;
+    failed_reported = count;
+    runtime_event("alloc_failed", String(static_cast<unsigned>(failed_size)) + " B caps=" + String(failed_caps, HEX) + " in " +
+                                      (failed_function ? failed_function : "?") + " largest=" +
+                                      String(static_cast<unsigned>(heap_caps_get_largest_free_block(kCaps))) +
+                                      (missed ? " (+" + String(missed) + " more)" : String()));
+}
+
+#if CONFIG_HEAP_TRACING_STANDALONE
+namespace {
+heap_trace_record_t* records_buffer = nullptr;
+std::size_t records_capacity = 0;
+bool tracing = false;
+}  // namespace
+
+void trace_from_boot() {
+    static heap_trace_record_t boot_records[300];
+    records_buffer = boot_records;
+    records_capacity = 300;
+    if (heap_trace_init_standalone(records_buffer, records_capacity) == ESP_OK && heap_trace_start(HEAP_TRACE_LEAKS) == ESP_OK) {
+        tracing = true;
+    }
+}
+
+String heap_trace(const String& action, std::size_t records) {
+    if (action == "start") {
+        if (tracing) return "{\"error\":\"already tracing\"}";
+        records = records ? std::min<std::size_t>(records, 600) : 200;
+        if (records != records_capacity) {
+            if (records_capacity != 300) heap_caps_free(records_buffer);  // 300: the static boot buffer
+            records_buffer = static_cast<heap_trace_record_t*>(heap_caps_malloc(records * sizeof(heap_trace_record_t), kCaps));
+            records_capacity = records_buffer ? records : 0;
+            if (!records_buffer) return "{\"error\":\"no memory for the records\"}";
+            if (heap_trace_init_standalone(records_buffer, records_capacity) != ESP_OK) return "{\"error\":\"init failed\"}";
+        }
+        if (heap_trace_start(HEAP_TRACE_LEAKS) != ESP_OK) return "{\"error\":\"start failed\"}";
+        tracing = true;
+        return "{\"tracing\":true,\"records\":" + String(records_capacity) + ",\"record_bytes\":" +
+               String(sizeof(heap_trace_record_t)) + "}";
+    }
+    if (action == "stop") {
+        if (tracing) heap_trace_stop();
+        tracing = false;
+        return "{\"tracing\":false,\"count\":" + String(heap_trace_get_count()) + "}";
+    }
+    if (action != "dump") return "{\"error\":\"action: start, stop or dump\"}";
+    if (tracing) return "{\"error\":\"stop first: the dump itself would be traced\"}";
+    const std::size_t count = heap_trace_get_count();
+    String out;
+    out.reserve(64 + count * (24 + CONFIG_HEAP_TRACING_STACK_DEPTH * 11));
+    out += "{\"count\":" + String(count) + ",\"capacity\":" + String(records_capacity) + ",\"records\":[";
+    for (std::size_t i = 0; i < count; ++i) {
+        heap_trace_record_t r;
+        if (heap_trace_get(i, &r) != ESP_OK) break;
+        if (i) out += ',';
+        out += "{\"a\":\"" + String(reinterpret_cast<uintptr_t>(r.address), HEX) + "\",\"s\":" + String(r.size) + ",\"by\":[";
+        for (int d = 0; d < CONFIG_HEAP_TRACING_STACK_DEPTH && r.alloced_by[d]; ++d) {
+            if (d) out += ',';
+            out += "\"" + String(reinterpret_cast<uintptr_t>(r.alloced_by[d]), HEX) + "\"";
+        }
+        out += "]}";
+    }
+    out += "]}";
+    return out;
+}
+#else
+String heap_trace(const String&, std::size_t) { return "{\"error\":\"this build has no heap tracing (tools/heaptrace.py)\"}"; }
+void trace_from_boot() {}
+#endif
 
 }  // namespace vat::diag

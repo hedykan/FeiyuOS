@@ -1,4 +1,5 @@
 #include "events.h"
+#include "cjk_font.h"
 #include "ui.h"
 
 #include <M5Cardputer.h>
@@ -9,12 +10,14 @@
 #include "agent.h"
 #include "common.h"
 #include "config.h"
+#include "console.h"
 #include "net.h"
 #include "ops_local.h"
 #include "ops_tui.h"
 #include "ops_hw.h"
 #include "ops_timer.h"
 #include "ops_wifi.h"
+#include "prog_runtime.h"
 #include "registry.h"
 #include "storage.h"
 #include "settings_page.h"
@@ -22,6 +25,7 @@
 #include "ui_mascot.h"
 #include "ui_overlay.h"
 #include "ui_recorder.h"
+#include "ui_status.h"
 #include "worker.h"
 
 namespace vat::ui {
@@ -35,7 +39,26 @@ enum class View : uint8_t { List, Detail, Help };
 enum class VoiceMode : uint8_t { Agent, Text };
 
 Page current_page = Page::Agent;
+Page previous_page = Page::Agent;  // where closing the graphics page returns to
+bool input_from_graphics = false;   // a program asked for a line while its picture was up
 View view = View::List;
+// The program page: the list (programs and local apps) or the console.
+struct ProgramItem {
+    String name;
+    String about;
+    bool app = false;  // a local app (ui://apps): opens on the graphics page
+};
+std::vector<ProgramItem> program_items;
+bool program_list = true;  // false: the console (a run, or the last one's output)
+int program_cursor = 0;
+int output_scroll = 0;     // display rows up from the newest
+uint32_t console_drawn = UINT32_MAX;
+uint32_t console_second = 0;
+CursorSlide program_bar;
+CursorSlide program_scroll;
+CursorSlide help_bar;
+CursorSlide help_list_scroll;
+CursorSlide timeline_scroll;  // the timeline's first row × kLine
 VoiceMode voice_mode = VoiceMode::Agent;
 int cursor = -1;  // index into the timeline; -1 follows the newest entry
 int detail_scroll = 0;
@@ -120,7 +143,7 @@ void icon(Gfx& g, int x, int y, Status status, bool selected) {
             g.setTextColor(bg, kWarn);
             g.setFont(&fonts::Font0);
             g.drawString(status == Status::Confirm ? "?" : "*", x + 2, y + 2);
-            g.setFont(&fonts::efontCN_12);
+            g.setFont(&cjk::cn12);
             break;
         case Status::Cancelled:
             g.drawFastHLine(x + 1, y + 5, 7, kMuted);
@@ -141,54 +164,64 @@ void icon(Gfx& g, int x, int y, Status status, bool selected) {
     }
 }
 
-void wifi_bars(Gfx& g, int x, int y) {
-    const bool online = net::state() == net::WifiState::Connected;
-    const int rssi = net::rssi();
-    const int level = !online ? 0 : rssi > -60 ? 3 : rssi > -75 ? 2 : 1;
-    for (int i = 0; i < 3; ++i) {
-        const int h = 3 + i * 2;
-        const uint16_t color = !online ? kDanger : i < level ? kAccent : kMuted;
-        g.fillRect(x + i * 4, y + 9 - h, 3, h, color);
+const char* page_name(Page page) {
+    switch (page) {
+        case Page::Agent: return "Agent";
+        case Page::Terminal: return "SSH";
+        case Page::Program: return "程序";
+        default: return "图形";
     }
 }
 
-void top_bar(Gfx& g, const Model& model) {
-    g.fillRect(0, 0, kWidth, kBarHeight, kSurface);
-    g.setFont(&fonts::efontCN_12);
-    const bool agent = current_page == Page::Agent;
-    g.setTextColor(agent ? kText : kMuted, kSurface);
-    g.drawString("Agent", kPad, 2);
-    const int agent_w = g.textWidth("Agent");
-    g.setTextColor(!agent ? kText : kMuted, kSurface);
-    g.drawString("SSH", kPad + agent_w + 10, 2);
-    const int underline_x = agent ? kPad : kPad + agent_w + 10;
-    const int underline_w = agent ? agent_w : g.textWidth("SSH");
-    g.fillRect(underline_x, kBarHeight - 2, underline_w, 2, kAccent);
-
-    // Right side: busy seconds, where we are, Wi-Fi.
-    int right = kWidth - kPad - 12;
-    wifi_bars(g, right, 3);
-    right -= 6;
-    String where;
-    uint16_t where_color = kMuted;
-    if (agent) {
-        where = tui::has_current() ? tui::current().profile : config::get().default_profile;
-    } else {
-        where = model.terminal_title;
+void top_bar(Gfx& screen, const Model& model) {
+    // Through the strip: the bar is also redrawn on its own when a status item
+    // changes (the minute, the battery), without flashing.
+    band(screen, 0, kBarHeight, kSurface, [&](Gfx& g, int top) {
+        const char* name = page_name(current_page);
+        g.setTextColor(kText, kSurface);
+        g.drawString(name, kPad, top + 2);
+        int left = kPad + g.textWidth(name) + 10;
+        if (current_page == Page::Agent) {
+            // The host is the SSH page's business; here the chosen status items.
+            if (model.busy) {
+                const String secs = String((millis() - model.stage_started_ms) / 1000) + "s";
+                g.setTextColor(kAccent, kSurface);
+                g.drawString(secs, left, top + 2);
+                left += g.textWidth(secs) + 6;
+            }
+            status::draw(g, top, kWidth - kPad, left, kSurface);
+            return;
+        }
+        if (current_page == Page::Program) {
+            const console::Head h = console::head();
+            if (h.name.isEmpty() || program_list) return;
+            String right;
+            uint16_t color = kMuted;
+            if (h.running) {
+                right = String((millis() - h.started) / 1000) + "s";
+                color = kAccent;
+            } else {
+                right = h.status;
+                color = h.failed ? kDanger : kMuted;
+            }
+            right = fit(g, right, 90);
+            g.setTextColor(color, kSurface);
+            g.drawRightString(right, kWidth - kPad, top + 2);
+            g.setTextColor(kText, kSurface);
+            g.drawString(fit(g, h.name, kWidth - kPad - g.textWidth(right) - 8 - left), left, top + 2);
+            return;
+        }
+        int right = kWidth - kPad - 12;
+        wifi_bars(g, right, top + 3);
+        right -= 6;
+        String where = model.terminal_title;
         const bool online = where != "未连接";
-        g.fillCircle(right - 3, 7, 3, online ? kAccent : kMuted);
+        g.fillCircle(right - 3, top + 7, 3, online ? kAccent : kMuted);
         right -= 10;
-        where_color = online ? kText : kMuted;
-    }
-    g.setTextColor(where_color, kSurface);
-    where = fit(g, where, 90);
-    g.drawString(where, right - g.textWidth(where), 2);
-    right -= g.textWidth(where) + 6;
-    if (model.busy && agent) {
-        const String secs = String((millis() - model.stage_started_ms) / 1000) + "s";
-        g.setTextColor(kAccent, kSurface);
-        g.drawString(secs, right - g.textWidth(secs), 2);
-    }
+        g.setTextColor(online ? kText : kMuted, kSurface);
+        where = fit(g, where, std::min(90, right - left));
+        g.drawString(where, right - g.textWidth(where), top + 2);
+    });
 }
 
 // ---------------------------------------------------------------- Agent timeline
@@ -276,8 +309,14 @@ std::vector<Row> timeline_rows(Gfx& g, const Model& model, int selected) {
     return rows;
 }
 
+// The selected entry's highlight: its top and bottom edges slide on their own,
+// so it changes height as it moves to an entry of more or fewer rows.
+CursorSlide timeline_top;
+CursorSlide timeline_bottom;
+bool timeline_sliding() { return timeline_top.sliding() || timeline_bottom.sliding() || timeline_scroll.sliding(); }
+
 void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     const int count = model.timeline.size();
     const int selected = cursor < 0 || cursor >= count ? count - 1 : cursor;
     const auto rows = timeline_rows(g, model, selected);
@@ -301,48 +340,91 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
         }
         first = std::min(first, head);
     }
+    const int scroll_px = timeline_scroll.follow(first * kLine, 0);  // the rows slide to `first`
+    const int region_top = top - 1;
+    const int region_bottom = top - 1 + visible * kLine;
+
+    // The highlight [bar_top, bar_bottom): the selected entry's rows, sliding there.
+    int bar_top = -1;
+    int bar_bottom = -1;
+    if (cursor >= 0) {
+        int head = -1;
+        int tail = -1;
+        for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+            if (rows[r].entry != selected) continue;
+            if (head < 0) head = r;
+            tail = r;
+        }
+        if (head >= 0) {
+            // In the timeline's own coordinates, so a scroll does not make it jump.
+            bar_top = timeline_top.follow(top - 1 + head * kLine, 0) - scroll_px;
+            bar_bottom = timeline_bottom.follow(top - 1 + (tail + 1) * kLine, 0) - scroll_px;
+        }
+    } else {
+        timeline_top.reset();
+        timeline_bottom.reset();
+    }
 
     g.fillRect(0, kBarHeight, kWidth, top - 1 - kBarHeight, kBg);
     if (mascot_on) mascot::reset_backdrop(kBg);  // rows beside it set their own colour below
-    int drawn = 0;
-    for (int r = first; r < static_cast<int>(rows.size()) && r < first + visible; ++r, ++drawn) {
+    g.setClipRect(0, region_top, kWidth, region_bottom - region_top);  // rows half out while sliding
+    for (int r = std::max(0, scroll_px / kLine); r < static_cast<int>(rows.size()); ++r) {
         const Row& row = rows[r];
-        const int y = top + (r - first) * kLine;
+        const int y = top + r * kLine - scroll_px;
+        if (y - 1 >= region_bottom) break;
         const Entry& e = model.timeline[row.entry];
         const bool sel = row.entry == selected && cursor >= 0;
         const bool attention = row.entry == count - 1 &&
                                (e.status == Status::Confirm || e.status == Status::Secret);
-        const uint16_t bg = sel ? kSurface : kBg;
+        // The part of this row under the (maybe sliding) highlight.
+        const int hl_top = std::max(bar_top, y - 1);
+        const int hl_bottom = std::min(bar_bottom, y - 1 + kLine);
+        const bool lit = hl_top < hl_bottom;
+        const uint16_t bg = lit && hl_top == y - 1 && hl_bottom == y - 1 + kLine ? kSurface : kBg;
         // Rows beside the corner mascot: the background runs up to it (the mascot
         // paints the same colour behind itself, so a selected row shows through),
         // the text stops short of it.
         const int right = mascot_on && y - 1 + kLine > mascot::kTop ? mascot::kLeft - 2 : kWidth;
         const bool short_row = right < kWidth;
-        g.fillRect(0, y - 1, short_row ? mascot::kLeft : kWidth, kLine, bg);  // each row clears itself
+        const int fill_w = short_row ? mascot::kLeft : kWidth;
+        g.fillRect(0, y - 1, fill_w, kLine, bg);  // each row clears itself
+        if (lit && bg != kSurface) g.fillRect(0, hl_top, fill_w, hl_bottom - hl_top, kSurface);
         if (short_row && y - 1 < mascot::kTop) {  // the slice of the row above the mascot runs to the edge
             g.fillRect(mascot::kLeft, y - 1, mascot::kSize, mascot::kTop - (y - 1), bg);
+            const int lit_end = std::min(hl_bottom, mascot::kTop);
+            if (lit && bg != kSurface && hl_top < lit_end) g.fillRect(mascot::kLeft, hl_top, mascot::kSize, lit_end - hl_top, kSurface);
         }
         if (short_row) {
             mascot::set_backdrop(y - 1, kLine, bg);
-            g.setClipRect(0, y - 1, right, kLine);
+            if (lit) mascot::set_backdrop(hl_top, hl_bottom - hl_top, kSurface);
+            const int clip_top = std::max(y - 1, region_top);
+            g.setClipRect(0, clip_top, right, std::max(0, std::min(y - 1 + kLine, region_bottom) - clip_top));
         }
-        if (sel || attention) g.fillRect(0, y - 1, 2, kLine, attention ? kWarn : kAccent);
+        if (attention) g.fillRect(0, y - 1, 2, kLine, kWarn);
+        else if (lit) g.fillRect(0, hl_top, 2, hl_bottom - hl_top, kAccent);
+        const bool partly = lit && bg != kSurface;  // text over two colours: transparent
+        const auto text_color = [&](uint16_t fg) {
+            if (partly) g.setTextColor(fg);
+            else g.setTextColor(fg, bg);
+        };
         if (row.head) {
-            g.setTextColor(kMuted, bg);
+            text_color(kMuted);
             g.drawString(e.time, kPad, y);
-            g.setTextColor(e.status == Status::Cancelled ? kMuted : kText, bg);
+            text_color(e.status == Status::Cancelled ? kMuted : kText);
             g.drawString(short_row ? fit(g, row.text, right - kPad * 2 - 44 - 14) : row.text, kPad + 44, y);
             icon(g, right - kPad - 10, y + 1, e.status, sel);
         } else if (row.text == "\x01stage") {
             draw_stage(g, kPad + row.indent, y, e, bg);
         } else {
-            g.setTextColor(row.color, bg);
+            text_color(row.color);
             g.drawString(short_row ? fit(g, row.text, right - kPad - row.indent) : row.text, kPad + row.indent, y);
         }
-        if (short_row) g.clearClipRect();
+        if (short_row) g.setClipRect(0, region_top, kWidth, region_bottom - region_top);
     }
+    g.clearClipRect();
 
-    const int rows_end = top - 1 + drawn * kLine;  // clear what the rows did not cover
+    // Clear what the rows did not cover.
+    const int rows_end = std::clamp(top - 1 + static_cast<int>(rows.size()) * kLine - scroll_px, region_top, region_bottom);
     if (mascot_on) {  // ...except the mascot's corner, which is drawn last
         g.fillRect(0, rows_end, mascot::kLeft, kHeight - rows_end, kBg);
         if (rows_end < mascot::kTop) g.fillRect(mascot::kLeft, rows_end, mascot::kSize, mascot::kTop - rows_end, kBg);
@@ -381,7 +463,7 @@ void draw_secret(Gfx& g, const Model& model) {
     const int top = 50;
     g.fillRect(0, top - 4, kWidth, kHeight - top + 4, kBg);
     g.drawFastHLine(0, top - 4, kWidth, kSurface);
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     g.setTextColor(kAccent, kBg);
     g.drawString("输入密码", kPad, top);
     g.setTextColor(kMuted, kBg);
@@ -417,7 +499,7 @@ void build_detail(const Model& model, int index) {
     const Entry& e = model.timeline[index];
     detail_id = e.id;
     auto& g = M5Cardputer.Display;
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     const int w = kWidth - kPad * 2;
     auto add = [&](const String& text, uint16_t color, int max_lines) {
         for (const auto& line : wrap(g, text, w, max_lines)) detail_lines.push_back({line, color});
@@ -444,7 +526,7 @@ void build_detail(const Model& model, int index) {
 }
 
 void draw_detail(Gfx& g, const Model& model) {
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     const int top = kBarHeight + 2;
     const Entry* entry = nullptr;
     for (const auto& e : model.timeline) {
@@ -470,7 +552,7 @@ void draw_detail(Gfx& g, const Model& model) {
 // ---------------------------------------------------------------- help
 
 void draw_help(Gfx& g) {
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     const int top = kBarHeight + 2;
     const char* titles[] = {"按键", "设置（直接说）", "能做的事"};
     g.setTextColor(kAccent, kBg);
@@ -488,11 +570,11 @@ void draw_help(Gfx& g) {
     };
     if (help_page == 0) {
         row("Enter", "按住说话   Fn+Enter 说进草稿", kMuted);
-        row("Btn0", "切换 Agent / SSH", kMuted);
+        row("Btn0", "切换页面：Agent SSH 程序 图形", kMuted);
         row("; .", "上下选择   / 详情   , 返回", kMuted);
         row("Y N A", "执行 / 取消 / 后续都执行", kMuted);
         row("`", "取消当前任务", kMuted);
-        row("Fn+A", "本地应用   Fn+W 设置", kMuted);
+        row("Fn+A", "程序页   Fn+W 设置", kMuted);
         row("Fn+Tab", "只转写   Fn+Space 息屏", kMuted);
         return;
     }
@@ -518,25 +600,24 @@ void draw_help(Gfx& g) {
         return;
     }
     const int visible = (kHeight - y - kLine) / kLine;
-    const int first = std::clamp(help_cursor - visible + 1, 0, std::max(0, static_cast<int>(rows.size()) - visible));
-    for (int i = first; i < static_cast<int>(rows.size()) && i < first + visible; ++i) {
+    const int count = rows.size();
+    const int first = std::clamp(help_cursor - visible + 1, 0, std::max(0, count - visible));
+    const int bar_at = help_bar.follow(help_cursor * kLine, help_page);
+    const int scroll_px = help_list_scroll.follow(first * kLine, help_page);
+    scrolled_rows(g, y, std::min(visible, count), scroll_px, count, bar_at, [&](Gfx& b, int i, int ty) {
         const auto& hint = rows[i];
-        const bool on = i == help_cursor;
-        const uint16_t bg = on ? kSurface : kBg;
-        g.fillRect(0, y - 1, kWidth, kLine, bg);
-        g.setTextColor(on ? kAccent : kText, bg);
-        g.drawString(fit(g, hint.name, 52), kPad, y);
+        b.setTextColor(i == help_cursor ? kAccent : kText);
+        b.drawString(fit(b, hint.name, 52), kPad, ty);
         int x = kPad + 56;
         if (!hint.value.isEmpty()) {
-            g.setTextColor(kAccent, bg);
-            const String value = fit(g, hint.value, 60);
-            g.drawString(value, x, y);
-            x += std::max<int>(64, g.textWidth(value) + 6);
+            b.setTextColor(kAccent);
+            const String value = fit(b, hint.value, 60);
+            b.drawString(value, x, ty);
+            x += std::max<int>(64, b.textWidth(value) + 6);
         }
-        g.setTextColor(kMuted, bg);
-        g.drawString(fit(g, "“" + hint.example + "”", kWidth - x - kPad), x, y);
-        y += kLine;
-    }
+        b.setTextColor(kMuted);
+        b.drawString(fit(b, "“" + hint.example + "”", kWidth - x - kPad), x, ty);
+    });
     g.setTextColor(kMuted, kBg);
     g.drawRightString("; . 选择  Enter 详情", kWidth - kPad, kHeight - kLine);
 }
@@ -609,6 +690,184 @@ bool secret_active(const Model& model) {
            !model.pending.front().secret_prompt.isEmpty();
 }
 
+// ---------------------------------------------------------------- the program page
+
+void switch_page(Page next);
+
+void refresh_program_items() {
+    program_items.clear();
+    for (const auto& p : programs::runnable()) program_items.push_back({p.first, p.second, false});
+    cJSON* list = cJSON_Parse(storage::list_dir("/vat/things/apps").c_str());
+    const cJSON* entry = nullptr;
+    cJSON_ArrayForEach(entry, list) {
+        const String file = json_str(entry, "name");
+        if (file.endsWith(".json")) program_items.push_back({file.substring(0, file.length() - 5), String(), true});
+    }
+    cJSON_Delete(list);
+    program_cursor = std::clamp(program_cursor, 0, std::max(0, static_cast<int>(program_items.size()) - 1));
+}
+
+constexpr int kProgramTop = kBarHeight + 3;  // the first text row
+constexpr int kProgramRows = (kHeight - kLine - kProgramTop + 1) / kLine;
+
+void program_footer(Gfx& screen, const String& text, uint16_t color) {
+    band(screen, kHeight - kLine, kLine, kBg, [&](Gfx& g, int top) {
+        g.setTextColor(color, kBg);
+        g.drawString(fit_tail(g, text, kWidth - kPad * 2), kPad, top);
+    });
+}
+
+void draw_program_list(Gfx& g) {
+    const int count = program_items.size();
+    if (count == 0) {
+        g.fillRect(0, kBarHeight, kWidth, kHeight - kBarHeight, kBg);
+        g.setTextColor(kMuted, kBg);
+        g.drawCentreString("还没有程序或本地应用", kWidth / 2, 46);
+        g.drawCentreString("对大肥鱼说：写个程序……", kWidth / 2, 62);
+        return;
+    }
+    const int first = std::max(0, std::min(program_cursor - kProgramRows / 2, count - kProgramRows));
+    const int bar_at = program_bar.follow(program_cursor * kLine, 0);
+    const int scroll_px = program_scroll.follow(first * kLine, 0);
+    const int slots = std::min(kProgramRows, count);
+    scrolled_rows(g, kProgramTop, slots, scroll_px, count, bar_at, [&](Gfx& b, int i, int y) {
+        const auto& item = program_items[i];
+        const String kind = item.app ? "应用" : "程序";
+        b.setTextColor(kMuted);
+        b.drawRightString(kind, kWidth - kPad, y);
+        b.setTextColor(i == program_cursor ? kAccent : kText);
+        String left = item.name;
+        if (!item.about.isEmpty()) left += "  " + item.about;
+        b.drawString(fit(b, left, kWidth - kPad * 3 - b.textWidth(kind)), kPad, y);
+    });
+    const int below = kProgramTop - 1 + slots * kLine;
+    if (below < kHeight - kLine) g.fillRect(0, below, kWidth, kHeight - kLine - below, kBg);
+    program_footer(g, console::head().name.isEmpty() ? "; . 选择  Enter 运行" : "; . 选择  Enter 运行  / 上次输出", kMuted);
+}
+
+void draw_console(Gfx& g) {
+    const console::View v = console::view();
+    std::vector<std::pair<String, bool>> rows;  // display rows: text, error
+    g.setFont(&cjk::cn12);
+    for (const auto& line : v.lines) {
+        if (line.text.isEmpty()) {
+            rows.push_back({String(), line.error});
+            continue;
+        }
+        for (const auto& part : wrap_text(g, line.text, kWidth - kPad * 2)) rows.push_back({part, line.error});
+    }
+    const int total = rows.size();
+    output_scroll = std::clamp(output_scroll, 0, std::max(0, total - kProgramRows));
+    const int first = std::max(0, total - kProgramRows - output_scroll);
+    for (int k = 0; k < kProgramRows; ++k) {
+        const int i = first + k;
+        band(g, kProgramTop + k * kLine - 1, kLine, kBg, [&](Gfx& b, int top) {
+            if (i >= total) return;
+            b.setTextColor(rows[i].second ? kDanger : kText, kBg);
+            b.drawString(rows[i].first, kPad, top + 1);
+        });
+    }
+    if (v.wait == console::Wait::Line) {
+        program_footer(g, "> " + v.prompt + v.input + "_", kAccent);
+    } else if (v.wait == console::Wait::Key) {
+        program_footer(g, "按键继续   ` 中断", kAccent);
+    } else if (v.running) {
+        program_footer(g, "运行中   ` 中断", kMuted);
+    } else if (!v.name.isEmpty()) {
+        program_footer(g, v.status + (output_scroll ? "   ; . 滚动" : "") + "   Enter 返回列表", v.failed ? kDanger : kMuted);
+    } else {
+        program_footer(g, "Enter 返回列表", kMuted);
+    }
+}
+
+// Redrawn on its own changes: the console's, the list's, the seconds while running.
+void draw_program_page(bool force, uint32_t version_now) {
+    const uint32_t console_now = console::version();
+    const console::Head h = console::head();
+    const uint32_t second = h.running ? millis() / 1000 : 0;
+    const bool sliding = program_bar.sliding() || program_scroll.sliding();
+    if (!force && version_now == drawn_version && console_now == console_drawn && second == console_second && !sliding) return;
+    drawn_version = version_now;
+    console_drawn = console_now;
+    console_second = second;
+    Gfx& g = M5Cardputer.Display;
+    g.startWrite();
+    g.setTextWrap(false, false);
+    top_bar(g, snapshot());
+    if (program_list) draw_program_list(g);
+    else draw_console(g);
+    g.endWrite();
+}
+
+String key_name(const Keyboard_Class::KeysState& state) {
+    String name;
+    if (state.enter) name = "enter";
+    else if (state.del) name = "del";
+    else if (state.tab) name = "tab";
+    else if (!state.word.empty()) name = state.word[0] == ' ' ? String("space") : String(state.word[0]);
+    else return {};
+    return state.fn ? "fn+" + name : name;
+}
+
+void open_program_item(const ProgramItem& item) {
+    if (!item.app) {
+        if (!programs::launch(item.name)) set_notice("正在处理上一个任务，` 可取消");
+        return;
+    }
+    cJSON* call = cJSON_CreateObject();  // the ui package opens it on the graphics page
+    cJSON_AddStringToObject(call, "tool", "write");
+    cJSON* arguments = cJSON_AddObjectToObject(call, "arguments");
+    cJSON_AddStringToObject(arguments, "target", ("ui://apps/" + item.name + "/open").c_str());
+    cJSON_AddStringToObject(arguments, "content", "");
+    cJSON_AddStringToObject(arguments, "mode", "overwrite");
+    cJSON_AddBoolToObject(arguments, "confirm_required", false);
+    worker::Job job;
+    job.kind = worker::Kind::Call;
+    job.text = json_print(call);
+    cJSON_Delete(call);
+    if (worker::submit(job) == 0) set_notice("正在处理上一个任务，` 可取消");
+}
+
+void program_key(const Keyboard_Class::KeysState& state, bool esc) {
+    const console::Wait wait = console::waiting();
+    if (wait == console::Wait::Key) {
+        const String name = key_name(state);
+        if (!name.isEmpty()) console::key(name);
+        return;
+    }
+    if (wait == console::Wait::Line) {
+        if (state.enter) console::submit();
+        else if (state.del) console::erase();
+        else {
+            String typed;
+            for (const char c : state.word) typed += c;
+            if (!typed.isEmpty()) console::type(typed);
+        }
+        return;
+    }
+    if (console::head().running) return;  // ` interrupts it (handled before)
+    if (!program_list) {
+        if (has_char(state, ';')) ++output_scroll;
+        else if (has_char(state, '.')) output_scroll = std::max(0, output_scroll - 1);
+        else if (state.enter || esc || has_char(state, ',')) {
+            program_list = true;
+            refresh_program_items();
+        }
+        drawn_version = UINT32_MAX;
+        return;
+    }
+    const int count = program_items.size();
+    if (count && has_char(state, ';')) program_cursor = std::max(0, program_cursor - 1);
+    else if (count && has_char(state, '.')) program_cursor = std::min(count - 1, program_cursor + 1);
+    else if (has_char(state, '/') && !console::head().name.isEmpty()) {
+        program_list = false;
+        output_scroll = 0;
+    } else if (state.enter && count) {
+        open_program_item(program_items[program_cursor]);
+    }
+    drawn_version = UINT32_MAX;
+}
+
 // What the corner mascot shows for the newest entry.
 mascot::State mascot_state(const Model& model) {
     if (model.timeline.empty()) return mascot::State::Idle;
@@ -626,16 +885,33 @@ void render(bool force = false) {
         settings::draw(force);
         return;
     }
-    if (overlay::open()) {
-        overlay::draw(force);
+    if (current_page == Page::Graphics) {
+        if (overlay::open()) {
+            overlay::draw(force);
+            return;
+        }
+        switch_page(previous_page);  // its picture closed meanwhile
+        force = true;
+    }
+    if (current_page == Page::Program && view == View::List) {
+        draw_program_page(force, version());
         return;
     }
+    // The highlight or the rows move: redraw them each frame.
+    if (timeline_sliding() || help_bar.sliding() || help_list_scroll.sliding()) force = true;
     const uint32_t current = version();
     // Mascot frames: a 32x32 push of a frame read beforehand, nothing else redrawn.
     if (!force && current == drawn_version && mascot_live && mascot::due() && mascot::load()) {
         Gfx& g = M5Cardputer.Display;
         g.startWrite();
         mascot::push(g);
+        g.endWrite();
+    }
+    // A status item changed on its own (the minute, the battery): the bar only.
+    if (!force && current == drawn_version && status::changed()) {
+        Gfx& g = M5Cardputer.Display;
+        g.startWrite();
+        top_bar(g, snapshot());
         g.endWrite();
     }
     const bool animating = (is_busy() || has_pending()) && millis() - last_draw > 400;
@@ -664,23 +940,34 @@ void render(bool force = false) {
         mascot::request(mascot_state(model));
         mascot_live = mascot::load();
     }
-    // A full-screen sprite would cost 64 KB of RAM; draw directly.  The
-    // timeline clears row by row instead of blanking the whole screen first.
+    // No full-screen sprite (64 KB): drawn directly, the timeline row by row
+    // without blanking first.
+    // Pages that are not drawn row by row are cleared when their layout
+    // changes, not on every redraw (help flashed at every key).
+    static int drawn_layout = -1;
+    int layout = static_cast<int>(current_page) * 16 + static_cast<int>(view) * 4;
+    if (view == View::Help) layout = layout * 256 + help_page * 2 + (help_detail ? 1 : 0) + (help_detail ? help_scroll * 8 : 0);
+    if (view == View::Detail) layout = layout * 4096 + detail_scroll;
+    const bool clear = !timeline && current_page != Page::Terminal && layout != drawn_layout;
+    drawn_layout = layout;
+    const auto paint = [&](Gfx& t) {
+        if (clear) t.fillScreen(kBg);  // the terminal clears row by row
+        t.setTextWrap(false, false);
+        top_bar(t, model);
+        if (view == View::Help) {
+            draw_help(t);
+        } else if (current_page == Page::Terminal) {
+            if (last_drawn_help) t.fillScreen(kBg);
+            draw_terminal(t, model);
+        } else if (view == View::Detail) {
+            draw_detail(t, model);
+        } else {
+            draw_timeline(t, model, mascot_live);
+            if (secret) draw_secret(t, model);
+        }
+    };
     g.startWrite();
-    if (!timeline && current_page != Page::Terminal) g.fillScreen(kBg);  // the terminal clears row by row
-    g.setTextWrap(false, false);
-    top_bar(g, model);
-    if (view == View::Help) {
-        draw_help(g);
-    } else if (current_page == Page::Terminal) {
-        if (last_drawn_help) g.fillScreen(kBg);
-        draw_terminal(g, model);
-    } else if (view == View::Detail) {
-        draw_detail(g, model);
-    } else {
-        draw_timeline(g, model, mascot_live);
-        if (secret) draw_secret(g, model);
-    }
+    paint(g);
     g.endWrite();
 }
 
@@ -700,6 +987,7 @@ bool record(bool (*held)()) {
 
 void dismiss_overlay() {
     overlay::dismiss();
+    if (current_page == Page::Graphics) switch_page(previous_page);
     drawn_version = UINT32_MAX;  // redraw the page underneath
 }
 
@@ -715,12 +1003,27 @@ void submit_or_busy(const worker::Job& job) {
 }
 
 void switch_page(Page next) {
+    if (next == Page::Graphics && !overlay::open()) return;
+    if (current_page == Page::Graphics && next != Page::Graphics) overlay::suspend();
+    if (next == Page::Graphics && current_page != Page::Graphics) previous_page = current_page;
+    if (next == Page::Program && current_page != Page::Program) refresh_program_items();
+    if (next != current_page) timeline_scroll.reset();
     current_page = next;
     view = View::List;
     drawn_version = UINT32_MAX;
     if (next == Page::Terminal && !worker::busy() && draft_empty()) {
         worker::submit({worker::Kind::TerminalObserve});
         last_terminal_refresh = millis();
+    }
+}
+
+// Btn0: Agent, SSH, program, graphics (only while a picture is open), Agent…
+Page next_page() {
+    switch (current_page) {
+        case Page::Agent: return Page::Terminal;
+        case Page::Terminal: return Page::Program;
+        case Page::Program: return overlay::open() ? Page::Graphics : Page::Agent;
+        default: return Page::Agent;
     }
 }
 
@@ -760,10 +1063,10 @@ void submit_secret(bool cancel_input) {
     worker::Job job;
     job.kind = worker::Kind::Secret;
     job.text = cancel_input ? String() : secret_buffer;
-    secret_buffer = String();  // the copy lives only inside the job
+    wipe(secret_buffer);  // the copy lives only inside the job
     secret_reveal = false;
     submit_or_busy(job);
-    job.text = String();
+    wipe(job.text);
 }
 
 void dispatch_keys(const Keyboard_Class::KeysState& state);
@@ -780,9 +1083,23 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
         if (!state.enter) return;
     }
     note_activity();
-    if (overlay::open() && !settings::active()) {
-        if (!overlay::is_panel() || overlay::panel_key(state)) dismiss_overlay();
-        else overlay::draw(false);
+    if (current_page == Page::Graphics && overlay::open() && !settings::active()) {
+        if (console::waiting() == console::Wait::Key) {  // a running program reads its keys (vat.key)
+            const String name = key_name(state);
+            if (!name.isEmpty()) console::key(name);
+            return;
+        }
+        if (console::active() && has_char(state, '`')) {
+            action("cancel");
+            return;
+        }
+        if (overlay::is_panel()) {
+            if (overlay::panel_key(state)) dismiss_overlay();
+            else overlay::draw(false);
+            return;
+        }
+        if (console::active()) return;  // a running program's picture stays until it ends
+        dismiss_overlay();
         return;
     }
     if (settings::active()) {
@@ -833,7 +1150,13 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
             if (!busy) worker::submit({worker::Kind::TerminalObserve});  // the remote window follows
         }
         else if (has_char(state, 'w')) enter_setup("设置");
-        else if (has_char(state, 'a') && current_page == Page::Agent) events::emit("ui://apps/menu");  // the ui package opens it
+        else if (has_char(state, 'a')) {  // the program page, at its list unless a program is running
+            switch_page(Page::Program);
+            if (!console::head().running && !program_list) {
+                program_list = true;
+                refresh_program_items();
+            }
+        }
         else if (state.enter && current_page == Page::Agent && !busy && model.pending.empty()) {
             // A segment into the draft; Enter alone sends the draft.
             if (record(enter_held)) submit_or_busy({worker::Kind::DraftPcm, "agent", "/vat/cache/ptt.pcm"});
@@ -883,6 +1206,10 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
             help_cursor = std::max(0, help_cursor);
         }
         drawn_version = UINT32_MAX;
+        return;
+    }
+    if (current_page == Page::Program) {
+        program_key(state, esc);
         return;
     }
     if (current_page == Page::Agent) {
@@ -967,14 +1294,32 @@ void apply_hardware_requests() {
     }
     hw::play_pending_beeps();  // between recordings: speaker and microphone share I2S
     Overlay incoming;
+    settings::poll();
     if (take_overlay(incoming)) {
         if (incoming.kind == Overlay::Kind::None) {
             if (overlay::open()) dismiss_overlay();
         } else {
-            overlay::show(std::move(incoming));
+            const bool fresh = overlay::show(std::move(incoming));
+            if (fresh && !settings::active()) switch_page(Page::Graphics);  // a refresh leaves you where you are
+            if (current_page == Page::Graphics) drawn_version = UINT32_MAX;
             wake_screen();
             note_activity();
         }
+    }
+    if (console::take_show_request()) {  // a foreground run started: its console
+        if (current_page != Page::Program) switch_page(Page::Program);
+        program_list = false;
+        output_scroll = 0;
+        drawn_version = UINT32_MAX;
+        wake_screen();
+    }
+    const console::Wait wait = console::waiting();
+    if (wait == console::Wait::Line && current_page == Page::Graphics) {  // typing needs the console
+        input_from_graphics = true;
+        switch_page(Page::Program);
+    } else if (wait == console::Wait::None && input_from_graphics) {
+        input_from_graphics = false;
+        if (current_page == Page::Program && overlay::open()) switch_page(Page::Graphics);
     }
 }
 
@@ -987,24 +1332,12 @@ void begin() {
     last_activity = millis();
 }
 
-void show_boot(const String& title, const String& message, uint16_t color) {
-    auto& d = M5Cardputer.Display;
-    d.fillScreen(kBg);
-    d.setFont(&fonts::efontCN_12);
-    d.setTextColor(kAccent, kBg);
-    d.drawString(title, kPad, 6);
-    d.setTextColor(color == TFT_YELLOW ? kWarn : color == TFT_RED ? kDanger : color, kBg);
-    d.drawString(message, kPad, 6 + kLine + 4);
-}
-
 void show_ready() {
     set_notice("");
     drawn_version = UINT32_MAX;
 }
 
 void enter_setup(const String& reason) { settings::open(reason); }
-
-bool in_setup() { return settings::active(); }
 
 Page page() { return current_page; }
 
@@ -1029,7 +1362,9 @@ String action(const String& name) {
     }
     if (name == "page_agent") switch_page(Page::Agent);
     else if (name == "page_ssh") switch_page(Page::Terminal);
-    else if (name == "toggle") switch_page(current_page == Page::Agent ? Page::Terminal : Page::Agent);
+    else if (name == "page_program") switch_page(Page::Program);
+    else if (name == "page_graphics") switch_page(Page::Graphics);
+    else if (name == "toggle") switch_page(next_page());
     else if (name == "cursor_up") move_cursor(-1);
     else if (name == "cursor_down") move_cursor(1);
     else if (name == "cursor_latest") cursor = -1;
@@ -1090,16 +1425,24 @@ String screen_text() {
     cJSON* root = cJSON_CreateObject();
     const char* view_name = view == View::Help ? "help" : view == View::Detail ? "detail"
                             : secret_active(model) ? "secret" : "list";
-    cJSON_AddStringToObject(root, "page", current_page == Page::Agent ? "agent" : "ssh");
+    static const char* const kPageIds[] = {"agent", "ssh", "program", "graphics"};
+    cJSON_AddStringToObject(root, "page", kPageIds[static_cast<int>(current_page)]);
     cJSON_AddStringToObject(root, "view", view_name);
     const char* mascot_name = mascot::describe();  // read-only: this runs on the web task
     cJSON_AddStringToObject(root, "mascot", mascot_live || strcmp(mascot_name, "off") == 0 ? mascot_name : "hidden");
-    String header = current_page == Page::Agent ? String("Agent") : "SSH " + model.terminal_title;
+    String header = current_page == Page::Terminal ? "SSH " + model.terminal_title : String(page_name(current_page));
+    if (current_page == Page::Program) header += " " + console::head().name;
     cJSON_AddStringToObject(root, "header", header.c_str());
     cJSON_AddStringToObject(root, "notice", model.notice.c_str());  // the bottom line ("" when none)
     String body;
     if (current_page == Page::Terminal) {
         body = model.terminal_text;
+    } else if (current_page == Page::Program) {
+        if (program_list) {
+            for (const auto& item : program_items) body += String(item.app ? "[应用] " : "[程序] ") + item.name + "\n";
+        } else {
+            for (const auto& line : console::view().lines) body += line.text + "\n";
+        }
     } else if (view == View::Detail) {
         for (const auto& line : detail_lines) body += line.first + "\n";
     } else {
@@ -1111,6 +1454,18 @@ String screen_text() {
     cJSON_AddBoolToObject(root, "busy", model.busy);
     cJSON_AddBoolToObject(root, "setup", settings::active());
     cJSON_AddStringToObject(root, "overlay", overlay::name());
+    {
+        const console::Head h = console::head();
+        const console::Wait w = console::waiting();
+        cJSON* c = cJSON_AddObjectToObject(root, "console");
+        cJSON_AddStringToObject(c, "program", h.name.c_str());
+        cJSON_AddBoolToObject(c, "running", h.running);
+        cJSON_AddStringToObject(c, "status", h.status.c_str());
+        cJSON_AddStringToObject(c, "wait", w == console::Wait::Line ? "line" : w == console::Wait::Key ? "key" : "");
+        cJSON_AddBoolToObject(c, "list", program_list);
+    }
+    cJSON_AddNumberToObject(root, "canvas_frame", overlay::canvas_frame());
+    cJSON_AddStringToObject(root, "canvas_error", overlay::canvas_error());
     settings::describe(root);
     cJSON_AddBoolToObject(root, "screen_on", screen_on);
     cJSON* pending = cJSON_AddArrayToObject(root, "pending");
@@ -1127,11 +1482,9 @@ String screen_text() {
 
 void loop() {
     const bool button = M5Cardputer.BtnA.wasPressed() && !settings::active();
-    if (button && overlay::open()) {
-        dismiss_overlay();
-    } else if (button) {
+    if (button) {  // round the pages; a picture stays open on the graphics page
         wake_screen();
-        switch_page(current_page == Page::Agent ? Page::Terminal : Page::Agent);
+        switch_page(next_page());
     }
     handle_keys();
     apply_hardware_requests();

@@ -56,6 +56,9 @@
 - 三段时间分开算：`stt.timeout_ms` 是一次语音识别请求；`agent.timeout_ms` 是模型每轮；`agent.total_timeout_ms` 是一个任务里**模型请求的累计时间**。执行工具（SSH、高德、联网搜索、本机动作）不计入，各工具有自己的超时；等待用户确认或输入密码也不计入。运行日志 `agent_done` 记录 `model=` 与 `tools=` 两项耗时。
 - `default_ssh_profile`：启动远程 Agent 时未指定主机所用的 profile；缺省为第一个 profile。
 - `ui.*` 也会被语音设置（亮度、息屏、音量）写回。
+- `ui.status_items`（0.7）：Agent 页顶栏右侧显示哪些项、什么顺序，逗号分隔的 id：`time` 时间、`battery` 电量、`signal` Wi-Fi 信号、`ssid` Wi-Fi 名称、`heap` 剩余内存、`ble` 蓝牙；缺省 `time,battery,signal`，空字符串表示都不显示，放不下时从后往前省略。设置页「顶栏」或 `write settings://statusbar` 修改。
+- `ui.animation`（0.7）：设置页光标高亮条滑到新行的动画，`2` 开（缺省，120 ms）、`1` 减弱（60 ms）、`0` 关（直接跳）。设置页「动画」或 `write settings://animation` 修改。
+- `ui.terminal_font`（10 / 12 / 14）与 `ui.context_kb`（32 / 64 / 96）由设置页写入。
 
 ## secrets.json
 
@@ -71,7 +74,11 @@
   "providers": {
     "qwen": {"api_key": "…"},
     "deepseek": {"api_key": "…"},
-    "openrouter": {"api_key": "…"}
+    "openrouter": {"api_key": "…"},
+    "amap": {"api_key": "…"}
+  },
+  "http": {
+    "github": {"value": "…", "host": "api.github.com"}
   }
 }
 ```
@@ -79,6 +86,21 @@
 - `wifi.ssid/password` 是开机连接的网络；设备上的 Setup 页（`Fn+W`）会改写它。
 - `wifi.networks` 供语音“连接家里 WiFi”使用（`session connect wifi://家里 WiFi`），连接失败会自动回到主网络。
 - 启动时缺少语音识别 Key 或 Agent Key 会进入 Setup 页并提示缺什么。
+- `http` 是 http 包的接口令牌（请求头里的 `{secret:名字}`），第一次用时在设备上输入，`host` 是它唯一能发往的网站；要换网站就删掉这一项重新输入。
+
+### 需要哪些 Key、去哪里申请
+
+**必需的只有两个：千问 Key 和 DeepSeek Key**（外加 Wi-Fi）。其余都是可选的，不填也能用，只是少了对应的功能。
+
+| Key | 必需 / 可选 | 用来做什么（不填会怎样） | 去哪里申请 |
+|:--|:--|:--|:--|
+| 语音识别 Key（千问，`qwen`） | **必需**（二选一：千问或 OpenRouter，默认千问） | 按住说话的语音转文字，模型 `qwen3-asr-flash`，北京地域。不填：开机停在设置页，不能用语音 | [阿里云百炼](https://bailian.console.aliyun.com/)（DashScope）：开通模型服务后在「API-KEY」页创建，选**北京**地域。按音频时长计费（约 0.013 元/分钟），新账号有免费额度 |
+| Agent Key（DeepSeek，`deepseek`） | **必需** | 大肥鱼理解你的话、决定做什么；联网搜索和读网页也用它（按次计费）。不填：开机停在设置页，什么指令都执行不了 | [DeepSeek 开放平台](https://platform.deepseek.com/)：注册、充值后在「API keys」页创建 |
+| 高德 Key（`amap`） | 可选 | 「我在哪」「附近的咖啡店」、天气、路线。不填：只有这些位置类功能不能用 | [高德开放平台](https://console.amap.com/)：应用管理 → 创建新应用 → 添加 Key，「服务平台」选 **Web 服务** |
+| OpenRouter Key（`openrouter`） | 可选 | 备用语音识别（`stt.provider` 设为 `openrouter` 时用 Whisper 代替千问）。用千问就不用填 | [OpenRouter](https://openrouter.ai/keys) |
+| 接口令牌（`{secret:名字}`） | 可选（用到才填） | 程序或大肥鱼调需要令牌的网络接口（如 GitHub、和风天气）。不填：只有这些接口调不了 | 各网站自己的控制台。不用事先填：第一次调用时设备弹出输入框，令牌只发给录入时的那个网站 |
+
+前三个 Key 在设备的设置页「Key」里填（也可以用手机扫码或网页填）；也可以让大肥鱼打开输入框（「我要填高德 Key」），**不要把 Key 念给它或打进对话里**。
 
 ## ssh/profiles.json
 

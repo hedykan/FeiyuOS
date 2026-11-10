@@ -60,6 +60,46 @@ void ui_canvas() {
     for (int i = 0; i < 65; ++i) many += std::string(i ? "," : "") + R"(["drawPixel",1,1,"red"])";
     many += "]}";
     CHECK(!vat::ui_canvas::parse(String(many), s, error));
+
+    // Variables: an unquoted {x} is a placeholder; an update (Lua) without animate runs every 33 ms.
+    CHECK(vat::ui_canvas::parse(R"({"ops":[["fillCircle",{x},67,6,{color}],["drawString","{label} {x}",2,2]],)"
+                                R"("vars":{"x":10,"vx":4,"color":"red","label":"x="},)"
+                                R"("update":"x = x + vx  if x > 20 then vx = -vx end"})",
+                                s, error));
+    CHECK(s.frame_ms == vat::ui_canvas::kMinFrameMs && s.frames == 0 && !s.vars_json.isEmpty() &&
+          s.update == "x = x + vx  if x > 20 then vx = -vx end");
+    // The values come from a lookup (the canvas's Lua VM on the device).
+    std::vector<vat::ui_canvas::Op> ops = s.ops;
+    const auto values = [](const String& name, String& value) {
+        if (name == "x") value = "22";
+        else if (name == "color") value = "red";
+        else if (name == "label") value = "x=";
+        else return false;
+        return true;
+    };
+    vat::ui_canvas::fill_vars(ops, values);
+    CHECK(ops[0].args[0] == "22" && ops[0].color == "red");
+    CHECK(ops[1].args[0] == "x= 22");
+    CHECK(vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"animate":{"every":"33ms"}})", s, error));
+    CHECK(!vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"animate":{"every":"20ms"}})", s, error));
+    CHECK(!vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"update":[{"set":"x","to":"1"}]})", s, error));
+    CHECK(error.indexOf("Lua") >= 0);  // the old step list is refused with a hint
+    CHECK(!vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"vars":{"x":[1]}})", s, error));
+    // A syntax check is used when set (lua_vm's on the device).
+    vat::ui_canvas::set_compiler([](const String& source) { return source.indexOf("= =") >= 0 ? String("bad") : String(); });
+    CHECK(!vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"update":"x = = 1"})", s, error) &&
+          error.indexOf("语法错误") >= 0);
+    vat::ui_canvas::set_compiler(nullptr);
+    // {1} of the source is not a variable: fill_vars leaves it for fill().
+    std::vector<vat::ui_canvas::Op> mixed(1);
+    mixed[0].kind = Kind::DrawString;
+    mixed[0].args = {"{1} {n}"};
+    vat::ui_canvas::fill_vars(mixed, [](const String& name, String& value) {
+        if (name != "n") return false;
+        value = "2.5";
+        return true;
+    });
+    CHECK(mixed[0].args[0] == "{1} 2.5");
 }
 
 }  // namespace

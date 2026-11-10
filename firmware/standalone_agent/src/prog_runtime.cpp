@@ -1,17 +1,20 @@
 #include "prog_runtime.h"
 
+#include <atomic>
+
+#include <cJSON.h>
 #include <time.h>
 
 #include <algorithm>
 #include <cstring>
-#include <memory>
 #include <mutex>
 #include <vector>
 
 #include "agent.h"
 #include "common.h"
-#include "policy.h"
-#include "prog_engine.h"
+#include "console.h"
+#include "lua_meta.h"
+#include "lua_vm.h"
 #include "registry.h"
 #include "storage.h"
 #include "ui_state.h"
@@ -20,64 +23,41 @@
 namespace vat::programs {
 namespace {
 
-constexpr char kProgramDir[] = "/vat/things/prog/programs";
-constexpr char kTriggers[] = "/vat/things/prog/triggers.json";
-constexpr char kApproved[] = "/vat/things/prog/approved.json";
+constexpr char kDir[] = "/vat/things/lua";
+constexpr char kIndex[] = "/vat/things/lua/index.json";
+constexpr char kApproved[] = "/vat/things/lua/approved.json";
+constexpr char kTriggers[] = "/vat/things/lua/triggers.json";
 constexpr char kStats[] = "/vat/prog/stats.json";
-constexpr char kRunDir[] = "/vat/prog/runs";
-constexpr std::size_t kMaxPrograms = 64;
+constexpr char kLegacyDir[] = "/vat/things/prog/programs";      // v0.6.2 JSON programs
+constexpr char kLegacyTriggers[] = "/vat/things/prog/triggers.json";
+constexpr std::size_t kMaxFiles = 64;
 constexpr std::size_t kMaxTriggers = 32;
 constexpr std::size_t kMaxQueue = 8;
-constexpr uint32_t kSliceMs = 90000;  // the worker watchdog restarts the device at 180 s
-constexpr long kUnusedSeconds = 30L * 86400;
-constexpr char kTriggerProgram[] = "~trigger";  // synthetic program wrapping a trigger's step (names starting with ~ are reserved)
 
 struct Trigger {
     int id = 0;
     String when;
-    String run;       // one step, JSON
-    String approved;  // fingerprints, JSON array
+    String run;  // "prog://名字?参数"
     bool paused = false;
     bool armed = false;
 };
 
 struct Item {  // a queued run
-    String kind;  // trigger | run | resume
-    String a;     // trigger: label · run: program name · resume: run id
-    String b;     // trigger: step JSON · run: query
-    String c;     // trigger: approvals JSON
-    String data;  // event data
+    String label;
+    String program;
+    String query;
+    String data;  // event data (JSON), "" when none
 };
 
 std::vector<Trigger> triggers;
 std::vector<Item> queue;
 std::vector<std::pair<String, String>> events_in;  // target, data
-std::vector<String> recent;                        // last few results, newest last
+std::vector<String> recent;
 std::mutex lock;
 bool loaded = false;
 uint32_t last_arm = 0;
-int next_run = 1;
 
-// ---------------------------------------------------------------- small helpers
-
-String hex8(uint32_t v) {
-    char text[9];
-    snprintf(text, sizeof(text), "%08x", static_cast<unsigned>(v));
-    return text;
-}
-
-uint32_t name_hash(const String& name) {
-    uint32_t h = 2166136261u;
-    for (std::size_t i = 0; i < name.length(); ++i) {
-        h ^= static_cast<uint8_t>(name[i]);
-        h *= 16777619u;
-    }
-    return h;
-}
-
-// Program files are named by a hash of the program name (the name itself may
-// hold any characters); the name lives inside the file.
-String program_path(const String& name) { return String(kProgramDir) + "/" + hex8(name_hash(name)) + ".json"; }
+// ---------------------------------------------------------------- helpers
 
 String clock_text(time_t t, const char* format) {
     if (t < 1700000000) return "--";
@@ -88,81 +68,23 @@ String clock_text(time_t t, const char* format) {
     return text;
 }
 
-bool failed_text(const String& out) { return out.startsWith("ERROR") || out.startsWith("没有能力包可处理"); }
-
-cJSON* read_json(const char* path, std::size_t max = 32768) {
+cJSON* read_json(const String& path, std::size_t max = 32768) {
     return cJSON_Parse(storage::read_text(path, max).c_str());
 }
 
+std::atomic<uint32_t> changes{0};  // generation(): the index and confirmations
+
 bool write_json(const String& path, const cJSON* value) {
-    char* printed = cJSON_Print(value);
-    if (!printed) return false;
-    const bool ok = storage::ensure_parent(path) && storage::write_text(path, String(printed));
-    cJSON_free(printed);
-    return ok;
+    if (path == kIndex || path == kApproved) ++changes;
+    return storage::ensure_parent(path) && storage::write_text(path, json_print(value));
 }
 
-cJSON* load_program(const String& name) {
-    cJSON* p = cJSON_Parse(storage::read_text(program_path(name), 16384).c_str());
-    if (p && json_str(p, "name") != name) {  // hash collision or a stale file
-        cJSON_Delete(p);
-        return nullptr;
-    }
-    return p;
-}
+// Uses to confirm, or a package: its usage text goes into the agent's prompt,
+// so every package is enabled by the user once, uses or not.
+bool must_confirm(const lua_meta::Header& h) { return lua_meta::needs_confirm(h) || !h.package.isEmpty(); }
 
-// Every stored program, parsed (caller deletes each).
-std::vector<cJSON*> all_programs() {
-    std::vector<cJSON*> out;
-    cJSON* list = cJSON_Parse(storage::list_dir(kProgramDir).c_str());
-    const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, list) {
-        if (json_bool(item, "dir", false)) continue;
-        const String file = String(kProgramDir) + "/" + json_str(item, "name");
-        if (cJSON* p = cJSON_Parse(storage::read_text(file, 16384).c_str())) out.push_back(p);
-    }
-    cJSON_Delete(list);
-    return out;
-}
-
-void free_all(std::vector<cJSON*>& list) {
-    for (cJSON* p : list) cJSON_Delete(p);
-    list.clear();
-}
-
-void note_recent(const String& line) {
-    std::lock_guard<std::mutex> guard(lock);
-    recent.push_back(clock_text(time(nullptr), "%H:%M") + " " + utf8_head(line, 120));
-    if (recent.size() > 6) recent.erase(recent.begin());
-}
-
-// ---------------------------------------------------------------- approvals and stats
-
-bool approved_in(const cJSON* list, uint32_t fingerprint) {
-    const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, list) {
-        if (cJSON_IsNumber(item) && static_cast<uint32_t>(item->valuedouble) == fingerprint) return true;
-    }
-    return false;
-}
-
-void set_approvals(const String& name, const std::vector<uint32_t>& prints) {
-    cJSON* root = read_json(kApproved);
-    if (!cJSON_IsObject(root)) {
-        cJSON_Delete(root);
-        root = cJSON_CreateObject();
-    }
-    cJSON_DeleteItemFromObjectCaseSensitive(root, name.c_str());
-    if (!prints.empty()) {
-        cJSON* list = cJSON_AddArrayToObject(root, name.c_str());
-        for (const uint32_t p : prints) cJSON_AddItemToArray(list, cJSON_CreateNumber(p));
-    }
-    write_json(kApproved, root);
-    cJSON_Delete(root);
-}
-
-cJSON* stats_root() {
-    cJSON* root = read_json(kStats);
+cJSON* object_at(const String& path) {
+    cJSON* root = read_json(path);
     if (!cJSON_IsObject(root)) {
         cJSON_Delete(root);
         root = cJSON_CreateObject();
@@ -170,34 +92,42 @@ cJSON* stats_root() {
     return root;
 }
 
+void put(cJSON* object, const char* key, cJSON* value) {
+    cJSON_DeleteItemFromObjectCaseSensitive(object, key);
+    cJSON_AddItemToObject(object, key, value);
+}
+
+String path_of(const String& name) { return String(kDir) + "/" + name + ".lua"; }
+String old_path_of(const String& name) { return String(kDir) + "/old/" + name + ".lua"; }  // scan skips dirs
+
+void note_recent(const String& line) {
+    std::lock_guard<std::mutex> guard(lock);
+    recent.push_back(clock_text(time(nullptr), "%H:%M") + " " + utf8_head(line, 120));
+    if (recent.size() > 6) recent.erase(recent.begin());
+}
+
 void record_stat(const String& name, bool created, bool ok, const String& result) {
-    cJSON* root = stats_root();
+    cJSON* root = object_at(kStats);
     cJSON* entry = json_obj(root, name.c_str());
     if (!entry) entry = cJSON_AddObjectToObject(root, name.c_str());
-    auto put = [&](const char* key, cJSON* value) {
-        cJSON_DeleteItemFromObjectCaseSensitive(entry, key);
-        cJSON_AddItemToObject(entry, key, value);
-    };
     const double now = static_cast<double>(time(nullptr));
     if (created) {
-        put("created", cJSON_CreateNumber(now));
+        put(entry, "created", cJSON_CreateNumber(now));
     } else {
-        put("last", cJSON_CreateNumber(now));
-        put("ok", cJSON_CreateBool(ok));
-        put("result", cJSON_CreateString(utf8_head(result, 80).c_str()));
+        put(entry, "last", cJSON_CreateNumber(now));
+        put(entry, "ok", cJSON_CreateBool(ok));
+        put(entry, "result", cJSON_CreateString(utf8_head(result, 80).c_str()));
     }
     write_json(kStats, root);
     cJSON_Delete(root);
 }
 
-void forget_stat(const String& name) {
-    cJSON* root = stats_root();
+void forget(const char* path, const String& name) {
+    cJSON* root = object_at(path);
     cJSON_DeleteItemFromObjectCaseSensitive(root, name.c_str());
-    write_json(kStats, root);
+    write_json(path, root);
     cJSON_Delete(root);
 }
-
-// ---------------------------------------------------------------- descriptions
 
 String describe_when(const String& when) {
     const int slash = when.indexOf('/', 7);
@@ -211,111 +141,255 @@ String describe_when(const String& when) {
     return when;
 }
 
-String describe_args(const String& tool, const cJSON* args) {
-    String line = tool + " " + json_str(args, "target");
-    if (tool == "exec") {
-        const String program = json_str(args, "program");
-        if (!program.isEmpty()) line += " $ " + program;
-        const cJSON* item = nullptr;
-        cJSON_ArrayForEach(item, cJSON_GetObjectItemCaseSensitive(args, "args")) {
-            if (cJSON_IsString(item)) line += String(" ") + item->valuestring;
-        }
-    }
-    const String content = json_str(args, "content");
-    if (!content.isEmpty()) line += "：" + utf8_head(content, 40);
-    return utf8_head(line, 120);
-}
-
-String describe_step(const cJSON* step) {
-    String tool;
-    cJSON* args = prog::action_arguments(step, tool);
-    String name, query;
-    String line = prog::program_target(json_str(args, "target"), name, query)
-                      ? "运行 " + name + (query.isEmpty() ? String() : "（" + url_decode(query) + "）")
-                      : describe_args(tool, args);
-    cJSON_Delete(args);
-    return line;
-}
-
-// Steps Policy would ask about (fingerprints + summaries); an error when a
-// step would be refused outright.
-String sensitive_steps(const cJSON* steps, std::vector<uint32_t>& prints, std::vector<String>& lines) {
-    String error;
-    prog::for_each_action(steps, [&](const String&, const cJSON* step) {
-        String tool;
-        cJSON* args = prog::action_arguments(step, tool);
-        if (tool == "stream") {  // read-only: nothing to confirm, but it must be a declared stream
-            registry::Package::StreamSpec spec{};
-            const String target = json_str(args, "target");
-            if (!registry::stream_spec(target, spec) && error.isEmpty()) {
-                error = "「" + target + "」不是流；可订阅的有：" + registry::stream_names();
-            }
-            cJSON_Delete(args);
-            return;
-        }
-        const auto verdict = policy::evaluate(tool, args);
-        if (verdict.decision == policy::Decision::Deny && error.isEmpty()) {
-            error = "「" + describe_args(tool, args) + "」会被拒绝：" + verdict.reason;
-        } else if (verdict.decision == policy::Decision::Ask) {
-            prints.push_back(prog::fingerprint(step));
-            lines.push_back(describe_args(tool, args));
-        } else if (!registry::needs_secret(tool, args).isEmpty() && error.isEmpty()) {
-            error = "「" + describe_args(tool, args) + "」需要输入密码，程序里不能用";
-        }
-        cJSON_Delete(args);
-    });
-    return error;
-}
-
-String outline(const cJSON* steps, const String& prefix, int indent) {
-    String out;
-    int n = 0;
-    const cJSON* step = nullptr;
-    cJSON_ArrayForEach(step, steps) {
-        const String number = prefix + String(++n);
-        String pad;
-        for (int i = 0; i < indent; ++i) pad += "  ";
-        if (cJSON_GetObjectItemCaseSensitive(step, "if")) {
-            String cond = json_str(step, "if");
-            for (const char* key : {"is", "not", "has", "above", "below"}) {
-                const cJSON* v = cJSON_GetObjectItemCaseSensitive(step, key);
-                if (!v) continue;
-                const char* word = !strcmp(key, "is") ? " 是 " : !strcmp(key, "not") ? " 不是 " : !strcmp(key, "has") ? " 包含 "
-                                   : !strcmp(key, "above") ? " 大于 " : " 小于 ";
-                cond += word + (cJSON_IsString(v) ? String(v->valuestring) : String(v->valuedouble, 0));
-            }
-            out += pad + number + " 如果 " + cond + "：\n";
-            out += outline(cJSON_GetObjectItemCaseSensitive(step, "then"), number + ".", indent + 1);
-            const cJSON* otherwise = cJSON_GetObjectItemCaseSensitive(step, "else");
-            if (cJSON_GetArraySize(otherwise) > 0) {
-                out += pad + "   否则：\n" + outline(otherwise, number + ".", indent + 1);
-            }
-        } else if (cJSON_GetObjectItemCaseSensitive(step, "repeat")) {
-            out += pad + number + " 重复 " + String(json_int(step, "repeat", 0)) + " 次：\n";
-            out += outline(cJSON_GetObjectItemCaseSensitive(step, "steps"), number + ".", indent + 1);
-        } else if (cJSON_GetObjectItemCaseSensitive(step, "wait")) {
-            out += pad + number + " 等待 " + json_str(step, "wait") + "\n";
-        } else {
-            const String as = json_str(step, "as");
-            out += pad + number + " " + describe_step(step) + (as.isEmpty() ? String() : " → " + as) +
-                   (json_str(step, "on_error") == "continue" ? String("（失败继续）") : String()) + "\n";
-        }
+// "a=1&b=%E6%B7%B1" -> {"a": "1", "b": "深"}
+cJSON* parse_query(const String& query) {
+    cJSON* out = cJSON_CreateObject();
+    std::size_t at = 0;
+    while (at < query.length()) {
+        int end = query.indexOf('&', at);
+        if (end < 0) end = query.length();
+        const String pair = query.substring(at, end);
+        at = end + 1;
+        const int eq = pair.indexOf('=');
+        if (pair.isEmpty() || eq == 0) continue;
+        const String key = url_decode(eq < 0 ? pair : pair.substring(0, eq));
+        const String value = eq < 0 ? String() : url_decode(pair.substring(eq + 1));
+        put(out, key.c_str(), cJSON_CreateString(value.c_str()));
     }
     return out;
 }
 
-String signature(const prog::Info& info) {
-    if (info.inputs.empty()) return info.name;
-    String sig = info.name + "(";
-    for (std::size_t i = 0; i < info.inputs.size(); ++i) {
-        if (i) sig += ", ";
-        sig += info.inputs[i].name;
-        if (!info.inputs[i].required) sig += "=" + info.inputs[i].fallback;
-    }
-    return sig + ")";
+// ---------------------------------------------------------------- files, index, confirmations
+
+enum class State { Enabled, Pending, Off, Broken };
+
+struct Entry {
+    String name;
+    lua_meta::Header header;
+    String problem;  // the header's error, if any
+    std::size_t size = 0;
+    State state = State::Broken;
+};
+
+State state_of(const String& name, const lua_meta::Header& h, const String& problem) {
+    if (!problem.isEmpty()) return State::Broken;
+    cJSON* root = object_at(kApproved);
+    const cJSON* entry = json_obj(root, name.c_str());
+    const bool off = json_bool(entry, "off", false);
+    // valueint saturates at INT_MAX: a digest above 2^31 must be read as a double
+    const cJSON* d = cJSON_GetObjectItemCaseSensitive(entry, "digest");
+    const uint32_t confirmed = cJSON_IsNumber(d) ? static_cast<uint32_t>(d->valuedouble) : 0;
+    cJSON_Delete(root);
+    if (off) return State::Off;
+    if (must_confirm(h) && confirmed != lua_meta::digest(h)) return State::Pending;
+    return State::Enabled;
 }
 
-// ---------------------------------------------------------------- triggers on storage
+const char* state_word(State s) {
+    switch (s) {
+        case State::Enabled: return "已启用";
+        case State::Pending: return "待确认";
+        case State::Off: return "已停用";
+        default: return "声明有误";
+    }
+}
+
+bool load_entry(const String& name, Entry& e) {
+    const String path = path_of(name);
+    if (!storage::exists(path)) return false;
+    e = Entry();
+    e.name = name;
+    e.size = storage::size(path);
+    e.problem = lua_meta::parse(storage::read_text(path, 4096), e.header);
+    e.state = state_of(name, e.header, e.problem);
+    return true;
+}
+
+void confirm(const String& name, const lua_meta::Header& h) {
+    cJSON* root = object_at(kApproved);
+    cJSON* entry = cJSON_CreateObject();
+    cJSON_AddNumberToObject(entry, "digest", static_cast<double>(lua_meta::digest(h)));
+    put(root, name.c_str(), entry);
+    write_json(kApproved, root);
+    cJSON_Delete(root);
+}
+
+void set_off(const String& name, bool off) {
+    cJSON* root = object_at(kApproved);
+    cJSON* entry = json_obj(root, name.c_str());
+    if (!entry) entry = cJSON_AddObjectToObject(root, name.c_str());
+    put(entry, "off", cJSON_CreateBool(off));
+    write_json(kApproved, root);
+    cJSON_Delete(root);
+}
+
+// Every .lua on the card, read from the index (built by scan()).
+std::vector<Entry> entries() {
+    std::vector<Entry> out;
+    cJSON* index = read_json(kIndex);
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, index) {
+        Entry e;
+        if (load_entry(json_str(item, "name"), e)) out.push_back(e);
+    }
+    cJSON_Delete(index);
+    return out;
+}
+
+void write_index(const std::vector<String>& names) {
+    cJSON* list = cJSON_CreateArray();
+    for (const auto& n : names) {
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", n.c_str());
+        cJSON_AddItemToArray(list, item);
+    }
+    write_json(kIndex, list);
+    cJSON_Delete(list);
+}
+
+std::vector<String> index_names() {
+    std::vector<String> names;
+    cJSON* index = read_json(kIndex);
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, index) names.push_back(json_str(item, "name"));
+    cJSON_Delete(index);
+    return names;
+}
+
+void index_add(const String& name) {
+    auto names = index_names();
+    if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    write_index(names);
+}
+
+void index_remove(const String& name) {
+    auto names = index_names();
+    names.erase(std::remove(names.begin(), names.end(), name), names.end());
+    write_index(names);
+}
+
+String signature(const String& name, const lua_meta::Header& h) {
+    String sig = name;
+    if (!h.inputs.empty()) {
+        sig += "(";
+        for (std::size_t i = 0; i < h.inputs.size(); ++i) {
+            if (i) sig += ", ";
+            sig += h.inputs[i].name;
+            if (!h.inputs[i].required) sig += "=" + h.inputs[i].fallback;
+        }
+        sig += ")";
+    }
+    return sig;
+}
+
+String users_of(const String& name) {  // triggers that run `name`
+    std::lock_guard<std::mutex> guard(lock);
+    String out;
+    for (const auto& t : triggers) {
+        String run = t.run.substring(7);
+        const int q = run.indexOf('?');
+        if (q >= 0) run = run.substring(0, q);
+        if (url_decode(run) == name) out += String(out.isEmpty() ? "" : "、") + "触发 #" + String(t.id);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------- running
+
+struct Outcome {
+    bool ok = false;
+    String result;
+    String output;
+    String error;
+};
+
+// Started with Enter on the program page: missing inputs are asked for on the
+// console.  A tool call reports them instead (the agent asks the user).
+bool ask_inputs = false;
+
+Outcome run_checked(const String& name, const String& query, const String& event_json, bool foreground) {
+    Outcome o;
+    Entry e;
+    if (!load_entry(name, e)) {
+        o.error = "没有程序「" + name + "」（read prog://list 查看）";
+        return o;
+    }
+    if (!e.header.package.isEmpty()) {
+        o.error = "「" + name + "」是扩展包，不能直接运行";
+        return o;
+    }
+    if (e.state == State::Broken) o.error = "「" + name + "」的声明有误：" + e.problem;
+    else if (e.state == State::Off) o.error = "「" + name + "」已停用（write pkg://" + name + "/enable 启用）";
+    else if (e.state == State::Pending) o.error = "「" + name + "」的权限声明还没确认（重新保存它，或 write pkg://" + name + "/enable）";
+    if (!o.error.isEmpty()) return o;
+
+    cJSON* input = parse_query(query);
+    for (const auto& i : e.header.inputs) {
+        if (cJSON_GetObjectItemCaseSensitive(input, i.name.c_str())) continue;
+        if (i.required && foreground && ask_inputs) {  // started from the program page: ask
+            String value;
+            const auto got = console::read_line("参数 " + i.name + "：", value);
+            if (got == console::Got::Value) {
+                cJSON_AddStringToObject(input, i.name.c_str(), value.c_str());
+                continue;
+            }
+            o.error = got == console::Got::Cancelled ? String("已中断") : "缺少参数 " + i.name;
+            cJSON_Delete(input);
+            return o;
+        }
+        if (i.required) {
+            o.error = "缺少参数 " + i.name + "（运行：exec prog://" + signature(name, e.header) + "）";
+            cJSON_Delete(input);
+            return o;
+        }
+        cJSON_AddStringToObject(input, i.name.c_str(), i.fallback.c_str());
+    }
+    if (!event_json.isEmpty()) {
+        cJSON* event = cJSON_Parse(event_json.c_str());
+        put(input, "event", event ? event : cJSON_CreateString(event_json.c_str()));
+    }
+    luavm::Options options;
+    options.uses = &e.header.uses;
+    options.input = input;
+    options.foreground = foreground;
+    luavm::Stats stats;
+    o.ok = luavm::run(storage::read_text(path_of(name), lua_meta::kMaxSource), name, options, o.output, o.result, o.error,
+                      stats);
+    cJSON_Delete(input);
+    runtime_event("prog_run", name + (o.ok ? " done" : " failed") + " peak=" + String(static_cast<unsigned>(stats.peak)) +
+                                  " arena=" + String(static_cast<unsigned>(stats.arena)) + " ms=" + String(stats.ms));
+    record_stat(name, false, o.ok, o.ok ? o.result : o.error);
+    note_recent(name + (o.ok ? " 完成" : " 失败：" + o.error));
+    return o;
+}
+
+// The outermost run decides: a tool call or the program page is in the
+// foreground (the console), a trigger in the background; programs it calls
+// run the same way.  One worker task: plain variables.
+int run_level = 0;
+bool run_foreground = false;
+
+Outcome run_program(const String& name, const String& query, const String& event_json, bool foreground,
+                    const String& stdin_text = String()) {
+    const bool top = run_level == 0;
+    if (top) run_foreground = foreground;
+    const bool fg = run_foreground;
+    if (top && fg) console::start(name, stdin_text);
+    ++run_level;
+    Outcome o = run_checked(name, query, event_json, fg);
+    --run_level;
+    if (top && fg) {
+        const bool stopped = cancel::requested();
+        if (!o.ok) console::write(o.error + "\n", true);
+        console::finish(o.ok ? (o.result.isEmpty() ? String("完成") : "完成：" + utf8_head(o.result, 120))
+                             : stopped ? String("已中断") : String("失败"),
+                        !o.ok);
+        storage::write_text(String(kDir) + "/logs/" + name + ".txt", console::text());
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------- triggers
 
 void save_triggers() {  // caller holds `lock`
     cJSON* list = cJSON_CreateArray();
@@ -323,9 +397,7 @@ void save_triggers() {  // caller holds `lock`
         cJSON* item = cJSON_CreateObject();
         cJSON_AddNumberToObject(item, "id", t.id);
         cJSON_AddStringToObject(item, "when", t.when.c_str());
-        cJSON_AddItemToObject(item, "run", cJSON_Parse(t.run.c_str()));
-        cJSON* approvals = cJSON_Parse(t.approved.c_str());
-        cJSON_AddItemToObject(item, "approved", approvals ? approvals : cJSON_CreateArray());
+        cJSON_AddStringToObject(item, "run", t.run.c_str());
         cJSON_AddBoolToObject(item, "paused", t.paused);
         cJSON_AddItemToArray(list, item);
     }
@@ -333,22 +405,55 @@ void save_triggers() {  // caller holds `lock`
     cJSON_Delete(list);
 }
 
-void load_triggers() {
-    std::lock_guard<std::mutex> guard(lock);
-    triggers.clear();
+void read_triggers() {  // caller holds `lock`
     cJSON* list = read_json(kTriggers);
     const cJSON* item = nullptr;
     cJSON_ArrayForEach(item, list) {
         Trigger t;
         t.id = json_int(item, "id", 0);
         t.when = json_str(item, "when");
-        t.run = json_print(json_obj(item, "run"));
-        const cJSON* approvals = cJSON_GetObjectItemCaseSensitive(item, "approved");
-        t.approved = approvals ? json_print(approvals) : String("[]");
+        t.run = json_str(item, "run");
+        t.paused = json_bool(item, "paused", false);
+        if (t.id > 0 && !t.when.isEmpty() && t.run.startsWith("prog://")) triggers.push_back(t);
+    }
+    cJSON_Delete(list);
+}
+
+// v0.6.2 triggers ran one JSON step; those that ran a program become
+// "prog://名字?参数", the rest are dropped (their ids go to `dropped`, noted
+// by the caller once `lock` is released).  Caller holds `lock`.
+void migrate_triggers(std::vector<String>& dropped) {
+    if (storage::exists(kTriggers) || !storage::exists(kLegacyTriggers)) return;
+    cJSON* old = read_json(kLegacyTriggers);
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, old) {
+        const String run = json_str(json_obj(item, "run"), "exec");
+        if (!run.startsWith("prog://")) {
+            dropped.push_back("#" + String(json_int(item, "id", 0)));
+            continue;
+        }
+        Trigger t;
+        t.id = json_int(item, "id", 0);
+        t.when = json_str(item, "when");
+        t.run = run;
         t.paused = json_bool(item, "paused", false);
         if (t.id > 0 && !t.when.isEmpty()) triggers.push_back(t);
     }
-    cJSON_Delete(list);
+    cJSON_Delete(old);
+    save_triggers();
+    storage::rename(kLegacyTriggers, String(kLegacyTriggers) + ".old");
+}
+
+void load_triggers() {
+    std::vector<String> dropped;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        triggers.clear();
+        migrate_triggers(dropped);
+        if (triggers.empty()) read_triggers();
+    }
+    // note_recent() takes `lock` too: never while it is held
+    for (const auto& d : dropped) note_recent("旧触发 " + d + " 不是运行程序，未迁移（见 triggers.json.old）");
 }
 
 bool one_off(const String& when) { return when.startsWith("time://at/"); }
@@ -383,218 +488,56 @@ void arm_triggers() {
     for (const auto& m : missed) note_recent(m);
 }
 
-// ---------------------------------------------------------------- waiting runs
-
-String run_path(int id) { return String(kRunDir) + "/" + String(id) + ".json"; }
-
-String resume_target(time_t when, int id) {
-    return "time://at/" + clock_text(when, "%Y-%m-%d %H:%M:%S") + "#r" + String(id);
-}
-
-void arm_runs() {
-    cJSON* list = cJSON_Parse(storage::list_dir(kRunDir).c_str());
-    const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, list) {
-        const String file = json_str(item, "name");
-        const int id = file.toInt();
-        if (id <= 0) continue;
-        next_run = std::max(next_run, id + 1);
-        cJSON* run = read_json(run_path(id).c_str(), 16384);
-        const String target = json_str(run, "resume");
-        const String label = json_str(run, "label");
-        cJSON_Delete(run);
-        String normalized;
-        const String err = target.isEmpty() ? String("no resume") : registry::watch(target, normalized);
-        if (err.indexOf("已经过去") >= 0 || target.isEmpty()) {
-            storage::remove(run_path(id));
-            note_recent("放弃「" + label + "」：等待期间关机，已过点");
-        }
-        // Any other error (clock not set): watched again on the next pass.
-    }
-    cJSON_Delete(list);
-}
-
-// ---------------------------------------------------------------- the device Host
-
-class DeviceHost : public prog::Host {
-public:
-    explicit DeviceHost(bool slice) : slice_(slice), started_(millis()) {}
-    String trigger_json;      // the synthetic program of a trigger run
-    String trigger_approved;  // its approvals
-
-    bool call(const String& program, const String& tool, const cJSON* arguments, const cJSON* step,
-              String& out) override {
-        if (tool == "stream") return registry::read_stream(json_str(arguments, "target"), out);  // read-only, no Policy
-        const auto verdict = policy::evaluate(tool, arguments);
-        if (verdict.decision == policy::Decision::Deny) {
-            out = "ERROR: 已拒绝：" + verdict.reason;
-            return false;
-        }
-        bool approved = false;
-        if (verdict.decision == policy::Decision::Ask) {
-            if (!is_approved(program, prog::fingerprint(step))) {
-                out = "ERROR: 这一步需要确认，但保存时没有确认过（程序被改过？重新保存后再运行）";
-                return false;
-            }
-            approved = true;
-        }
-        if (!registry::needs_secret(tool, arguments).isEmpty()) {
-            out = "ERROR: 程序里不能输入密码";
-            return false;
-        }
-        out = registry::execute(tool, arguments, approved);
-        return !failed_text(out);
-    }
-
-    cJSON* load(const String& name) override {
-        if (name == kTriggerProgram) return cJSON_Parse(trigger_json.c_str());
-        return load_program(name);
-    }
-
-    String now() override { return clock_text(time(nullptr), "%H:%M"); }
-    bool out_of_time() override { return slice_ && millis() - started_ > kSliceMs; }
-
-private:
-    bool is_approved(const String& program, uint32_t print) {
-        if (program == kTriggerProgram) {
-            cJSON* list = cJSON_Parse(trigger_approved.c_str());
-            const bool ok = approved_in(list, print);
-            cJSON_Delete(list);
-            return ok;
-        }
-        cJSON* root = read_json(kApproved);
-        const bool ok = approved_in(cJSON_GetObjectItemCaseSensitive(root, program.c_str()), print);
-        cJSON_Delete(root);
-        return ok;
-    }
-
-    bool slice_;
-    uint32_t started_;
-};
-
-String trigger_program(const String& step_json) {
-    cJSON* p = cJSON_CreateObject();
-    cJSON_AddStringToObject(p, "name", kTriggerProgram);
-    cJSON* steps = cJSON_AddArrayToObject(p, "steps");
-    cJSON* step = cJSON_Parse(step_json.c_str());
-    if (step) cJSON_AddItemToArray(steps, step);
-    const String out = json_print(p);
-    cJSON_Delete(p);
-    return out;
-}
-
-// Whether `name` or anything it calls waits or asks (decides inline vs queued).
-void deep_flags(const String& name, bool& asks, bool& waits, int depth = 0) {
-    if (depth > prog::kMaxDepth) return;
-    cJSON* p = load_program(name);
-    if (!p) return;
-    prog::Info info;
-    prog::validate(p, info);
-    cJSON_Delete(p);
-    asks = asks || info.uses_ask;
-    waits = waits || info.uses_wait;
-    for (const auto& callee : info.callees) deep_flags(callee, asks, waits, depth + 1);
-}
-
-void enqueue(const Item& item, bool front = false) {
+void enqueue(const Item& item) {
     std::lock_guard<std::mutex> guard(lock);
     if (queue.size() >= kMaxQueue) {
-        runtime_event("prog_queue_full", item.kind + " " + item.a);
+        runtime_event("prog_queue_full", item.label);
         return;
     }
-    if (front) queue.insert(queue.begin(), item);
-    else queue.push_back(item);
+    queue.push_back(item);
+}
+
+// "prog://名字?参数" -> name, query
+void split_run(const String& run, String& name, String& query) {
+    String rest = run.substring(7);
+    const int q = rest.indexOf('?');
+    query = q < 0 ? String() : rest.substring(q + 1);
+    name = url_decode(q < 0 ? rest : rest.substring(0, q));
 }
 
 String item_json(const Item& item) {
     cJSON* o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "kind", item.kind.c_str());
-    cJSON_AddStringToObject(o, "a", item.a.c_str());
-    cJSON_AddStringToObject(o, "b", item.b.c_str());
-    cJSON_AddStringToObject(o, "c", item.c.c_str());
+    cJSON_AddStringToObject(o, "label", item.label.c_str());
+    cJSON_AddStringToObject(o, "program", item.program.c_str());
+    cJSON_AddStringToObject(o, "query", item.query.c_str());
     cJSON_AddStringToObject(o, "data", item.data.c_str());
     const String out = json_print(o);
     cJSON_Delete(o);
     return out;
 }
 
-// One queued run on the worker task.
+// One queued run, on the worker task.
 void job(uint32_t job_id, const String& text) {
     cJSON* o = cJSON_Parse(text.c_str());
-    const Item item{json_str(o, "kind"), json_str(o, "a"), json_str(o, "b"), json_str(o, "c"), json_str(o, "data")};
+    const String label = json_str(o, "label");
+    const String program = json_str(o, "program");
+    const String query = json_str(o, "query");
+    const String data = json_str(o, "data");
     cJSON_Delete(o);
-
-    DeviceHost host(true);
-    auto run = std::make_unique<prog::Run>();
-    String label, error;
-    int run_id = 0;
-    if (item.kind == "trigger") {
-        label = item.a;
-        host.trigger_json = trigger_program(item.b);
-        host.trigger_approved = item.c;
-        cJSON* data = cJSON_Parse(item.data.c_str());
-        error = run->start(host, kTriggerProgram, "", data);
-        cJSON_Delete(data);
-    } else if (item.kind == "run") {
-        label = item.a;
-        error = run->start(host, item.a, item.b, nullptr);
-    } else {  // resume
-        run_id = item.a.toInt();
-        cJSON* saved = read_json(run_path(run_id).c_str(), 16384);
-        label = json_str(saved, "label");
-        host.trigger_json = json_str(saved, "trigger_json");
-        host.trigger_approved = json_str(saved, "trigger_approved");
-        error = saved ? run->restore(host, json_str(saved, "state")) : String("这次运行已取消");
-        cJSON_Delete(saved);
-    }
-
     ui::set_busy("RUN 程序");
     ui::entry_begin("[程序] " + label);
-    prog::Result result;
-    if (error.isEmpty()) {
-        result = run->resume(host);
-    } else {
-        result.status = prog::Status::Failed;
-        result.error = error;
-    }
-    String detail;
-    for (const auto& line : run->log()) detail += line + "\n";
-
-    const bool keeps_waiting = result.status == prog::Status::Waiting || result.status == prog::Status::Yielded;
-    if (keeps_waiting) {
-        if (!run_id) run_id = next_run++;
-        const time_t resume_at = time(nullptr) + (result.status == prog::Status::Waiting ? result.wait_s : 0);
-        cJSON* saved = cJSON_CreateObject();
-        cJSON_AddStringToObject(saved, "label", label.c_str());
-        cJSON_AddStringToObject(saved, "state", run->save().c_str());
-        cJSON_AddStringToObject(saved, "trigger_json", host.trigger_json.c_str());
-        cJSON_AddStringToObject(saved, "trigger_approved", host.trigger_approved.c_str());
-        cJSON_AddStringToObject(saved, "resume", resume_target(resume_at, run_id).c_str());
-        write_json(run_path(run_id), saved);
-        cJSON_Delete(saved);
-        if (result.status == prog::Status::Yielded) {
-            enqueue({"resume", String(run_id), "", "", ""}, true);
-            ui::entry_finish(ui::Status::Done, "执行较久，分段继续中…", detail, "[]");
-        } else {
-            String normalized;
-            const String err = registry::watch(resume_target(resume_at, run_id), normalized);
-            const String when = clock_text(resume_at, "%H:%M:%S");
-            ui::entry_finish(ui::Status::Done, "等待中，" + when + " 继续" + (err.isEmpty() ? String() : "（" + err + "）"),
-                             detail, "[]");
-        }
-        worker::set_result(job_id, "waiting");
-    } else {
-        if (run_id) storage::remove(run_path(run_id));
-        const bool ok = result.status == prog::Status::Done;
-        const String summary = ok ? (result.value.isEmpty() ? String("完成") : result.value) : result.error;
-        ui::entry_finish(ok ? ui::Status::Done : ui::Status::Failed, summary, detail, "[]");
-        if (item.kind != "trigger" && !label.startsWith("触发 #")) record_stat(label, false, ok, summary);
-        note_recent(label + (ok ? " 完成：" : " 失败：") + summary);
-        worker::set_result(job_id, ok ? result.value : String(), ok ? String() : result.error);
-    }
+    const Outcome r = run_program(program, query, data, false);
+    const String summary = r.ok ? (r.result.isEmpty() ? String("完成") : r.result) : r.error;
+    ui::entry_finish(r.ok ? ui::Status::Done : ui::Status::Failed, summary, r.output, "[]");
+    worker::set_result(job_id, r.ok ? r.result : String(), r.ok ? String() : r.error);
     ui::set_idle();
-    runtime_event("prog_run", label + " " + (keeps_waiting ? "waiting" : result.status == prog::Status::Done ? "done" : "failed") +
-                                  " steps=" + String(run->executed()));
+}
+
+String run_text(const String& name, const Outcome& r) {
+    String out = r.ok ? "程序「" + name + "」完成，结果：" + (r.result.isEmpty() ? String("（无）") : r.result)
+                      : "ERROR: 程序「" + name + "」失败：" + r.error;
+    if (!r.output.isEmpty()) out += "\n输出：\n" + r.output;
+    return out;
 }
 
 }  // namespace
@@ -610,30 +553,20 @@ void loop() {
     if (!loaded) {
         if (!storage::ready()) return;
         loaded = true;
+        if (!storage::exists(kIndex)) scan();
         load_triggers();
         last_arm = millis() - 20000;  // arm right away
     }
-    if (millis() - last_arm > 10000) {  // arm triggers and waiting runs (again, if the clock was not set)
+    if (millis() - last_arm > 10000) {  // (again, if the clock was not set)
         last_arm = millis();
         arm_triggers();
-        static bool runs_armed = false;
-        if (!runs_armed && time(nullptr) > 1700000000) {
-            runs_armed = true;
-            arm_runs();
-        }
     }
-
     std::vector<std::pair<String, String>> incoming;
     {
         std::lock_guard<std::mutex> guard(lock);
         incoming.swap(events_in);
     }
     for (const auto& event : incoming) {
-        const int tag = event.first.indexOf("#r");
-        if (tag > 0) {
-            enqueue({"resume", event.first.substring(tag + 2), "", "", ""});
-            continue;
-        }
         std::vector<Item> due;
         {
             std::lock_guard<std::mutex> guard(lock);
@@ -643,7 +576,11 @@ void loop() {
                     ++it;
                     continue;
                 }
-                due.push_back({"trigger", "触发 #" + String(it->id), it->run, it->approved, event.second});
+                Item item;
+                item.label = "触发 #" + String(it->id);
+                split_run(it->run, item.program, item.query);
+                item.data = event.second;
+                due.push_back(item);
                 if (one_off(it->when)) {
                     it = triggers.erase(it);
                     changed = true;
@@ -663,11 +600,11 @@ void loop() {
         if (queue.empty()) return;
         next = queue.front();
     }
-    worker::Job job_spec;
-    job_spec.kind = worker::Kind::Callback;
-    job_spec.callback = job;
-    job_spec.text = item_json(next);
-    if (worker::submit(job_spec)) {
+    worker::Job spec;
+    spec.kind = worker::Kind::Callback;
+    spec.callback = job;
+    spec.text = item_json(next);
+    if (worker::submit(spec)) {
         std::lock_guard<std::mutex> guard(lock);
         if (!queue.empty()) queue.erase(queue.begin());
     }
@@ -676,259 +613,150 @@ void loop() {
 // ---------------------------------------------------------------- prog://
 
 String list_text() {
-    auto programs = all_programs();
-    if (programs.empty()) return "还没有程序。写程序：write prog://名字（格式见 read prog://help）";
-    cJSON* stats = stats_root();
-    String out = "共 " + String(programs.size()) + " 个程序：\n";
+    String out;
     int n = 0;
-    for (cJSON* p : programs) {
-        prog::Info info;
-        prog::validate(p, info);
-        out += String(++n) + ". " + signature(info);
-        if (!info.about.isEmpty()) out += " — " + info.about;
-        out += " — " + String(info.statements) + " 步";
-        if (!info.callees.empty()) {
-            out += " — 调用：";
-            for (std::size_t i = 0; i < info.callees.size(); ++i) out += (i ? "、" : "") + info.callees[i];
-        }
-        String when;
-        {
-            std::lock_guard<std::mutex> guard(lock);
-            for (const auto& t : triggers) {
-                cJSON* step = cJSON_Parse(t.run.c_str());
-                String name, query;
-                if (prog::program_target(json_str(step, "exec"), name, query) && name == info.name) {
-                    when += (when.isEmpty() ? "" : "、") + describe_when(t.when);
-                }
-                cJSON_Delete(step);
-            }
-        }
-        out += " — " + (when.isEmpty() ? String("手动运行") : "触发：" + when);
-        const cJSON* stat = json_obj(stats, info.name.c_str());
-        const double last = cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(stat, "last"));
-        if (last > 0) {
-            out += " — 上次 " + clock_text(static_cast<time_t>(last), "%m-%d %H:%M") +
-                   (json_bool(stat, "ok", false) ? " 完成" : " 失败");
-        }
+    for (const auto& e : entries()) {
+        if (!e.header.package.isEmpty()) continue;
+        ++n;
+        out += "- " + signature(e.name, e.header);
+        if (!e.header.about.isEmpty()) out += "：" + e.header.about;
+        if (e.state != State::Enabled) out += String("（") + state_word(e.state) + "）";
+        const String used = users_of(e.name);
+        if (!used.isEmpty()) out += "；被" + used + "使用";
         out += "\n";
     }
-    cJSON_Delete(stats);
-    free_all(programs);
-    out.trim();
-    return out;
-}
-
-String show(const String& name) {
-    cJSON* p = load_program(name);
-    if (!p) return "ERROR: 没有程序「" + name + "」（read prog://list 查看）";
-    prog::Info info;
-    prog::validate(p, info);
-    String out = "「" + signature(info) + "」" + (info.about.isEmpty() ? String() : " " + info.about) + "\n" +
-                 outline(cJSON_GetObjectItemCaseSensitive(p, "steps"), "", 0) + "\n原文：" + json_print(p);
-    cJSON_Delete(p);
-    return out;
-}
-
-String save(const String& name, const String& content, bool approved) {
-    cJSON* p = cJSON_Parse(content.c_str());
-    if (!p) return "ERROR: content 不是合法的 JSON（格式见 read prog://help）";
-    prog::Info info;
-    String err = prog::validate(p, info);
-    if (err.isEmpty() && info.name.startsWith("~")) err = "程序名不能以 ~ 开头";
-    if (err.isEmpty() && !name.isEmpty() && info.name != name) err = "target 里的程序名「" + name + "」和 name「" + info.name + "」不一致";
-    const bool existed = storage::exists(program_path(info.name));
-    if (err.isEmpty() && !existed) {
-        auto programs = all_programs();
-        if (programs.size() >= kMaxPrograms) err = "程序已达上限 " + String(kMaxPrograms) + " 个，先清理不用的（read prog://unused）";
-        free_all(programs);
-    }
-    if (err.isEmpty()) {
-        DeviceHost host(false);
-        err = prog::check_calls(info.name, info.callees, host);
-    }
-    std::vector<uint32_t> prints;
-    std::vector<String> lines;
-    if (err.isEmpty()) err = sensitive_steps(cJSON_GetObjectItemCaseSensitive(p, "steps"), prints, lines);
-    if (err.isEmpty() && !prints.empty() && !approved) err = "含需要确认的步骤，必须由用户确认后保存";
-    if (!err.isEmpty()) {
-        cJSON_Delete(p);
-        return "ERROR: " + err;
-    }
-    write_json(program_path(info.name), p);
-    cJSON_Delete(p);
-    set_approvals(info.name, prints);
-    if (!existed) record_stat(info.name, true, true, "");
-    String out = (existed ? "已修改程序「" : "已保存程序「") + signature(info) + "」：" + String(info.statements) + " 步";
-    if (!info.callees.empty()) {
-        out += "，调用 ";
-        for (std::size_t i = 0; i < info.callees.size(); ++i) out += (i ? "、" : "") + info.callees[i];
-    }
-    if (!lines.empty()) out += "，其中 " + String(lines.size()) + " 步已确认";
-    out += "。运行：exec prog://" + info.name + "；定时或开机运行：write trigger://new";
-    return out;
-}
-
-// Who still uses `name`: triggers and programs, "" when nobody.
-String users_of(const String& name) {
-    String users;
+    String head = n ? "共 " + String(n) + " 个程序：\n" : String("还没有程序。写一个：write prog://名字，content 为 Lua 源码（read prog://help）\n");
     {
         std::lock_guard<std::mutex> guard(lock);
-        for (const auto& t : triggers) {
-            cJSON* step = cJSON_Parse(t.run.c_str());
-            String callee, query;
-            if (prog::program_target(json_str(step, "exec"), callee, query) && callee == name) {
-                users += (users.isEmpty() ? "" : "、") + String("触发 #") + String(t.id);
-            }
-            cJSON_Delete(step);
-        }
-    }
-    auto programs = all_programs();
-    for (cJSON* p : programs) {
-        prog::Info info;
-        prog::validate(p, info);
-        for (const auto& c : info.callees) {
-            if (c == name && info.name != name) users += (users.isEmpty() ? "" : "、") + String("程序「") + info.name + "」";
-        }
-    }
-    free_all(programs);
-    return users;
-}
-
-String cancel_run(int id) {
-    cJSON* run = id > 0 ? read_json(run_path(id).c_str(), 16384) : nullptr;
-    if (!run) return "ERROR: 没有等待中的运行 #" + String(id) + "（read prog://runs 查看编号）";
-    const String resume = json_str(run, "resume");
-    const String label = json_str(run, "label");
-    cJSON_Delete(run);
-    if (!resume.isEmpty()) registry::unwatch(resume);
-    storage::remove(run_path(id));
-    note_recent("取消「" + label + "」的等待");
-    return "已取消「" + label + "」这次运行（#" + String(id) + "），程序和触发都保留";
-}
-
-// Waiting runs of program `name` (started by hand or by `exec`).
-std::vector<int> waiting_runs_of(const String& name) {
-    std::vector<int> ids;
-    cJSON* list = cJSON_Parse(storage::list_dir(kRunDir).c_str());
-    const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, list) {
-        const int id = json_str(item, "name").toInt();
-        if (id <= 0) continue;
-        cJSON* run = read_json(run_path(id).c_str(), 16384);
-        if (json_str(run, "label") == name) ids.push_back(id);
-        cJSON_Delete(run);
-    }
-    cJSON_Delete(list);
-    return ids;
-}
-
-String remove(const String& name) {
-    if (!storage::exists(program_path(name))) return "ERROR: 没有程序「" + name + "」";
-    const String users = users_of(name);
-    if (!users.isEmpty()) return "ERROR: 「" + name + "」还被 " + users + " 使用，先删除或修改它们";
-    for (const int id : waiting_runs_of(name)) cancel_run(id);
-    storage::remove(program_path(name));
-    set_approvals(name, {});
-    forget_stat(name);
-    return "已删除程序「" + name + "」";
-}
-
-std::vector<String> unused_names() {
-    std::vector<String> names;
-    auto programs = all_programs();
-    cJSON* stats = stats_root();
-    const time_t now = time(nullptr);
-    for (cJSON* p : programs) {
-        const String name = json_str(p, "name");
-        const cJSON* stat = json_obj(stats, name.c_str());
-        double last = cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(stat, "last"));
-        if (!(last > 0)) last = cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(stat, "created"));
-        const bool old = last > 0 && now > 1700000000 && now - static_cast<time_t>(last) > kUnusedSeconds;
-        if (old && users_of(name).isEmpty()) names.push_back(name);
-    }
-    cJSON_Delete(stats);
-    free_all(programs);
-    return names;
-}
-
-String cleanup_list() {
-    String out;
-    for (const auto& n : unused_names()) out += (out.isEmpty() ? "" : "、") + n;
-    return out;
-}
-
-String unused_text() {
-    const String list = cleanup_list();
-    return list.isEmpty() ? String("没有可清理的程序（都还在用，或 30 天内运行过）")
-                          : "没被引用且超过 30 天没运行的程序：" + list + "。删除：write prog://cleanup";
-}
-
-String cleanup() {
-    const auto names = unused_names();
-    if (names.empty()) return "没有可清理的程序";
-    String out = "已删除 " + String(names.size()) + " 个程序：";
-    for (std::size_t i = 0; i < names.size(); ++i) {
-        remove(names[i]);
-        out += (i ? "、" : "") + names[i];
-    }
-    return out;
-}
-
-String runs_text() {
-    String out;
-    cJSON* list = cJSON_Parse(storage::list_dir(kRunDir).c_str());
-    const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, list) {
-        const int id = json_str(item, "name").toInt();
-        if (id <= 0) continue;
-        cJSON* run = read_json(run_path(id).c_str(), 16384);
-        const String resume = json_str(run, "resume");
-        out += "#" + String(id) + " " + json_str(run, "label") + "：" +
-               resume.substring(resume.indexOf(' ') + 1, resume.indexOf('#')) + " 继续\n";
-        cJSON_Delete(run);
-    }
-    cJSON_Delete(list);
-    {
-        std::lock_guard<std::mutex> guard(lock);
-        if (!queue.empty()) out += "排队中：" + String(queue.size()) + " 个\n";
         if (!recent.empty()) {
             out += "最近：\n";
             for (const auto& r : recent) out += "  " + r + "\n";
         }
     }
+    const String legacy = legacy_text();
+    if (!legacy.startsWith("没有")) out += legacy + "\n";
+    out = head + out;
     out.trim();
-    return out.isEmpty() ? String("没有等待中或最近的运行") : out;
+    return out;
 }
 
-String run(const String& name, const String& query) {
-    cJSON* p = load_program(name);
-    if (!p) return "ERROR: 没有程序「" + name + "」（read prog://list 查看）";
-    cJSON_Delete(p);
-    bool asks = false, waits = false;
-    deep_flags(name, asks, waits);
-    if (waits || (asks && agent::active())) {
-        enqueue({"run", name, query, "", ""});
-        return "已排队运行「" + name + "」：它含 " + String(waits ? "wait" : "ask://") +
-               "，会在这次对话结束后执行，结果显示在时间线上（read prog://runs 查看）";
-    }
-    DeviceHost host(false);
-    prog::Run r;
-    String err = r.start(host, name, query, nullptr);
-    prog::Result result;
+String show(const String& name) {
+    Entry e;
+    if (!load_entry(name, e)) return "ERROR: 没有程序「" + name + "」（read prog://list 查看）";
+    String out = signature(name, e.header) + String("（") + state_word(e.state) + "，" + String(static_cast<unsigned>(e.size)) +
+                 " 字节）";
+    if (!e.problem.isEmpty()) out += "\n声明有误：" + e.problem;
+    for (const auto& u : e.header.uses) out += "\n权限：" + lua_meta::describe(u);
+    return out + "\n源码：\n" + storage::read_text(path_of(name), lua_meta::kMaxSource);
+}
+
+String save(const String& name, const String& source, bool approved) {
+    String err = lua_meta::check_name(name);
+    lua_meta::Header h;
+    if (err.isEmpty()) err = lua_meta::parse(source, h);
+    if (err.isEmpty() && !h.package.isEmpty()) err = "这是扩展包（@package），放进卡里后用 pkg:// 管理";
+    String trimmed = source;
+    trimmed.trim();
+    if (err.isEmpty() && trimmed.startsWith("{")) err = "程序现在用 Lua 写（read prog://help）；旧的 JSON 格式不再支持";
     if (err.isEmpty()) {
-        result = r.resume(host);
-    } else {
-        result.status = prog::Status::Failed;
-        result.error = err;
+        const String problem = luavm::compile(source, name);
+        if (!problem.isEmpty()) err = "语法错误：" + problem;
     }
-    const bool ok = result.status == prog::Status::Done;
-    record_stat(name, false, ok, ok ? result.value : result.error);
-    note_recent(name + (ok ? " 完成" : " 失败：" + result.error));
-    String steps;
-    for (const auto& line : r.log()) steps += "  " + line + "\n";
-    return ok ? "程序「" + name + "」完成，结果：" + (result.value.isEmpty() ? String("（无）") : result.value) +
-                    "\n步骤：\n" + steps
-              : "ERROR: 程序「" + name + "」失败：" + result.error + "\n步骤：\n" + steps;
+    const bool existed = storage::exists(path_of(name));
+    if (err.isEmpty() && !existed && index_names().size() >= kMaxFiles) err = "程序已达上限 " + String(kMaxFiles) + " 个，先删掉不用的";
+    if (err.isEmpty() && must_confirm(h) && !approved) err = "声明了需要确认的能力，必须由用户确认后保存";
+    if (!err.isEmpty()) return "ERROR: " + err;
+    if (!storage::ensure_parent(path_of(name)) || !storage::write_text(path_of(name), source)) return "ERROR: 写卡失败";
+    if (must_confirm(h)) confirm(name, h);
+    else forget(kApproved, name);
+    index_add(name);
+    if (!existed) record_stat(name, true, true, "");
+    String out = (existed ? "已修改程序「" : "已保存程序「") + signature(name, h) + "」";
+    if (!h.uses.empty()) out += "，已确认 " + String(static_cast<int>(h.uses.size())) + " 项权限";
+    return out + "。运行：exec prog://" + name + "；定时或开机运行：write trigger://new";
+}
+
+String remove(const String& name) {
+    if (!storage::exists(path_of(name))) return "ERROR: 没有程序「" + name + "」";
+    const String used = users_of(name);
+    if (!used.isEmpty()) return "ERROR: 「" + name + "」还被" + used + "使用，先删掉或改掉它们";
+    storage::remove(path_of(name));
+    storage::remove(old_path_of(name));
+    forget(kApproved, name);
+    forget(kStats, name);
+    index_remove(name);
+    return "已删除「" + name + "」";
+}
+
+String run(const String& name, const String& query, const String& stdin_text) {
+    return run_text(name, run_program(name, query, "", true, stdin_text));
+}
+
+bool launch(const String& name) {
+    worker::Job job;
+    job.kind = worker::Kind::Callback;
+    job.text = name;
+    job.callback = [](uint32_t id, const String& program) {
+        ask_inputs = true;
+        const String out = run(program, "");
+        ask_inputs = false;
+        worker::set_result(id, out);
+    };
+    return worker::submit(job) != 0;
+}
+
+std::vector<std::pair<String, String>> runnable() {
+    std::vector<std::pair<String, String>> out;
+    for (const auto& e : entries()) {
+        if (e.header.package.isEmpty()) out.push_back({e.name, e.header.about});
+    }
+    return out;
+}
+
+bool needs_confirm(const String& source) {
+    lua_meta::Header h;
+    return lua_meta::parse(source, h).isEmpty() && must_confirm(h);
+}
+
+String save_summary(const String& name, const String& source) {
+    lua_meta::Header h;
+    lua_meta::parse(source, h);
+    String out = "保存程序「" + name + "」" + (h.about.isEmpty() ? String() : "（" + h.about + "）") + "，允许它：";
+    for (std::size_t i = 0; i < h.uses.size(); ++i) out += (i ? "；" : "") + lua_meta::describe(h.uses[i]);
+    return out;
+}
+
+String legacy_text() {
+    cJSON* list = cJSON_Parse(storage::list_dir(kLegacyDir).c_str());
+    String names;
+    int n = 0;
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, list) {
+        if (json_bool(item, "dir", false)) continue;
+        cJSON* p = read_json(String(kLegacyDir) + "/" + json_str(item, "name"), 16384);
+        const String name = json_str(p, "name");
+        cJSON_Delete(p);
+        if (name.isEmpty()) continue;
+        names += String(n++ ? "、" : "") + name;
+    }
+    cJSON_Delete(list);
+    if (!n) return "没有旧格式的程序";
+    return "旧格式（JSON）程序 " + String(n) + " 个，已不能运行：" + names +
+           "。翻译成 Lua：read prog://legacy/名字 看原文，再 write prog://名字";
+}
+
+String legacy_show(const String& name) {
+    cJSON* list = cJSON_Parse(storage::list_dir(kLegacyDir).c_str());
+    String out;
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, list) {
+        cJSON* p = read_json(String(kLegacyDir) + "/" + json_str(item, "name"), 16384);
+        if (json_str(p, "name") == name) out = json_print(p);
+        cJSON_Delete(p);
+        if (!out.isEmpty()) break;
+    }
+    cJSON_Delete(list);
+    return out.isEmpty() ? "ERROR: 没有旧程序「" + name + "」" : "旧程序「" + name + "」原文（JSON，请按 read prog://help 翻译成 Lua）：\n" + out;
 }
 
 // ---------------------------------------------------------------- trigger://
@@ -937,11 +765,11 @@ String trigger_line(int id) {
     std::lock_guard<std::mutex> guard(lock);
     for (const auto& t : triggers) {
         if (t.id != id) continue;
-        cJSON* step = cJSON_Parse(t.run.c_str());
-        const String line = "#" + String(t.id) + " " + describe_when(t.when) + " → " + describe_step(step) +
-                            (t.paused ? "（已停用）" : t.armed ? "" : "（等待对时）");
-        cJSON_Delete(step);
-        return line;
+        String name, query;
+        split_run(t.run, name, query);
+        return "#" + String(t.id) + " " + describe_when(t.when) + " → 运行 " + name +
+               (query.isEmpty() ? String() : "（" + url_decode(query) + "）") +
+               (t.paused ? "（已停用）" : t.armed ? "" : "（等待对时）");
     }
     return "";
 }
@@ -952,49 +780,28 @@ String triggers_text() {
         std::lock_guard<std::mutex> guard(lock);
         for (const auto& t : triggers) ids.push_back(t.id);
     }
-    if (ids.empty()) return "还没有触发。新建：write trigger://new，content 如 {\"when\":\"time://every/07:00\",\"run\":{\"exec\":\"prog://早安\"}}";
+    if (ids.empty()) return "还没有触发。新建：write trigger://new，content 如 {\"when\":\"time://every/07:00\",\"run\":\"prog://早安\"}";
     String out = "共 " + String(ids.size()) + " 个触发：\n";
     for (const int id : ids) out += trigger_line(id) + "\n";
     out.trim();
     return out;
 }
 
-// Validates a trigger's {when, run}; `step` gets the run step as JSON.
-String check_trigger(const String& content, String& when, String& step, std::vector<uint32_t>& prints,
-                     std::vector<String>& lines) {
+String add_trigger(const String& content) {
     cJSON* t = cJSON_Parse(content.c_str());
-    if (!cJSON_IsObject(t)) {
-        cJSON_Delete(t);
-        return "content 要写成 {\"when\": \"time://every/07:00\", \"run\": {一个步骤}}";
-    }
-    when = json_str(t, "when");
-    const cJSON* run = cJSON_GetObjectItemCaseSensitive(t, "run");
+    String when = json_str(t, "when");
+    String run = json_str(t, "run");
+    if (run.isEmpty()) run = json_str(json_obj(t, "run"), "exec");  // the old {"exec": "prog://…"} form
+    cJSON_Delete(t);
     String err;
     if (when.isEmpty()) err = "缺少 when（如 time://every/07:00、time://in/10m、device://boot）";
-    else if (!cJSON_IsObject(run)) err = "缺少 run（一个步骤，如 {\"exec\": \"prog://早安\"}）";
+    else if (!run.startsWith("prog://")) err = "run 要写成 prog://程序名?参数（触发只能运行程序）";
+    String name, query;
     if (err.isEmpty()) {
-        step = json_print(run);
-        cJSON* program = cJSON_Parse(trigger_program(step).c_str());
-        prog::Info info;
-        err = prog::validate(program, info);
-        if (err.isEmpty() && (info.uses_wait || info.statements != 1)) err = "run 只能是一个动作；多步请先写成程序，再用 exec prog://名字";
-        if (err.isEmpty()) {
-            DeviceHost host(false);
-            err = prog::check_calls(kTriggerProgram, info.callees, host);
-        }
-        if (err.isEmpty()) err = sensitive_steps(cJSON_GetObjectItemCaseSensitive(program, "steps"), prints, lines);
-        cJSON_Delete(program);
+        split_run(run, name, query);
+        Entry e;
+        if (!load_entry(name, e)) err = "没有程序「" + name + "」，先写好它再建触发";
     }
-    cJSON_Delete(t);
-    return err;
-}
-
-String add_trigger(const String& content, bool approved) {
-    String when, step;
-    std::vector<uint32_t> prints;
-    std::vector<String> lines;
-    String err = check_trigger(content, when, step, prints, lines);
-    if (err.isEmpty() && !prints.empty() && !approved) err = "含需要确认的步骤，必须由用户确认后建立";
     {
         std::lock_guard<std::mutex> guard(lock);
         if (err.isEmpty() && triggers.size() >= kMaxTriggers) err = "触发已达上限 " + String(kMaxTriggers) + " 个";
@@ -1002,23 +809,19 @@ String add_trigger(const String& content, bool approved) {
     String normalized;
     if (err.isEmpty()) err = registry::watch(when, normalized);
     if (!err.isEmpty()) return "ERROR: " + err;
-    Trigger t;
-    t.when = normalized;
-    t.run = step;
-    cJSON* approvals = cJSON_CreateArray();
-    for (const uint32_t p : prints) cJSON_AddItemToArray(approvals, cJSON_CreateNumber(p));
-    t.approved = json_print(approvals);
-    cJSON_Delete(approvals);
-    t.armed = true;
+    Trigger trig;
+    trig.when = normalized;
+    trig.run = run;
+    trig.armed = true;
     {
         std::lock_guard<std::mutex> guard(lock);
         int id = 1;
         for (const auto& x : triggers) id = std::max(id, x.id + 1);
-        t.id = id;
-        triggers.push_back(t);
+        trig.id = id;
+        triggers.push_back(trig);
         save_triggers();
     }
-    return "已新建触发 " + trigger_line(t.id);
+    return "已新建触发 " + trigger_line(trig.id);
 }
 
 String trigger_action(int id, const String& action, bool approved) {
@@ -1054,47 +857,171 @@ String trigger_action(int id, const String& action, bool approved) {
     return trigger_line(id);
 }
 
-// ---------------------------------------------------------------- Policy and confirmation helpers
+// ---------------------------------------------------------------- pkg://
 
-bool needs_confirm(const String& program_json) {
-    cJSON* p = cJSON_Parse(program_json.c_str());
-    std::vector<uint32_t> prints;
-    std::vector<String> lines;
-    if (p) sensitive_steps(cJSON_GetObjectItemCaseSensitive(p, "steps"), prints, lines);
-    cJSON_Delete(p);
-    return !prints.empty();
+String scan() {
+    cJSON* list = cJSON_Parse(storage::list_dir(kDir).c_str());
+    std::vector<String> names;
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, list) {
+        const String file = json_str(item, "name");
+        if (json_bool(item, "dir", false) || !file.endsWith(".lua")) continue;
+        const String name = file.substring(0, file.length() - 4);
+        if (lua_meta::check_name(name).isEmpty() && names.size() < kMaxFiles) names.push_back(name);
+    }
+    cJSON_Delete(list);
+    std::sort(names.begin(), names.end(), [](const String& a, const String& b) { return std::strcmp(a.c_str(), b.c_str()) < 0; });
+    write_index(names);
+    // A confirmation outlives its file otherwise: a new file of the same name
+    // (and the same uses) would come back enabled without the user seeing it.
+    cJSON* approved = object_at(kApproved);
+    std::vector<String> stale;
+    cJSON_ArrayForEach(item, approved) {
+        if (std::find(names.begin(), names.end(), String(item->string)) == names.end()) stale.push_back(item->string);
+    }
+    for (const auto& name : stale) cJSON_DeleteItemFromObjectCaseSensitive(approved, name.c_str());
+    if (!stale.empty()) write_json(kApproved, approved);
+    cJSON_Delete(approved);
+    return "扫描完成：" + String(static_cast<int>(names.size())) + " 个 .lua 文件\n" + pkg_list();
 }
 
-bool trigger_needs_confirm(const String& trigger_json) {
-    String when, step;
-    std::vector<uint32_t> prints;
-    std::vector<String> lines;
-    check_trigger(trigger_json, when, step, prints, lines);
-    return !prints.empty();
-}
-
-String save_summary(const String& name, const String& program_json) {
-    cJSON* p = cJSON_Parse(program_json.c_str());
-    prog::Info info;
-    if (p) prog::validate(p, info);
-    std::vector<uint32_t> prints;
-    std::vector<String> lines;
-    if (p) sensitive_steps(cJSON_GetObjectItemCaseSensitive(p, "steps"), prints, lines);
-    cJSON_Delete(p);
-    String out = "保存程序「" + (info.name.isEmpty() ? name : info.name) + "」（" + String(info.statements) + " 步），需确认：";
-    for (std::size_t i = 0; i < lines.size(); ++i) out += (i ? "；" : "") + lines[i];
+String pkg_list() {
+    const auto all = entries();
+    if (all.empty()) return "卡上还没有程序或扩展包（" + String(kDir) + "）";
+    String out;
+    for (const auto& e : all) {
+        out += "- " + e.name + (e.header.package.isEmpty() ? String(" [程序]") : " [扩展包 " + e.header.target + "]");
+        if (!e.header.version.isEmpty()) out += " v" + e.header.version;
+        out += String(" ") + state_word(e.state);
+        if (!e.header.about.isEmpty()) out += "：" + e.header.about;
+        if (!e.problem.isEmpty()) out += "（" + e.problem + "）";
+        if (!e.header.uses.empty()) {
+            out += "；权限：";
+            for (std::size_t i = 0; i < e.header.uses.size(); ++i) out += (i ? "，" : "") + lua_meta::describe(e.header.uses[i]);
+        }
+        out += "\n";
+    }
+    out.trim();
     return out;
 }
 
-String trigger_summary(const String& trigger_json) {
-    String when, step;
-    std::vector<uint32_t> prints;
-    std::vector<String> lines;
-    check_trigger(trigger_json, when, step, prints, lines);
-    cJSON* s = cJSON_Parse(step.c_str());
-    const String out = "新建触发：" + describe_when(when) + " → " + (s ? describe_step(s) : String("?"));
-    cJSON_Delete(s);
+bool pkg_needs_confirm(const String& name, const String& action) {
+    if (action == "delete") return true;
+    if (action != "enable") return false;
+    Entry e;
+    return load_entry(name, e) && must_confirm(e.header);
+}
+
+String pkg_summary(const String& name, const String& action) {
+    Entry e;
+    if (!load_entry(name, e)) return {};
+    if (action == "delete") return "删除「" + name + "」（" + path_of(name) + "）";
+    String out = "启用「" + name + "」" + (e.header.about.isEmpty() ? String() : "（" + e.header.about + "）");
+    if (!e.header.package.isEmpty()) {
+        out += "，扩展包，负责 " + e.header.target + "；告诉肥鱼：" + utf8_head(e.header.usage, 200);
+        if (e.header.uses.empty()) return out;
+    }
+    out += "，允许它：";
+    for (std::size_t i = 0; i < e.header.uses.size(); ++i) out += (i ? "；" : "") + lua_meta::describe(e.header.uses[i]);
     return out;
+}
+
+std::vector<PackageInfo> card_packages() {
+    std::vector<PackageInfo> out;
+    for (const auto& e : entries()) {
+        if (e.header.package.isEmpty() || e.state != State::Enabled) continue;
+        out.push_back({e.name, e.header.target, e.header.usage, e.header.keywords, e.header.about});
+    }
+    return out;
+}
+
+uint32_t generation() { return changes.load(); }
+
+bool installed(const String& name, lua_meta::Header& header) {
+    Entry e;
+    if (!load_entry(name, e)) return false;
+    header = e.header;
+    return true;
+}
+
+bool has_previous(const String& name) { return storage::exists(old_path_of(name)); }
+
+String adopt(const String& name, const String& file, const lua_meta::Header& header, bool enable) {
+    const String path = path_of(name);
+    const String old = old_path_of(name);
+    const bool had = storage::exists(path);
+    if (had && !(storage::ensure_parent(old) && storage::rename(path, old))) return "旧版本没能保留，未安装";
+    if (!storage::rename(file, path)) {
+        if (had) storage::rename(old, path);
+        return "写入卡上失败";
+    }
+    if (enable) confirm(name, header);
+    else forget(kApproved, name);  // a file from an address: the user enables it after reading it
+    index_add(name);
+    return {};
+}
+
+String rollback(const String& name) {
+    const String path = path_of(name);
+    const String old = old_path_of(name);
+    if (!storage::exists(old)) return "ERROR: 「" + name + "」没有保留的上一版";
+    const String swap = String(kDir) + "/old/" + name + ".swap";
+    if (!storage::rename(path, swap) || !storage::rename(old, path) || !storage::rename(swap, old)) {
+        return "ERROR: 退回失败（卡上文件可能要 write pkg://scan 后检查）";
+    }
+    index_add(name);
+    Entry e;
+    load_entry(name, e);
+    return "已退回「" + name + "」" + (e.header.version.isEmpty() ? String() : " v" + e.header.version) + "，状态：" +
+           state_word(e.state) + (e.state == State::Pending ? "（权限和当前确认的不同，write pkg://" + name + "/enable）" : String());
+}
+
+String run_package(const String& name, const String& tool, const cJSON* arguments) {
+    Entry e;
+    if (!load_entry(name, e) || e.header.package.isEmpty()) {
+        return "ERROR: 卡上没有扩展包「" + name + "」（write pkg://scan 重新扫描）";
+    }
+    if (e.state != State::Enabled) {
+        return "ERROR: 扩展包「" + name + "」" + state_word(e.state) + "（write pkg://" + name + "/enable）";
+    }
+    luavm::Options options;
+    options.uses = &e.header.uses;
+    options.input = arguments;
+    options.entry = tool.c_str();
+    String output, result, error;
+    luavm::Stats stats;
+    const bool ok = luavm::run(storage::read_text(path_of(name), lua_meta::kMaxSource), name, options, output, result,
+                               error, stats);
+    runtime_event("pkg_run", name + " " + tool + (ok ? " done" : " failed") + " peak=" +
+                                 String(static_cast<unsigned>(stats.peak)) + " ms=" + String(stats.ms));
+    if (!ok) return "ERROR: " + error + (output.isEmpty() ? String() : "\n输出：" + output);
+    if (result.isEmpty()) return output.isEmpty() ? String("完成") : output;
+    return output.isEmpty() ? result : result + "\n输出：" + output;
+}
+
+String pkg_action(const String& name, const String& action, bool approved) {
+    Entry e;
+    if (!load_entry(name, e)) return "ERROR: 卡上没有「" + name + "」（write pkg://scan 重新扫描）";
+    if (action == "delete") {
+        if (!approved) return "ERROR: 删除需要用户确认";
+        return remove(name);
+    }
+    if (action == "disable") {
+        set_off(name, true);
+        return "已停用「" + name + "」";
+    }
+    if (action == "enable") {
+        if (e.state == State::Broken) return "ERROR: 声明有误，先修正：" + e.problem;
+        if (must_confirm(e.header)) {
+            if (!approved) return "ERROR: 启用需要用户确认它的权限";
+            confirm(name, e.header);
+        } else {
+            forget(kApproved, name);
+        }
+        index_add(name);
+        return "已启用「" + name + "」";
+    }
+    return "ERROR: pkg://名字/ 后面只能是 enable、disable 或 delete";
 }
 
 }  // namespace vat::programs

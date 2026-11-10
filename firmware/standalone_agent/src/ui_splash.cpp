@@ -1,4 +1,5 @@
 #include "ui_splash.h"
+#include "cjk_font.h"
 
 #include <M5Cardputer.h>
 #include <esp_random.h>
@@ -126,13 +127,13 @@ const uint8_t* frame_data(const uint8_t* frames, int state, int index) {
 }
 
 void draw_title(lgfx::LGFXBase& g) {
-    g.setFont(&fonts::efontCN_14);
+    g.setFont(&cjk::cn14);
     g.setTextSize(2);
     g.setTextColor(kText, kBg);
     g.drawString("Feiyu", kTextX, 22);
     g.drawString("OS", kTextX, 22 + 30);
     g.setTextSize(1);
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     g.setTextColor(kMuted, kBg);
     g.drawString(String("肥鱼 OS ") + kVersion, kTextX, 22 + 64);
 }
@@ -295,7 +296,7 @@ void task_main(void*) {
         g.clearClipRect();
         if (text != shown_text || text_color != shown_color) {
             g.fillRect(0, kLineY - 1, kWidth, kLine + 2, kBg);
-            g.setFont(&fonts::efontCN_12);
+            g.setFont(&cjk::cn12);
             g.setTextColor(text_color, kBg);
             g.drawString(text, kPad, kLineY);
             shown_text = text;
@@ -401,6 +402,7 @@ void finish() {
     }
     delay(20);  // the task's last instructions run on its stack: let it go before TLS gets the block
     task = nullptr;
+    net::end_lending();
     enter_frames = wait_frames = nullptr;
     if (water_room) strip.deleteSprite();  // the buffer is the reserve's: not freed
     water_room = nullptr;

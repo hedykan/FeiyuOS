@@ -56,6 +56,13 @@ String utf8_sanitize(const String& text) {
     return clean;
 }
 
+void release(String& text) { String gone(std::move(text)); }  // the moved-to String owns the buffer and frees it
+
+void wipe(String& text) {
+    if (text.length()) memset(const_cast<char*>(text.c_str()), 0, text.length());
+    release(text);
+}
+
 String json_str(const cJSON* object, const char* key, const String& fallback) {
     const cJSON* value = object ? cJSON_GetObjectItemCaseSensitive(object, key) : nullptr;
     if (cJSON_IsString(value) && value->valuestring) return String(value->valuestring);

@@ -375,11 +375,6 @@ bool take_overlay(Overlay& overlay) {
     return true;
 }
 
-String overlay_kind() {
-    Lock lock;
-    return overlay_shown;
-}
-
 void set_overlay_kind(const String& kind) {
     Lock lock;
     overlay_shown = kind;

@@ -9,7 +9,9 @@
 
 namespace vat::ui {
 
-enum class Page : uint8_t { Agent, Terminal };
+// Btn0 goes round Agent, SSH, the program page (a program's text I/O) and
+// the graphics page (any picture: display, panels, canvases; only while one is open).
+enum class Page : uint8_t { Agent, Terminal, Program, Graphics };
 
 enum class Status : uint8_t { Running, Done, Failed, Confirm, Secret, Cancelled, Text };
 
@@ -89,13 +91,14 @@ bool take_brightness(int& value);
 bool take_screen_power(bool& on);
 bool take_beep(int& count);
 
-// Full-screen overlay from the display package: covers the current page until
-// any key.  Kind None closes an open one.
+// A picture for the graphics page (display package, ui panels and canvases).
+// Kind None closes an open one.
 struct Overlay {
     enum class Kind : uint8_t { None, Text, Qr, Image, Panel, Canvas };
     Kind kind = Kind::None;
     String text;                 // Text: what to show; Qr: the encoded data
     std::vector<uint8_t> image;  // Image: PNG / JPG / BMP bytes
+    String image_path;           // Image: read again when the page is drawn again
     // Panel (ui package): an interactive page; choosing emits ui://panel/<panel>.
     String panel;
     String title;
@@ -108,10 +111,11 @@ struct Overlay {
     uint32_t frame_ms = 0;  // animation: 0 = still
     uint32_t frames = 0;    // 0 = until closed
     int step = 1;           // {t} = frame × step
+    String vars_json;       // canvas variables and the Lua update run before each frame
+    String update;
 };
 void post_overlay(Overlay&& overlay);
 bool take_overlay(Overlay& overlay);
-String overlay_kind();  // "" | "text" | "qr" | "image" | "panel:<name>" (what is on screen now)
 String open_panel();    // name of the panel or canvas on screen, "" when none
 // The last choice made on each panel (kept until restart).
 void set_panel_choice(const String& panel, const String& choice);

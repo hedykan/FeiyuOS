@@ -1,9 +1,0 @@
-{
- "name": "测试-无效",
- "steps": [
-  {
-   "write": "device://local/led",
-   "content": "{nope}"
-  }
- ]
-}

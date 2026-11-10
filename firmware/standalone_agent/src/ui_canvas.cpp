@@ -1,5 +1,6 @@
 #include "ui_canvas.h"
 
+
 #include <cJSON.h>
 
 #include <cmath>
@@ -10,6 +11,8 @@
 
 namespace vat::ui_canvas {
 namespace {
+
+Compiler compiler = nullptr;
 
 struct Shape {
     const char* name;
@@ -207,12 +210,10 @@ String quote_placeholders(const String& json) {
         if (c == '"') in_string = true;
         if (c == '{') {
             unsigned j = i + 1;
-            if (j < json.length() && json[j] == 't') {
-                ++j;
-            } else {
-                while (j < json.length() && isdigit(static_cast<unsigned char>(json[j]))) ++j;
-                if (j > i + 1 && j < json.length() && json[j] == '#') ++j;
-            }
+            // {1}, {1#}, {t} or a variable {x}, {ball.x}, {速度}
+            while (j < json.length() && (isalnum(static_cast<unsigned char>(json[j])) || json[j] == '_' ||
+                                         json[j] == '.' || static_cast<unsigned char>(json[j]) >= 0x80)) ++j;
+            if (j > i + 1 && j < json.length() && json[j] == '#') ++j;
             if (j > i + 1 && j < json.length() && json[j] == '}') {
                 out += '"';
                 out += json.substring(i, j + 1);
@@ -253,8 +254,11 @@ bool parse(const String& json, Spec& out, String& error) {
     }
     const cJSON* field = nullptr;
     cJSON_ArrayForEach(field, root) {
-        if (std::strcmp(field->string, "ops") && std::strcmp(field->string, "source") && std::strcmp(field->string, "animate")) {
-            error = String("不认识的字段 ") + field->string + "（只能有 ops、source、animate）";
+        static const char* const kFields[] = {"ops", "source", "animate", "vars", "update"};
+        bool known = false;
+        for (const char* name : kFields) known = known || !std::strcmp(field->string, name);
+        if (!known) {
+            error = String("不认识的字段 ") + field->string + "（只能有 ops、source、animate、vars、update）";
             cJSON_Delete(root);
             return false;
         }
@@ -280,7 +284,7 @@ bool parse(const String& json, Spec& out, String& error) {
         const long frames = json_int(animate, "frames", 0);
         const long step = json_int(animate, "step", 1);
         if (!cJSON_IsObject(animate) || ms < static_cast<long>(kMinFrameMs) || ms > 10000) {
-            error = "animate.every 要在 80ms 到 10s 之间，如 100ms";
+            error = "animate.every 要在 33ms 到 10s 之间，如 100ms";
             ok = false;
         } else if (frames < 0 || frames > static_cast<long>(kMaxFrames) || step < -360 || step > 360) {
             error = "animate.frames 最多 600（0 表示一直到关闭），step 在 -360 到 360";
@@ -289,6 +293,34 @@ bool parse(const String& json, Spec& out, String& error) {
             out.frame_ms = static_cast<uint32_t>(ms);
             out.frames = static_cast<uint32_t>(frames);
             out.step = static_cast<int>(step);
+        }
+    }
+    const cJSON* vars = cJSON_GetObjectItemCaseSensitive(root, "vars");
+    const cJSON* update = cJSON_GetObjectItemCaseSensitive(root, "update");
+    if (ok && vars) {
+        const cJSON* v = nullptr;
+        if (!cJSON_IsObject(vars)) ok = false;
+        cJSON_ArrayForEach(v, vars) {
+            if (!ok) break;
+            if (!cJSON_IsNumber(v) && !(cJSON_IsString(v) && std::strlen(v->valuestring) <= kMaxText)) ok = false;
+        }
+        if (!ok) error = "vars 要是对象，值为数字或不超过 120 字节的文字，如 {\"x\": 10, \"label\": \"分数\"}";
+        else out.vars_json = json_print(vars);
+    }
+    if (ok && update) {
+        if (!cJSON_IsString(update) || std::strlen(update->valuestring) > kMaxUpdate) {
+            error = "update 要是一段 Lua 代码（不超过 2 KB），如 x = x + vx";
+            ok = false;
+        } else {
+            out.update = update->valuestring;
+            if (compiler) {
+                const String problem = compiler(out.update);
+                if (!problem.isEmpty()) {
+                    error = "update 语法错误：" + problem;
+                    ok = false;
+                }
+            }
+            if (ok && !out.frame_ms) out.frame_ms = kMinFrameMs;  // an update animates: every 33 ms until closed
         }
     }
     if (ok && cJSON_GetObjectItemCaseSensitive(root, "source")) {
@@ -339,6 +371,31 @@ void fill_frame(std::vector<Op>& ops, long t) {
             int at;
             while ((at = a.indexOf("{t}")) >= 0) a = a.substring(0, at) + value + a.substring(at + 3);
         }
+    }
+}
+
+void set_compiler(Compiler c) { compiler = c; }
+
+void fill_vars(std::vector<Op>& ops, const Lookup& lookup) {
+    const auto replace = [&lookup](String& text) {
+        int open = text.indexOf('{');
+        while (open >= 0) {
+            const int close = text.indexOf('}', open + 1);
+            if (close < 0) return;
+            const String name = text.substring(open + 1, close);
+            String value;
+            if (!lookup(name, value)) {  // not a variable ({1} of the source): leave it
+                open = text.indexOf('{', open + 1);
+                continue;
+            }
+            text = text.substring(0, open) + value + text.substring(close + 1);
+            open = text.indexOf('{', open + value.length());
+        }
+    };
+    for (auto& op : ops) {
+        for (auto& a : op.args) replace(a);
+        replace(op.color);
+        replace(op.color2);
     }
 }
 

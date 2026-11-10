@@ -1,9 +1,12 @@
 #include "web_token.h"
+#include "cjk_font.h"
 #include "settings_page.h"
 
 #include <WiFi.h>
 
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 #include "common.h"
@@ -17,13 +20,14 @@
 #include "settings_store.h"
 #include "storage.h"
 #include "ui_kit.h"
+#include "ui_status.h"
 #include "ui_state.h"
 
 namespace vat::ui::settings {
 namespace {
 
-enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context, Ble };
-const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal", "webtoken", "context"};
+enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context, Ble, StatusBar, Animation };
+const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal", "webtoken", "context", "ble", "statusbar", "animation"};
 
 struct Field {
     String label;
@@ -46,7 +50,7 @@ struct MenuItem {
     View view;
 };
 const MenuItem kMenu[] = {{"WiFi", View::WifiList}, {"Key", View::Keys},   {"SSH 主机", View::Hosts},
-                          {"LoRa", View::Lora},     {"蓝牙", View::Ble},      {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
+                          {"LoRa", View::Lora},     {"蓝牙", View::Ble},      {"顶栏", View::StatusBar}, {"动画", View::Animation}, {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
                           {"手机设置（扫码）", View::Portal}, {"网页令牌", View::WebToken}};
 constexpr int kMenuCount = sizeof(kMenu) / sizeof(kMenu[0]);
 
@@ -58,6 +62,9 @@ const Provider kProviders[] = {{"qwen", "千问（语音识别）"}, {"deepseek"
 constexpr int kProviderCount = 4;
 const uint8_t kFontSizes[] = {10, 12, 14};
 const uint8_t kContextKb[] = {32, 64, 96};
+// The animation rows, top to bottom: ui.animation 2, 1, 0.
+const char* const kAnimationWords[] = {"开", "减弱", "关"};
+String animation_word(uint8_t level) { return kAnimationWords[2 - std::min<uint8_t>(level, 2)]; }
 
 bool is_open = false;
 String reason;
@@ -126,19 +133,35 @@ void clear_form() {
 
 // ---------------------------------------------------------------- drawing
 
-void row(Gfx& g, int y, bool selected, const String& left, const String& right, uint16_t color = kText) {
-    const uint16_t bg = selected ? kSurface : kBg;
-    g.fillRect(0, y - 1, kWidth, kLine, bg);
-    if (selected) g.fillRect(0, y - 1, 2, kLine, kAccent);
-    g.setTextColor(color, bg);
-    g.drawString(fit(g, left, kWidth - kPad * 2 - g.textWidth(right) - 8), kPad, y);
-    g.setTextColor(kMuted, bg);
-    g.drawRightString(right, kWidth - kPad, y);
+// Rows, the title bar and the footer go through the off-screen strip
+// (ui_kit band): redrawing a list page no longer clears the screen first, so
+// moving the cursor or the 5 s refresh does not flash the page.
+// `highlight`: screen y of the cursor bar's top (kLine tall), which may lie
+// between rows while it slides; the part of it inside this row is painted
+// under the text.
+void row(Gfx& screen, int y, int highlight, const String& left, const String& right, uint16_t color = kText) {
+    band(screen, y - 1, kLine, kBg, [&](Gfx& g, int top) {
+        const int offset = highlight - (y - 1);
+        if (offset > -kLine && offset < kLine) {
+            g.fillRect(0, top + offset, kWidth, kLine, kSurface);
+            g.fillRect(0, top + offset, 2, kLine, kAccent);
+        }
+        g.setTextColor(color);  // transparent: the bar shows behind the text
+        g.drawString(fit(g, left, kWidth - kPad * 2 - g.textWidth(right) - 8), kPad, top + 1);
+        g.setTextColor(kMuted);
+        g.drawRightString(right, kWidth - kPad, top + 1);
+    });
 }
 
-void footer(Gfx& g, const String& text) {
-    g.setTextColor(kMuted, kBg);
-    g.drawCentreString(fit(g, text, kWidth - 4), kWidth / 2, kHeight - kLine);
+void footer(Gfx& screen, const String& text) {
+    band(screen, kHeight - kLine, kLine, kBg, [&](Gfx& g, int top) {
+        g.setTextColor(kMuted, kBg);
+        g.drawCentreString(fit(g, text, kWidth - 4), kWidth / 2, top);
+    });
+}
+
+void blank_row(Gfx& screen, int y) {
+    band(screen, y - 1, kLine, kBg, [](Gfx&, int) {});
 }
 
 constexpr int kTop = kBarHeight + 3;
@@ -150,13 +173,27 @@ struct Line {
     uint16_t color = kText;
 };
 
+int listed_rows = 0;  // rows the last list() drew: fewer now are blanked
+
+CursorSlide bar;     // the cursor bar of every list here, in the list's own coordinates
+CursorSlide scroll;  // the list's first row × kLine: a scroll slides too
+
 void list(Gfx& g, const std::vector<Line>& lines) {
     const int count = lines.size();
     const int first = std::max(0, std::min(cursor - kRows / 2, count - kRows));
-    for (int r = 0; r < kRows && first + r < count; ++r) {
-        const auto& l = lines[first + r];
-        row(g, kTop + r * kLine, cursor == first + r, l.left, l.right, l.color);
-    }
+    const int context = static_cast<int>(view);  // another list: jump, do not slide
+    const int bar_at = bar.follow(cursor * kLine, context);
+    const int scroll_px = scroll.follow(first * kLine, context);
+    const int slots = std::min(kRows, count);
+    scrolled_rows(g, kTop, slots, scroll_px, count, bar_at, [&](Gfx& b, int i, int y) {
+        const auto& l = lines[i];
+        b.setTextColor(l.color);
+        b.drawString(fit(b, l.left, kWidth - kPad * 2 - b.textWidth(l.right) - 8), kPad, y);
+        b.setTextColor(kMuted);
+        b.drawRightString(l.right, kWidth - kPad, y);
+    });
+    for (int gone = slots; gone < listed_rows; ++gone) blank_row(g, kTop + gone * kLine);
+    listed_rows = slots;
 }
 
 void text_block(Gfx& g, const String& text, uint16_t color, int y = kTop + 4) {
@@ -181,6 +218,73 @@ String section_title() {
     }
 }
 
+// The value shown on each menu row (also read settings://).
+std::vector<String> menu_values() {
+    const auto& cfg = config::get();
+    std::vector<String> values = {
+        net::ssid().isEmpty() ? String("未联网") : net::ssid(),
+        cfg.deepseek_key.isEmpty() || cfg.qwen_key.isEmpty() ? String("缺 Key") : String("已设置"),
+        String(cfg.profiles.size()) + " 台",
+        !lora::cap_present() ? String("无 Cap") : !cfg.lora.enabled ? String("关") : cfg.lora.frequency_mhz <= 0 ? String("缺频点") : String("开"),
+        cfg.ble.enabled == ble::running() ? String(ble::running() ? "开" : "关") : String(cfg.ble.enabled ? "开（待重启）" : "关（待重启）"),
+        status::summary(),
+        animation_word(cfg.animation),
+        String(cfg.terminal_font) + " 号",
+        String(cfg.context_kb) + " KB",
+        storage::kind() == "tf" ? String("TF 卡") : storage::degraded() ? String("板载（降级）") : String("板载"),
+        portal::active() ? String("热点开") : String(""),
+        String("")};
+    return values;
+}
+
+// The top bar's items: the shown ones first, in their order, then the rest.
+std::vector<String> status_order() {
+    std::vector<String> order = status::chosen();
+    for (const auto& item : status::all()) {
+        if (std::find(order.begin(), order.end(), item.id) == order.end()) order.push_back(item.id);
+    }
+    return order;
+}
+
+std::vector<Line> status_lines() {
+    const auto shown = status::chosen();
+    std::vector<Line> lines;
+    for (const auto& id : status_order()) {
+        const auto at = std::find(shown.begin(), shown.end(), id);
+        String label;
+        for (const auto& item : status::all()) {
+            if (id == item.id) label = item.label;
+        }
+        const bool on = at != shown.end();
+        lines.push_back({label, on ? "显示 " + String(at - shown.begin() + 1) : String("隐藏"), on ? kText : kMuted});
+    }
+    return lines;
+}
+
+void status_toggle() {
+    const auto order = status_order();
+    const String id = order[cursor];
+    auto shown = status::chosen();
+    const auto at = std::find(shown.begin(), shown.end(), id);
+    if (at != shown.end()) shown.erase(at);
+    else shown.push_back(id);
+    status::save(shown);
+    const auto now = status_order();
+    cursor = std::find(now.begin(), now.end(), id) - now.begin();
+    dirty = true;
+}
+
+void status_move(int step) {  // Fn+; / Fn+. on a shown item
+    auto shown = status::chosen();
+    if (cursor >= static_cast<int>(shown.size())) return;
+    const int to = cursor + step;
+    if (to < 0 || to >= static_cast<int>(shown.size())) return;
+    std::swap(shown[cursor], shown[to]);
+    status::save(shown);
+    cursor = to;
+    dirty = true;
+}
+
 std::vector<Line> ble_lines() {
     const bool want = config::get().ble.enabled;
     const String state = want == ble::running() ? String(want ? "已开启" : "已关闭") : String(want ? "开启（待重启）" : "关闭（待重启）");
@@ -199,33 +303,45 @@ std::vector<Line> lora_lines() {
             {"天线", l.antenna_confirmed ? String("已确认装好") : String("未确认")}};
 }
 
-void draw_page() {
-    auto& g = M5Cardputer.Display;
-    g.startWrite();
-    g.fillScreen(kBg);
-    g.setFont(&fonts::efontCN_12);
+// Pages that are only rows, a footer and text drawn over itself: redrawn
+// without clearing the screen.  The others clear it on every redraw.
+bool list_view(View v) {
+    switch (v) {
+        case View::Menu:
+        case View::WifiList:
+        case View::Keys:
+        case View::Hosts:
+        case View::Lora:
+        case View::Ble:
+        case View::Context:
+        case View::StatusBar:
+        case View::Animation:
+        case View::Font: return true;
+        default: return false;
+    }
+}
+
+int drawn_view = -1;  // the view on screen; -1 = something else is
+
+// The current page into `g` (the display).
+void paint_page(Gfx& g) {
+    g.setFont(&cjk::cn12);
     g.setTextSize(1);
-    g.fillRect(0, 0, kWidth, kBarHeight, kSurface);
-    g.setTextColor(kText, kSurface);
-    g.drawString(fit(g, section_title(), 150), kPad, 2);
-    g.setTextColor(boot_offline ? kWarn : kMuted, kSurface);
-    g.drawRightString(boot_offline ? fit(g, reason, 84) : fit(g, net::ssid(), 84), kWidth - kPad, 2);
+    if (static_cast<int>(view) != drawn_view || !list_view(view)) {
+        g.fillScreen(kBg);
+        listed_rows = 0;
+    }
+    drawn_view = static_cast<int>(view);
+    band(g, 0, kBarHeight, kSurface, [&](Gfx& b, int top) {
+        b.setTextColor(kText, kSurface);
+        b.drawString(fit(b, section_title(), 150), kPad, top + 2);
+        b.setTextColor(boot_offline ? kWarn : kMuted, kSurface);
+        b.drawRightString(boot_offline ? fit(b, reason, 84) : fit(b, net::ssid(), 84), kWidth - kPad, top + 2);
+    });
 
     switch (view) {
         case View::Menu: {
-            const auto& cfg = config::get();
-            const String values[] = {
-                net::ssid().isEmpty() ? String("未联网") : net::ssid(),
-                cfg.deepseek_key.isEmpty() || cfg.qwen_key.isEmpty() ? String("缺 Key") : String("已设置"),
-                String(cfg.profiles.size()) + " 台",
-                !lora::cap_present() ? String("无 Cap") : !cfg.lora.enabled ? String("关") : cfg.lora.frequency_mhz <= 0 ? String("缺频点") : String("开"),
-                cfg.ble.enabled == ble::running() ? String(ble::running() ? "开" : "关") : String(cfg.ble.enabled ? "开（待重启）" : "关（待重启）"),
-                String(cfg.terminal_font) + " 号",
-                String(cfg.context_kb) + " KB",
-                storage::kind() == "tf" ? String("TF 卡") : storage::degraded() ? String("板载（降级）") : String("板载"),
-                portal::active() ? String("热点开") : String(""),
-                String("")};
-            static_assert(sizeof(values) / sizeof(values[0]) == kMenuCount, "one value per menu row");
+            const auto values = menu_values();
             std::vector<Line> lines;
             for (int i = 0; i < kMenuCount; ++i) lines.push_back({kMenu[i].label, values[i]});
             list(g, lines);
@@ -328,7 +444,7 @@ void draw_page() {
             const String ip = net::ip();
             g.fillScreen(kBg);
             const int x = qr_panel(g, ip.isEmpty() ? token : "http://" + ip + "/?token=" + token);
-            g.setFont(&fonts::efontCN_10);
+            g.setFont(&cjk::cn10);
             g.setTextColor(kAccent, kBg);
             g.drawString("网页令牌", x, 2);
             g.setTextColor(kText, kBg);
@@ -354,7 +470,7 @@ void draw_page() {
             } else {  // full height like the QR overlay: no title bar over the code
                 g.fillScreen(kBg);
                 const int x = qr_panel(g, public_key);
-                g.setFont(&fonts::efontCN_10);
+                g.setFont(&cjk::cn10);
                 g.setTextColor(kAccent, kBg);
                 g.drawString("设备公钥", x, 2);
                 g.setTextColor(kText, kBg);
@@ -371,12 +487,29 @@ void draw_page() {
             list(g, lora_lines());
             footer(g, "; . 选择  Enter 修改  ` 返回");
             break;
+        case View::StatusBar:
+            list(g, status_lines());
+            footer(g, "; . 选择  Enter 显示/隐藏  Fn+;/. 调顺序");
+            break;
         case View::Ble:
             list(g, ble_lines());
             g.setTextColor(kMuted, kBg);
             g.drawString("开机时先占好约 50 KB 内存，重启才生效", kPad, kTop + 2 * kLine + 4);
             footer(g, "; . 选择  Enter 切换 / 重启  ` 返回");
             break;
+        case View::Animation: {
+            std::vector<Line> lines;
+            for (int i = 0; i < 3; ++i) {
+                lines.push_back({String(kAnimationWords[i]) + (i == 0 ? "（默认）" : ""),
+                                 config::get().animation == 2 - i ? "当前" : ""});
+            }
+            list(g, lines);
+            g.setTextColor(kMuted, kBg);
+            g.drawString("光标高亮条滑到新行；", kPad, kTop + 3 * kLine + 6);
+            g.drawString("减弱：时长减半  关：直接跳过去", kPad, kTop + 4 * kLine + 6);
+            footer(g, "; . 选择  Enter 使用  ` 返回");
+            break;
+        }
         case View::Context: {
             static const char* const kNames[] = {"短", "中（默认）", "长"};
             std::vector<Line> lines;
@@ -416,10 +549,10 @@ void draw_page() {
                 g.setTextColor(kMuted, kBg);
                 g.drawString("密码", x, 52);
                 g.setTextColor(kText, kBg);
-                g.setFont(&fonts::efontCN_14);
+                g.setFont(&cjk::cn14);
                 const String pw = portal::password();
                 g.drawString(pw.substring(0, 4) + " " + pw.substring(4), x, 66);
-                g.setFont(&fonts::efontCN_12);
+                g.setFont(&cjk::cn12);
             } else {
                 g.setTextColor(portal_clients > 0 ? kAccent : kMuted, kBg);
                 g.drawString(portal_clients > 0 ? "手机已连接" : "等待手机连接", x, 20);
@@ -453,7 +586,13 @@ void draw_page() {
             break;
         }
     }
-    g.endWrite();
+}
+
+void draw_page() {
+    auto& screen = M5Cardputer.Display;
+    screen.startWrite();
+    paint_page(screen);
+    screen.endWrite();
     dirty = false;
     last_draw = millis();
 }
@@ -567,8 +706,10 @@ int item_count() {
         case View::Hosts: return config::get().profiles.size() + 2;
         case View::Lora: return 4;
         case View::Ble: return 2;
+        case View::StatusBar: return status::all().size();
         case View::Font: return 3;
         case View::Context: return 3;
+        case View::Animation: return 3;
         default: return 1;
     }
 }
@@ -615,6 +756,7 @@ void enter() {
                 const uint8_t kb = config::get().context_kb;
                 return go(View::Context, kb == 32 ? 0 : kb == 96 ? 2 : 1);
             }
+            if (to == View::Animation) return go(View::Animation, 2 - std::min<uint8_t>(config::get().animation, 2));
             if (to == View::Font) {
                 const uint8_t f = config::get().terminal_font;
                 return go(View::Font, f == 10 ? 0 : f == 14 ? 2 : 1);
@@ -638,6 +780,7 @@ void enter() {
             }
             return show(settings_store::remove_profile(host_id), true, View::Hosts);
         case View::Lora: return lora_enter();
+        case View::StatusBar: return status_toggle();
         case View::Ble:
             if (cursor == 0) {
                 ble::set_enabled(!config::get().ble.enabled);
@@ -651,6 +794,10 @@ void enter() {
         case View::Context:
             config::get().context_kb = kContextKb[cursor];
             config::save_ui_number("context_kb", kContextKb[cursor]);
+            dirty = true;
+            return;
+        case View::Animation:
+            settings_store::set_animation(2 - cursor);
             dirty = true;
             return;
         default: return;
@@ -674,10 +821,89 @@ void form_keys(const Keyboard_Class::KeysState& state) {
     }
 }
 
+// Work handed over by other tasks (the settings package), run by poll().
+struct Job {
+    std::function<String()> work;
+    String result;
+    bool done = false;
+};
+std::mutex jobs_lock;
+std::vector<std::shared_ptr<Job>> jobs;
+
+void open_page(const String& page);
+
 }  // namespace
+
+String on_ui(std::function<String()> work, uint32_t wait_ms) {
+    auto job = std::make_shared<Job>();
+    job->work = std::move(work);
+    {
+        std::lock_guard<std::mutex> guard(jobs_lock);
+        jobs.push_back(job);
+    }
+    for (const uint32_t start = millis(); millis() - start < wait_ms; delay(10)) {
+        std::lock_guard<std::mutex> guard(jobs_lock);
+        if (job->done) return job->result;
+    }
+    return "ERROR: 界面忙，没有处理（稍后再试）";
+}
+
+void poll() {
+    std::vector<std::shared_ptr<Job>> todo;
+    {
+        std::lock_guard<std::mutex> guard(jobs_lock);
+        todo.swap(jobs);
+    }
+    for (auto& job : todo) {
+        const String result = job->work();
+        std::lock_guard<std::mutex> guard(jobs_lock);
+        job->result = result;
+        job->done = true;
+    }
+}
+
+String rows() {
+    String out;
+    const auto values = menu_values();
+    for (int i = 0; i < kMenuCount; ++i) {
+        if (!values[i].isEmpty()) out += String(kMenu[i].label) + "：" + values[i] + "\n";
+    }
+    return out;
+}
+
+String show_page(const String& page) {
+    if (page.startsWith("key/")) {
+        const String id = page.substring(4);
+        for (int i = 0; i < kProviderCount; ++i) {
+            if (id != kProviders[i].id) continue;
+            open("");
+            go(View::Keys, i);
+            enter();
+            dirty = true;
+            return String("已在设备上打开「") + kProviders[i].label + " 的 Key」输入框，请在键盘上输入";
+        }
+        return "ERROR: 没有这个 Key：" + id + "（qwen、deepseek、openrouter、amap）";
+    }
+    for (int i = 0; i < kMenuCount; ++i) {
+        if (page != kViewNames[static_cast<int>(kMenu[i].view)]) continue;
+        open("");
+        cursor = i;
+        if (view == View::Menu) enter();
+        dirty = true;
+        return String("已在设备上打开设置 · ") + kMenu[i].label;
+    }
+    if (page.isEmpty() || page == "menu") {
+        open("");
+        return "已在设备上打开设置";
+    }
+    return "ERROR: 没有这个设置页：" + page;
+}
 
 void open(const String& why) {
     is_open = true;
+    drawn_view = -1;  // the Agent page is on screen
+    bar.reset();  // the cursor bar starts where it is drawn, no slide in
+    scroll.reset();
     reason = why;
     boot_offline = net::state() != net::WifiState::Connected;
     if (boot_offline && net::state() != net::WifiState::SetupAp) net::start_setup_ap();
@@ -713,6 +939,9 @@ void handle(const Keyboard_Class::KeysState& state) {
         }
         return;
     }
+    if (view == View::StatusBar && state.fn && (has_char(state, ';') || has_char(state, '.'))) {
+        return status_move(has_char(state, ';') ? -1 : 1);
+    }
     const int count = item_count();
     if (has_char(state, ';')) cursor = (cursor + count - 1) % count;
     else if (has_char(state, '.')) cursor = (cursor + 1) % count;
@@ -731,7 +960,7 @@ void draw(bool force) {
             dirty = true;  // "手机已修改：…"
         }
     }
-    if (force || dirty || (view == View::Menu && millis() - last_draw > 5000)) draw_page();
+    if (force || dirty || bar.sliding() || scroll.sliding() || (view == View::Menu && millis() - last_draw > 5000)) draw_page();
 }
 
 void describe(cJSON* screen) {

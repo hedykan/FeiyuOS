@@ -19,6 +19,13 @@ String utf8_sanitize(const String& text);
 
 // cJSON convenience accessors (missing or wrong-typed values return fallback).
 String json_str(const cJSON* object, const char* key, const String& fallback = "");
+
+// Frees a String's buffer.  Assigning "" or String() does not: the ESP32 core
+// keeps a buffer that is large enough and only sets the length to 0.
+void release(String& text);
+// Zeroes the text, then frees it: for passwords and keys, whose bytes would
+// otherwise stay in the heap until something else overwrote them.
+void wipe(String& text);
 long json_int(const cJSON* object, const char* key, long fallback);
 bool json_bool(const cJSON* object, const char* key, bool fallback);
 cJSON* json_obj(const cJSON* object, const char* key);  // objects only: nullptr for an array

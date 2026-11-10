@@ -1,139 +1,144 @@
-# 程序与触发（设计）
+# 程序与触发（Lua）
 
-> 状态：设计已与用户确认（2026-11-05），v0.5.3 实现第一版。取代早先的《自动化》草稿。
-
-一句话说出“做什么”和“什么时候做”，大肥鱼把它写成**程序**（函数）和**触发**存在设备上；到时设备按程序执行，需要判断时再问大肥鱼。任何能力都能组合，组合不写死在代码里。
-
-```text
-你：每天早上 7 点叫我起床，告诉我天气，下雨就提醒带伞
-大肥鱼：write prog://早安（程序） + write trigger://new（每天 07:00 → 运行 早安）
-07:00  timer 发出 time://every/07:00 ──▶ 事件总线 ──▶ program 包：触发表里找到它 ──▶ 执行 早安
-```
+> 0.7 起，程序用 Lua 5.4 写，存成 TF 卡上的 `.lua` 文件；原来的 JSON 步骤语言（`prog_engine`）已删除。
+> 给模型的完整写法在 `read prog://help`、`read prog://help/examples`（`packages/program_package.cpp`）。
 
 ## 1. 分层
 
-| 层 | 内容 |
-|:--|:--|
-| 核心（新增，全部是通用机制） | **事件总线** `events::subscribe / emit`，只转发。扩展包接口的可选钩子：`triggers()` 声明能发出的事件、`watch() / unwatch()` 登记需要定时的事件、`confirm_summary()` 自定义确认文字、`loop()` 主循环里的周期工作。worker 的**回调任务**（包交一个函数给 worker 执行）与**单个工具调用**任务（只执行 Policy 允许的调用，供 E2E 与调试）。Agent 的无人值守模式（需确认、需密码的调用自动拒绝） |
-| `program` 包（新） | `prog://` 程序（增删改查、运行、清理）；`trigger://` 触发表；解释器、挂起与恢复、上限 |
-| `ask` 包（新） | `ask://`：问大肥鱼，结果是她的回复。当前已有对话进行中时拒绝（防止对话套对话），所以实际只会出现在程序里 |
-| 事件源 | `timer`：`time://`；`local`：`device://boot`（核心在启动就绪时发出）；`ui`：`ui://panel/面板名`（选定一项时）。下一步：`wifi://`、`lora://`、`button://` |
-| 其余所有包 | 作为程序里的动作被调用，**零改动** |
+| 层 | 文件 | 做什么 |
+|:--|:--|:--|
+| 开头声明 | `lua_meta.cpp`（主机测试） | 解析 `-- @about @input @uses @version @package @target @usage @keywords`；权限匹配；权限摘要 |
+| 虚拟机 | `lua_vm.cpp`、`lua_all.cpp`、`third_party/lua` | 每次运行新建、结束即关；私有堆；`vat.*` 绑定；内存、步数、时间上限 |
+| 程序与触发 | `prog_runtime.cpp` | 卡上文件、索引、确认记录、运行、触发器、排队 |
+| 扩展包 | `packages/program_package.cpp`、`packages/pkg_package.cpp` | `prog://`、`trigger://`、`pkg://` |
 
-**解耦原则**：核心只提供通用机制，不认识任何具体扩展包；扩展包只依赖核心，彼此不引用——发事件的包不知道 program 包是否存在，program 包也不直接调用 timer 或 ask，而是经 registry 调用。能互相调用的只有用户写的程序。
+## 2. 程序
 
-## 2. 程序（函数）
+一个程序就是 `/vat/things/lua/名字.lua`（`/vat/things/` 下的文件会备份到板载存储）。
 
-```json
-{
-  "name": "走去",
-  "about": "步行路线显示在屏幕上",
-  "input": {"to": null, "mode": "walk"},
-  "steps": [
-    {"read": "place://route?to={input.to}&mode={input.mode}", "as": "r"},
-    {"write": "device://local/display/text", "content": "{r}"}
-  ]
-}
+```lua
+-- @about 早上查天气，下雨就提醒带伞
+-- @input city 深圳                      -- 参数和默认值；不写默认值就是必填
+-- @uses write ssh://开发机/home/me/log/*  -- 需要用户确认一次的能力
+local w = vat.read("place://weather?city=" .. vat.urlencode(input.city))
+if w and w:find("雨") then vat.write("device://local/display/text", "带伞") end
+return w
 ```
 
-| 字段 | 必填 | 作用 |
-|:--|:--|:--|
-| `name` | 是 | 程序名，`prog://名字` |
-| `about` | 否 | 一句话说明，列表里显示 |
-| `input` | 否 | 参数签名：`null` 必填，写值为默认值。不写则从 `{input.x}` 自动识别（全部必填） |
-| `steps` | 是 | 步骤列表 |
+- `write prog://名字`（content 为源码）保存：先解析声明、编译检查语法，声明了 `@uses` 的必须由用户确认。
+- `exec prog://名字?参数=值` 运行：结果是 `return` 的值，`print` 进运行输出。
+- 名字最长 48 字节；不能含 `/ \ ? # * : " < > |`；`list help legacy` 保留。
 
-### 2.1 关键字
+### 2.1 vat
 
-| 类别 | 关键字 | 说明 |
-|:--|:--|:--|
-| 动作（7） | `read` `write` `exec` `observe` `input` `session` | 值是 target，其余字段与该动作平时的参数相同；`mode`、`confirm_required` 等由引擎补齐 |
-| | `stream` | 取一个流的最新值：`{"stream": "sensor://imu/acceleration", "as": "a"}`，之后用 `{a.x}`。必须写 `as`，目标不能用变量；只读，不需要确认；保存时检查目标是扩展包声明过的流（discover 里标「流」的项） |
-| 流程（3） | `if` `repeat` `wait` | 见 2.2 |
-| 属性（2） | `as` | 把这一步的结果存成变量 |
-| | `on_error` | `stop`（默认）或 `continue` |
-| 比较（5） | `is` `not` `has` `above` `below` | 用于 `if` |
+| 函数 | 说明 |
+|:--|:--|
+| `vat.read / write / exec / observe / input / session` | 与模型的七个工具相同，经 Policy 与注册中心交给扩展包；失败返回 `nil, 原因` |
+| `vat.stream(target)` | 流的最新值（表，如 `a.x`） |
+| `vat.after("25m", "prog://名字?参数")` | 过一段时间运行某个程序一次（建一个一次性触发） |
+| `vat.sleep(ms)` | 原地等待，单次最长 60 秒 |
+| `vat.json / tojson / urlencode / millis / log` | 工具函数 |
+| `print(...)`、`io.write(...)`、`io.stderr:write(...)` | 标准输出（`io.write` 不换行，`\r` 回到行首覆盖）；标准错误红色 |
+| `io.read()`、`io.read("n")`、`vat.readline("提示")` | 标准输入：读一行 / 一个数；用户在程序页输入，` 中断；`exec` 带 `stdin` 时从它读，读完返回 `nil` |
+| `vat.key(超时毫秒)` | 读一个按键：`"a"`、`"enter"`、`"del"`、`"tab"`、`"space"`（`; . , /` 约定为上下左右），超时 `nil` |
+| `vat.clear()`、`vat.interactive()` | 清空程序页；是否前台运行（有人在看） |
+| `vat.exec("prog://名字?x=1")` | 调用另一个程序，返回它 `return` 的值；最多嵌套 3 层 |
 
-变量：`{名字}`（`as` 存的结果）、`{名字.字段}`（结果是 JSON 对象时取其中一个字段，如流的 `{a.x}`；没有这个字段时为空）、`{input.名字}`（参数）、`{event.字段}`（触发事件的数据）、`{error}`（上一个失败步骤的原因）、`{now}`（当前时间 HH:MM）。值一律是文字，`above / below` 两边都是数字时按数字比较；替换进 target 问号后的值会去掉 `&`、`?`，以免弄乱参数。
+可用的库：`string table math utf8 coroutine`，以及只有 `read / write / stderr` 的 `io`（控制台，不能打开文件）。没有 `os package debug`，也没有 `load / loadfile / dofile`（只收文本源码）。
 
-### 2.2 流程控制
+### 2.0 前台与后台
 
-1. 默认从上到下执行。
-2. `{"if": "rain", "is": "是", "then": [...], "else": [...]}`：条件成立走 `then`，否则走 `else`（可省）。
-3. `{"repeat": 4, "steps": [...]}`：重复。
-4. `{"wait": "25m"}`：暂停（`s / m / h`）。状态存卡、释放执行通道，到点从原处继续。
-5. 出错：默认结束整个程序并记录原因；`"on_error": "continue"` 跳过这一步，`{error}` 可读原因。
+| 怎么运行 | 前台 / 后台 | 输出 | 输入 | 上限 |
+|:--|:--|:--|:--|:--|
+| 用户对肥鱼说「运行…」（`exec prog://`），或在程序页（Fn+A）选中回车 | 前台：自动切到程序页 | 实时显示；同时作为结果的「输出：」给肥鱼（2 KB） | 键盘；`exec` 带 `stdin` 时先从它读 | 30 分钟、2 亿条指令；` 中断 |
+| 触发器（定时、事件、`vat.after`） | 后台：不切页 | 只记在「最近」和结果里 | 没有：`io.read` 返回 `nil, 原因` | 150 秒、2000 万条指令 |
 
-### 2.3 函数调用
+程序调用的程序跟着最外层的运行走。前台运行的输出存在 `/vat/things/lua/logs/名字.txt`（只留最近一次）。程序画的画面（`device://local/display/*`、`ui://`）在图形页显示；程序读一行输入时自动切回程序页，输完再回到图形页；读按键（`vat.key`）时画面不动。
 
-`{"exec": "prog://走去?to={pick}", "as": "r"}`：同步调用另一个程序；参数写在问号后；被调用程序**最后一步的结果**就是返回值。变量互不可见，只能经参数传入。保存时检查互相调用不成环；运行时调用深度 ≤ 3。你说“运行 走去，去美宜佳”时，大肥鱼发出的是同一个调用。
+### 2.2 权限（D9 的新形式）
 
-### 2.4 上限
+- 每次 `vat.*` 调用单独过 Policy：允许的直接执行；拒绝的（凭据路径等）一律拒绝；**要确认的，只有被已确认的 `@uses` 覆盖才执行**，否则返回「需要确认：在开头声明 -- @uses …」。
+- `@uses 动作 目标`：目标精确匹配，或匹配 `目标/…`、`目标?…`；以 `*` 结尾表示前缀。
+- **联网**（`http://`、`https://`，http 包）：程序访问的每个网站都要有 `@uses`，**读也一样**（肥鱼自己 GET 是直接放行的，但程序可能把数据拼进网址带走）。例如 `-- @uses read https://api.github.com/*`、`-- @uses write https://hooks.example.com/notify`。`vat.read(网址, {headers = {Accept = "application/json"}, save = "file:///vat/x.json", max_bytes = 4096})`；`vat.write(网址, 表或文本, {method = "PUT"})`（默认 POST，表按 JSON 发）。2xx 返回响应体，其他状态码返回 `nil, "ERROR: HTTP 404：…"`。请求头里的 `{secret:名字}` 必须事先由肥鱼调用一次、在设备上输入，程序里不能输入。
+- 确认记录在 `/vat/things/lua/approved.json`：按程序名记权限摘要（只由 `@uses` 和包的 `@target` 决定，改代码不变）。文件在电脑上被改过、权限变了，状态就变成「待确认」，需要重新保存或 `write pkg://名字/enable`。
+- 读取类、本机可撤销的操作（屏幕、LED、声音、剪贴板、`timer://`、`ui://`）不用声明。需要输密码的操作不能放进程序。
+
+### 2.3 上限
 
 | 项 | 上限 |
 |:--|:--|
-| 每个程序的语句数 / 嵌套层数 | 40 / 4 |
-| 一次运行实际执行的步数（含子程序、循环展开） | 200 |
-| `repeat` / `wait` | 10 次 / 24 小时 |
-| 调用深度 | 3 |
-| 单次连续执行 | 90 秒，超过自动挂起、排队续跑（worker 看门狗为 3 分钟） |
-| 程序总数 / 触发总数 | 64 / 32 |
+| 单次运行 | 150 秒（含 sleep；worker 任务超过 180 秒会重启设备） |
+| `vat.sleep` | 单次 60 秒；更长用 `vat.after` |
+| 内存 | 48 KB（先取 24 KB 私有堆，不够再追加 12 KB 一块） |
+| 指令 | 2000 万条（约 6 秒的纯计算） |
+| 嵌套调用 | 3 层 |
+| 源码 | 16 KB；程序和扩展包合计 64 个；触发 32 个 |
 
 ## 3. 触发
 
-触发表独立于程序，每条把“什么时候”绑到“运行什么”：
+`write trigger://new`，content：`{"when": "time://every/07:00", "run": "prog://名字?参数"}`。
 
-```json
-{"when": "time://every/07:00", "run": {"exec": "prog://早安"}}
-{"when": "time://weekday/08:30", "run": {"exec": "prog://走去?to=公司"}}
-{"when": "time://in/10m", "run": {"write": "device://local/display/banner", "content": "关火！"}}
+- 只能运行程序；单个动作也写成一两行的程序。触发本身不需要确认（它只能运行已确认的程序），删除需要确认。
+- `when`：`time://at/18:30`（一次）、`time://in/10m`（一次）、`time://every/07:00`、`time://weekday/09:00`、`time://weekend/10:00`、`device://boot`，以及扩展包声明的事件（如 `ui://panel/名字`）。事件数据在程序里是 `input.event`。
+- 一次性触发执行后删除；关机期间错过的不补跑，记一条「错过」。
+- 触发的运行排队，只在 worker 空闲且没有对话时执行，结果写进时间线。
+- 存在 `/vat/things/lua/triggers.json`；v0.7 之前的触发首次启动时迁移（运行程序的转成新格式，其余记一条「未迁移」，原文件改名为 `.old`）。
+
+## 4. pkg：卡上文件的管理
+
+| 调用 | 作用 |
+|:--|:--|
+| `read pkg://list` | 全部程序和扩展包、状态（已启用 / 待确认 / 已停用 / 声明有误）、权限 |
+| `write pkg://scan` | 重新扫描 `/vat/things/lua/*.lua`，重建索引（电脑上改过卡之后） |
+| `write pkg://名字/enable` | 启用；声明了权限的程序、以及所有扩展包，需要用户确认 |
+| `write pkg://名字/disable` · `/delete` | 停用；删除（需确认，被触发使用时拒绝） |
+| `read pkg://catalog` | 在线目录：可安装的程序和扩展包、版本、权限、已装 / 可更新（`?url=` 换目录地址） |
+| `write pkg://install/名字` · `pkg://update/名字` | 从目录安装 / 更新（需确认，确认框显示版本、来源、权限；更新显示新增的权限） |
+| `write pkg://rollback/名字` | 退回更新前保留的上一版（需确认） |
+| `write pkg://install?sha256=…&url=https://…/名字.lua` | 从任意地址下载一个 .lua（`url` 放最后；需确认），装好后是「待确认」，看过权限再 enable |
+
+`pkg` 是内置扩展包：它负责确认卡上的代码，所以自己不能是卡上的文件。
+
+### 4.1 在线目录与安装
+
+- 目录是一个 JSON（默认 FeiyuOS 仓库的 `packages/index.json`，用 `tools/pkg_index.py` 生成，见 `packages/README.md`），每项记着名字、版本、说明、声明的权限、文件地址、**SHA-256 和大小**。
+- 安装 / 更新时：确认框里的内容来自上一次 `read pkg://catalog` 存在卡上的目录（`/vat/cache/pkg/`）；下载先放到 `/vat/cache/pkg/download.lua`，大小、SHA-256 都对、声明能解析、代码能编译，并且声明的权限、scheme、说明**和目录写的完全一样**，才放进 `/vat/things/lua/`，并直接按确认过的权限启用。任何一项不对：不装，卡上原来的版本不动。
+- 更新时旧版本留在 `/vat/things/lua/old/名字.lua`，`write pkg://rollback/名字` 换回来（再执行一次就又换回新版）；退回后权限和当前确认的不同时，状态变「待确认」。
+- 目录和下载都走 http 包的网络通道，不需要在 `@uses` 里声明；`http://` 地址会在确认框里标出「未加密」，靠 SHA-256 保证文件没被改。
+
+### 4.2 卡上的扩展包
+
+开头声明 `@package 名字` 和 `@target scheme://` 的 .lua 是扩展包：它负责 `@target` 下的调用，肥鱼和其他程序像用内置包一样用它。
+
+```lua
+-- @about 查天气（和风）
+-- @package 天气
+-- @target weather://
+-- @usage 查天气用 read weather://now?city=城市名
+-- @keywords 天气 气温 下雨
+-- @uses read https://devapi.qweather.com/*
+function read(target, args)
+  local city = target:match("city=([^&]+)") or "深圳"
+  local body, err = vat.read("https://devapi.qweather.com/v7/weather/now?location=" .. vat.urlencode(city),
+                             {headers = {["X-QW-Api-Key"] = "{secret:qweather}"}})
+  if not body then error(err) end
+  local now = vat.json(body).now
+  return {city = city, temp = now.temp, text = now.text}
+end
 ```
 
-- `run` 是**任意一步**：可以运行程序，也可以直接是一个动作，一次性的小事不必建程序。
-- `time://at/…` 与 `time://in/…` 是一次性触发，执行后自动删除；`in` 在建立时换算成具体时刻。
-- 时间写法：`time://at/18:30`、`time://at/2026-11-08 09:00`、`time://in/10m`、`time://every/07:00`、`time://weekday/09:00`、`time://weekend/10:00`。需要校准过的时钟；未校准时 `trigger://list` 里注明“等待对时”。
-- `device://boot`：每次开机就绪后。
-- `ui://panel/面板名`：用户在这个面板上选定一项时（`{event.choice}` 选项、`{event.index}` 第几个）。
+- 例子里的 `{secret:qweather}` 是[和风天气](https://console.qweather.com/)控制台「项目管理」里创建的 API KEY。扩展包和程序里不能弹出输入框，所以先录入一次：对肥鱼说「用请求头 X-QW-Api-Key: {secret:qweather} 调一下和风天气 devapi.qweather.com 的实时天气」，设备弹出输入框，输入后这个令牌只发给 `devapi.qweather.com`，之后包里就能用了。
+- 每次调用运行一遍文件，再调用与工具同名的**全局函数**：`read(target, args)`、`write(target, args)`（内容在 `args.content`）、`exec(target, args)`。返回文本即结果，返回表按 JSON 给出，`error("…")` 是失败。
+- 扩展包**都要用户启用一次**，没有 `@uses` 也一样：`@usage` 会写进肥鱼的系统提示词，确认时会显示出来；`@usage`、`@target`、`@uses` 任何一个变了都回到「待确认」。
+- 包里的 `vat.*` 调用按它自己确认过的 `@uses` 放行，和程序一样；读调用默认放行，写和执行默认要确认（Policy 照常）。
+- 内置包已经负责的 scheme（`ssh://`、`http://`、`prog://`…）不能被卡上的包接管；两个卡上的包也不能负责同一个 scheme，后扫到的跳过。
+- 系统提示词里每个包的 `@usage` 最多 240 字节，所有卡上包合计约 1200 字节。
 
-**生效方式**：触发表与程序文件是唯一依据。开机、新建、启停、删除时，program 包把时间类触发 `watch()` 给 timer；timer 只记每个登记项的下一个到期时间；到点 `emit`，program 包在内存索引里找到对应触发，排队执行。关机期间错过的不补跑（记一条“错过”）。
+## 5. 旧程序
 
-## 4. 增删改查与清理
+v0.7 之前的 JSON 程序（`/vat/things/prog/programs/`）不再运行，`read prog://list` 会列出它们。翻译：`read prog://legacy/名字` 看原文，让肥鱼写成 Lua 后 `write prog://名字` 保存。
 
-| 调用 | 作用 | 确认 |
-|:--|:--|:--|
-| `write prog://名字`，content 为程序 JSON | 新建 / 修改（同名即修改） | 含需确认的步骤时确认一次，确认文字列出这些步骤 |
-| `read prog://list`、`read prog://名字` | 列表（签名、调用关系、上次运行）/ 缩进大纲 | — |
-| `exec prog://名字?参数` | 运行 | 不再确认（保存时已确认） |
-| `write prog://名字/delete` | 删除；仍被触发或其他程序引用时拒绝并列出引用者 | 确认 |
-| `read prog://unused`、`write prog://cleanup` | 列出 / 删除未被引用且 30 天未运行的程序 | 删除前确认 |
-| `read prog://runs` | 等待中的运行（停在哪一步、何时继续） | — |
-| `read prog://help` | 完整语法说明（大肥鱼写程序前读，平时不占提示词） | — |
-| `write trigger://new`，content 为 `{when, run}` | 新建触发 | `run` 需确认时确认一次 |
-| `read trigger://list` | 按下次执行时间排序 | — |
-| `write trigger://编号/pause`、`/resume`、`/delete` | 停用、启用、删除 | 删除确认 |
+## 6. 测试
 
-## 5. 执行与安全
-
-- **确认记录与程序分开存**：`approved.json` 记录用户确认过的步骤指纹（动作 + 参数模板的哈希），只在用户确认保存后由 program 包写入；程序 JSON 里的任何“已确认”字段一律忽略。运行时每步重新过 Policy：拒绝→失败；需确认且指纹已确认→执行；需确认但未确认（程序被改过）→该步失败，提示重新保存；需要密码→失败（程序里不能输密码）。
-- **运行入口**：触发、`wait` 到点、你或大肥鱼手动运行，都进入 program 包的小队列；worker 空闲且没有等待确认的对话时，作为一个 `Program` 任务执行，时间线新增“⏰ 程序名”。大肥鱼在对话中运行一个**不含 `ask://` 和 `wait`** 的程序时，当场执行并把结果返回给她；否则排队，结果显示在时间线上。
-- **`ask://`**：在程序任务里跑一次普通对话（进入对话历史）。第一版中这次对话只能查询和判断，需要确认或输入密码的操作自动拒绝，不会卡住等人。只接受程序运行时的调用，平时对话里调用会被拒绝。
-- **存储**：程序 `/vat/things/prog/programs/名字.json`、触发表 `/vat/things/prog/triggers.json`、确认记录 `/vat/things/prog/approved.json`（都在设备档案下，进板载镜像）；运行中的状态 `/vat/prog/runs/编号.json`（频繁改写，不进镜像）。
-- **内存**：常驻的只有触发索引（每条几十字节）；程序在运行时才解析，跑完释放。
-
-## 6. 让大肥鱼会用
-
-- **常驻提示词**（`program` 包的 `usage()`，每次请求都带）：何时写程序、何时只建触发；写或改之前先 `read prog://list`、第一次写先 `read prog://help`；一个最小例子。控制在几百字节。
-- **`read prog://help`**（按需读取）：完整关键字表与 6 个例子——提醒、定时动作、带判断的早安、番茄钟（repeat + wait）、函数调用与参数、清理。
-- **意图用例**：`tests/cases/` 下新增程序类意图（建程序、建触发、运行、列出、删除、清理），提示词实验台检查她发出的调用。
-
-## 7. 测试
-
-- **开发机**：解释器与校验是可移植源码（`prog_engine.cpp`），`make host-test` 用假的执行器检查顺序、分支、循环、`wait` 挂起与恢复、调用与返回值、`on_error`、上限、变量检查、环检测。
-- **测试程序**：`tests/programs/` 下一组程序及期望结果，覆盖本机能力、组合、函数调用、触发；E2E 上传、运行、核对，作为回归用例。
-
-## 8. 分版
-
-| 版本 | 内容 |
-|:--|:--|
-| v0.5.3 | 事件总线与钩子；`program`、`ask` 包；`time://` 与 `device://boot`；全部关键字；增删改查与清理；测试程序 |
-| 之后 | `wifi://`、`lora://`、`button://` 事件；状态型触发（`reading()`、采样、越过 / 持续 / 防抖）；`ask://` 中途确认；0.6 的 `ui://`（选择、输入）与应用菜单 |
+- 主机：`tests/host/lua_meta_test.cpp`（声明解析、权限匹配、摘要、名字）。
+- E2E S10：`tests/programs/*.lua` 与 `cases.json`，逐个保存、运行，检查结果；扩展包 `pkg_echo.lua`（echo://）：扫描后待确认、经确认启用、读、返回表、出错、停用；另有触发（一次性、每天、暂停恢复、删除需确认）和意图（「运行某程序」「以后每天…」）。

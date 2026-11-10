@@ -1,39 +1,74 @@
 #pragma once
 
 #include <Arduino.h>
+#include <cJSON.h>
 
-// Device side of the program package: programs and triggers on storage,
-// approvals, the run queue and jobs on the worker.  The language itself is in
-// prog_engine (portable); the package glue is packages/program_package.cpp.
+#include <vector>
+
+#include "lua_meta.h"
+
+// Lua programs and packages on the card (/vat/things/lua/名字.lua), their
+// index and confirmations, and triggers that run a program on a time or an
+// event.  The language is lua_vm; the header is lua_meta.
 namespace vat::programs {
 
-void on_event(const String& target, const String& data);  // event-bus handler: queues only
-void loop();  // UI task: load once, arm triggers, start queued runs when the worker is free
+// The event bus and the UI loop: triggers queue runs, which start on the
+// worker when nothing else is running.
+void on_event(const String& target, const String& data);
+void loop();
 
-// prog://
+// prog:// (programs)
 String list_text();
 String show(const String& name);
-String unused_text();
-String runs_text();
-// Stops a run waiting in a `wait`: drops its timer and its saved state; the
-// program stays.  `id` as listed by runs_text.
-String cancel_run(int id);
-String save(const String& name, const String& content, bool approved);
+String save(const String& name, const String& source, bool approved);
 String remove(const String& name);
-String cleanup();
-String run(const String& name, const String& query);  // from a tool call: now, or queued
+// From a tool call or the program page: a foreground run (the console;
+// `stdin_text` lines are what io.read gets, then the end).
+String run(const String& name, const String& query, const String& stdin_text = String());
+// The program page's Enter on a program: runs it on the worker; false when busy.
+bool launch(const String& name);
+// Programs the page lists: name and about, in index order (packages excluded).
+std::vector<std::pair<String, String>> runnable();
+bool needs_confirm(const String& source);              // declares uses: confirm the save
+String save_summary(const String& name, const String& source);
+String legacy_text();                                  // old JSON programs, to be translated
+String legacy_show(const String& name);
 
 // trigger://
 String triggers_text();
-String add_trigger(const String& content, bool approved);
+String add_trigger(const String& content);
 String trigger_action(int id, const String& action, bool approved);  // pause | resume | delete
+String trigger_line(int id);
 
-// For Policy and the confirmation screen.
-bool needs_confirm(const String& program_json);   // a step Policy would ask about
-bool trigger_needs_confirm(const String& trigger_json);
-String save_summary(const String& name, const String& program_json);
-String trigger_summary(const String& trigger_json);
-String trigger_line(int id);  // "#3 每天 07:00 → 运行 早安", "" when unknown
-String cleanup_list();        // names cleanup would delete, "、"-joined
+// pkg:// (everything on the card: programs and packages)
+String scan();
+String pkg_list();
+String pkg_action(const String& name, const String& action, bool approved);  // enable | disable | delete
+String pkg_summary(const String& name, const String& action);
+bool pkg_needs_confirm(const String& name, const String& action);
+
+// Card packages (@package files, enabled): what the card package serves.
+struct PackageInfo {
+    String name;
+    String target;  // "weather://"
+    String usage;
+    String keywords;
+    String about;
+};
+std::vector<PackageInfo> card_packages();
+// Changes whenever the index or a confirmation does (reload card_packages()).
+uint32_t generation();
+// Installing (pkg_store): the header of the card's `name`, false when none.
+bool installed(const String& name, lua_meta::Header& header);
+// Puts a downloaded, checked `file` in place as `name`, the current one kept
+// as old/名字.lua; confirms `header` when `enable`, else it waits for enable.
+// "" or the error.
+String adopt(const String& name, const String& file, const lua_meta::Header& header, bool enable);
+// Swaps `name` with its kept previous version.
+String rollback(const String& name);
+bool has_previous(const String& name);
+
+// One tool call to a card package: its file's tool-named function.
+String run_package(const String& name, const String& tool, const cJSON* arguments);
 
 }  // namespace vat::programs

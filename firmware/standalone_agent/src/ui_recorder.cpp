@@ -1,4 +1,5 @@
 #include "ui_recorder.h"
+#include "cjk_font.h"
 
 #include <M5Cardputer.h>
 
@@ -79,7 +80,7 @@ void draw_meter(const std::deque<uint8_t>& levels, float seconds, float limit) {
         d.fillRect(x, y + 8 - h / 2, 3, h, kAccent);
         x += 5;
     }
-    d.setFont(&fonts::efontCN_12);
+    d.setFont(&cjk::cn12);
     d.setTextColor(kText, kBg);
     const String text = String(seconds, 1) + "s";
     d.drawString(text, kWidth - kPad - d.textWidth(text), y + 2);

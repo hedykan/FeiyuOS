@@ -55,7 +55,7 @@ v0.5 的目标：把 Cardputer Adv 本身和已装的 Cap LoRa-1262 都做成扩
 |:--|:--|:--|
 | Wi-Fi 扫描、状态、切换、设置新网络 | ✅ `wifi` 包 | `wifi://scan` `wifi://status` `wifi://SSID` |
 | 亮度、息屏、音量、剪贴板、电量、笔记 | ✅ `local` 包 | `device://local/*` `memory://*` |
-| 屏幕：大字、二维码、卡上的小图片、通知横幅 | ✅ `display` 包：全屏浮层盖在当前页上，任意键返回；大字用已链接字体放大（另加中文字库会超出程序分区）；图片限 32 KB | `device://local/display/{text,qr,image,banner,clear}` |
+| 屏幕：大字、二维码、卡上的小图片、通知横幅 | ✅ `display` 包：全屏浮层盖在当前页上，任意键返回；大字用已链接的中文字体放大；图片限 32 KB | `device://local/display/{text,qr,image,banner,clear}` |
 | 充电状态 | ✅ 并入 `/api/status` 与本机状态：Adv 只有电池 ADC，按 USB 主机在线 + 电压 5 分钟走势推断，注明“推断”；只接充电头时无法判断 | `device://local/status` |
 | RGB 指示灯（G21 WS2812） | ✅ `hardware` 包：颜色名、`#RRGGBB` 或 off，免确认 | `device://local/led` |
 | IMU（BMI270） | ✅ `hardware` 包：姿态、俯仰 / 横滚、是否在动 | `sensor://imu/...` |
@@ -111,9 +111,9 @@ LoRa 要先定的事：
 - 例子：“做一个看开发机负载的小面板，每 30 秒刷新”= `exec ssh://开发机 uptime` + `write ui://panel/load`；“WiFi 选择器”= `read wifi://scan` + `write ui://panel/wifi`，选中后 `write wifi://SSID`（仍走确认与密钥输入）；“GPS 面板”= `read gps://local` + `write ui://panel/gps`。
 
 前置条件：v0.5 的基础扩展包（面板要有数据来源）。
-## 远程更新固件（OTA）
+## 远程更新固件（OTA）：不做
 
-在开发机上编译出新固件后，设备通过已有 SSH 连接拉取 `.bin`，写入另一个程序分区后重启；新版本启动失败时自动回滚，`/vat` 数据不受影响。做成 `firmware` 包：`read firmware://version`；`write firmware://ssh/开发机/<路径>.bin`（需要确认，录音期间不可执行）。
+2026-11-09 决定：不做 OTA，保持单个 6.4 MB 程序分区。换版本用 M5Burner，或先装 M5Launcher 再从它加载 FeiyuOS。
 
 ## 物联网适配器
 
@@ -152,8 +152,8 @@ LoRa 要先定的事：
 2. ✅ 一个只读本机能力（Wi-Fi 扫描）和一个需要确认的写操作（语音设置 Wi-Fi），验证 `read` 路由、`write` 确认和状态回读闭环。
 3. ✅ 长上下文（TF 卡）与联网搜索。
 4. ✅ 基础扩展包：本机能力补全，外接 GPS、LoRa 等模块（LoRa 收发待实测）。
-5. 即时 UI 与本地应用。
-6. 远程更新固件（OTA）。
+5. ✅ 即时 UI 与本地应用。
+6. ~~远程更新固件（OTA）~~：不做，见上。
 7. MQTT 或 Home Assistant 适配器。
 8. 已授权的防御性网络诊断，配套目标白名单、参数策略和审计测试。
 9. 4G 联网（ML307R）。

@@ -14,12 +14,14 @@
 | `policy` | `session` 的 `set_policy`：按 target 调整 deny / ask / allow | `policy` |
 | `wifi` | `wifi://scan`、`wifi://status`、`wifi://<网络名>`（切换网络） | `ops_wifi` |
 | `web` | `web://search`、`web://page` | `ops_web` |
+| `http` | `read http(s)://…`（GET）、`write http(s)://…`（POST / PUT / PATCH / DELETE，需确认）；`headers`、`save`、`max_bytes`；请求头里的 `{secret:名字}` 在设备上输入、只发给录入时的网站 | `net::request` |
 | `lora` | `lora://...`（也接受 `device://lora/...` 别名） | `ops_lora`（RadioLib） |
 | `gps` | `sensor://gps/...` | `ops_gps` |
 | `files` | `file:///vat/...`（拒绝密钥与系统目录） | `storage` |
 | `timer` | `timer://in/...`、`timer://at/...`、`timer://list`、`timer://cancel/...` | `ops_timer` |
 | `grove` | `sensor://grove/...` | Ex_I2C 扫描 |
 | `ir` | `ir://<电器名>/<动作>` | `ops_ir`（IRremote） |
+| `card` | TF 卡上启用的扩展包（`/vat/things/lua/*.lua` 里带 `@package` / `@target` 的），各自的 scheme；注册在最后，不会盖过内置包 | `prog_runtime` + `lua_vm` |
 | 命令目录（`catalog_package.cpp`） | 只供 `discover`：描述经过审核的远端命令（搜索词、风险、`--help`），执行仍走 `ssh` | `ops_ssh` |
 
 `builtin.cpp` 里的注册顺序只在两个包可能认领同一调用时有意义（例如 `display`、`hardware` 要排在 `local` 前面）；认领范围应保持互不重叠。

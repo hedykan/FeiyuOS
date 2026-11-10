@@ -1,0 +1,20 @@
+{
+ "version": 1,
+ "packages": [
+  {
+   "name": "发布",
+   "version": "1.0",
+   "kind": "package",
+   "about": "查 GitHub 项目的最新版本号（最新的标签）",
+   "package": "发布",
+   "target": "release://",
+   "usage": "查某个 GitHub 项目的最新版本用 read release://所有者/仓库（如 release://espressif/arduino-esp32）",
+   "uses": [
+    "read https://api.github.com/repos/*"
+   ],
+   "url": "%E5%8F%91%E5%B8%83.lua",
+   "sha256": "b431635fef3aa3b8e43c5a11fed489f6c121615e914a134d12fe7a1ce8ab79d5",
+   "size": 891
+  }
+ ]
+}

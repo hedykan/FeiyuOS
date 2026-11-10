@@ -86,6 +86,10 @@ CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
 # CONFIG_ARDUINO_SELECTIVE_SD_MMC is not set
 # CONFIG_ARDUINO_SELECTIVE_SPIFFS is not set
 # CONFIG_ARDUINO_SELECTIVE_FFat is not set
+# mbedTLS uses plain calloc until net.cpp installs its allocator (mbedtls_platform_set_calloc_free),
+# which serves record buffers from the TLS reserve; the stock INTERNAL_MEM_ALLOC works the same way
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
+CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=y
 CONF
 git diff --stat
 # Behind a local HTTP proxy (component registry and GitHub downloads), set

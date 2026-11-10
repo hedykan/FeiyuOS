@@ -18,6 +18,15 @@
 #include <freertos/semphr.h>
 
 namespace vat::storage {
+
+bool copy_stream(File& from, File& to) {
+    uint8_t buffer[512];
+    int n;
+    while ((n = from.read(buffer, sizeof(buffer))) > 0) {
+        if (to.write(buffer, n) != static_cast<size_t>(n)) return false;
+    }
+    return true;
+}
 namespace {
 
 constexpr int kSdSck = 40;
@@ -37,16 +46,21 @@ fs::FS* active = nullptr;
 SemaphoreHandle_t append_mutex = xSemaphoreCreateMutex();  // UI + worker both log
 String active_kind = "none";
 
-// Copies a file or directory tree; false if any file could not be written whole.
-bool copy_tree(fs::FS& from, fs::FS& to, const String& path) {
+// Copies a file or directory tree; false if any file could not be written
+// whole.  `merge` folds a degraded flash session into the card without
+// overwriting it: files missing on the card are copied, append-only logs
+// (*.jsonl) are appended, everything else on the card is kept.
+bool walk_tree(fs::FS& from, fs::FS& to, const String& path, bool merge) {
     File source = from.open(path);
     if (!source) return false;
     if (!source.isDirectory()) {
-        File target = to.open(path, FILE_WRITE);
-        bool ok = static_cast<bool>(target);
-        uint8_t buffer[512];
-        int n;
-        while (ok && (n = source.read(buffer, sizeof(buffer))) > 0) ok = target.write(buffer, n) == static_cast<size_t>(n);
+        const bool exists = merge && to.exists(path);
+        if (exists && !path.endsWith(".jsonl")) {
+            source.close();
+            return true;
+        }
+        File target = to.open(path, exists ? FILE_APPEND : FILE_WRITE);
+        const bool ok = target && copy_stream(source, target);
         if (target) target.close();
         source.close();
         return ok;
@@ -64,49 +78,12 @@ bool copy_tree(fs::FS& from, fs::FS& to, const String& path) {
     dir.close();
     bool ok = true;
     for (const auto& child : children) {
-        if (!child.startsWith("/vat/tests") && !child.startsWith("/vat/cache")) ok = copy_tree(from, to, child) && ok;
+        if (!child.startsWith("/vat/tests") && !child.startsWith("/vat/cache")) ok = walk_tree(from, to, child, merge) && ok;
     }
     return ok;
 }
-
-// Folds a degraded flash session into the card without overwriting it: files
-// missing on the card are copied, append-only logs (*.jsonl) are appended,
-// everything else on the card is kept.
-bool merge_tree(fs::FS& from, fs::FS& to, const String& path) {
-    File source = from.open(path);
-    if (!source) return false;
-    if (!source.isDirectory()) {
-        const bool exists = to.exists(path);
-        if (exists && !path.endsWith(".jsonl")) {
-            source.close();
-            return true;
-        }
-        File target = to.open(path, exists ? FILE_APPEND : FILE_WRITE);
-        bool ok = static_cast<bool>(target);
-        uint8_t buffer[512];
-        int n;
-        while (ok && (n = source.read(buffer, sizeof(buffer))) > 0) ok = target.write(buffer, n) == static_cast<size_t>(n);
-        if (target) target.close();
-        source.close();
-        return ok;
-    }
-    source.close();
-    if (!to.exists(path) && !to.mkdir(path)) return false;
-    std::vector<String> children;
-    File dir = from.open(path);
-    File entry = dir.openNextFile();
-    while (entry) {
-        children.push_back(entry.path());
-        entry.close();
-        entry = dir.openNextFile();
-    }
-    dir.close();
-    bool ok = true;
-    for (const auto& child : children) {
-        if (!child.startsWith("/vat/tests") && !child.startsWith("/vat/cache")) ok = merge_tree(from, to, child) && ok;
-    }
-    return ok;
-}
+bool copy_tree(fs::FS& from, fs::FS& to, const String& path) { return walk_tree(from, to, path, false); }
+bool merge_tree(fs::FS& from, fs::FS& to, const String& path) { return walk_tree(from, to, path, true); }
 
 void remove_tree_on(fs::FS& fs, const String& path) {
     File node = fs.open(path);
@@ -171,7 +148,9 @@ long cached_size(const String& path) {
 
 void remember(const String& path, long bytes) {
     xSemaphoreTake(sizes_mutex, portMAX_DELAY);
-    if (sizes.size() > 200) sizes.clear();  // bounded; it is only a cache
+    // Bounded: an entry is ~90 B in three small blocks (map node, String, path);
+    // 200 of them were ~18 KB of scattered blocks.  It is only a cache.
+    if (sizes.size() > 64) sizes.clear();
     if (bytes == kUnknown) sizes.erase(path);
     else sizes[path] = bytes;
     xSemaphoreGive(sizes_mutex);
@@ -789,60 +768,6 @@ String check_card() {
 }
 
 uint32_t card_hz() { return sd_hz; }
-String bench(uint32_t hz) {
-    if (active_kind != "tf") return "{\"error\":\"no card\"}";
-    SD.end();
-    SPI.end();
-    SPI.begin(kSdSck, kSdMiso, kSdMosi, kSdCs);
-    if (!SD.begin(kSdCs, SPI, hz, "/sd", kSdMaxFiles, false) || SD.cardType() == CARD_NONE) {
-        return "{\"error\":\"remount failed\"}";
-    }
-    known_dirs.clear();
-    struct Stat {
-        const char* name;
-        uint32_t n = 0, total = 0, max = 0, over = 0;
-        void add(uint32_t ms) { ++n; total += ms; max = std::max(max, ms); over += ms > 400; }
-    } append_s{"append"}, write_s{"write"}, read_s{"read"}, size_s{"size"}, remove_s{"remove"};
-    const String dir = "/vat/cache/bench";
-    SD.mkdir(dir);
-    const String line = String("bench line 0123456789abcdefghijklmnopqrstuvwxyz 0123456789abcdefghijklmnopqrstuvwxyz\n");
-    for (int i = 0; i < 100; ++i) {
-        const unsigned long t = millis();
-        File f = SD.open(dir + "/append.log", FILE_APPEND);
-        if (f) { f.print(line); f.close(); }
-        append_s.add(millis() - t);
-    }
-    for (int i = 0; i < 30; ++i) {
-        const String path = dir + "/f" + String(i) + ".txt";
-        unsigned long t = millis();
-        File w = SD.open(path, FILE_WRITE);
-        if (w) { for (int k = 0; k < 8; ++k) w.print(line); w.close(); }
-        write_s.add(millis() - t);
-        t = millis();
-        File r = SD.open(path, FILE_READ);
-        if (r) { while (r.available()) r.read(); r.close(); }
-        read_s.add(millis() - t);
-        t = millis();
-        File z = SD.open(path, FILE_READ);
-        if (z) { (void)z.size(); z.close(); }
-        size_s.add(millis() - t);
-    }
-    for (int i = 0; i < 30; ++i) {
-        const unsigned long t = millis();
-        SD.remove(dir + "/f" + String(i) + ".txt");
-        remove_s.add(millis() - t);
-    }
-    SD.remove(dir + "/append.log");
-    SD.rmdir(dir);
-    String json = "{\"hz\":" + String(hz);
-    for (Stat* st : {&append_s, &write_s, &read_s, &size_s, &remove_s}) {
-        json += ",\"" + String(st->name) + "\":{\"n\":" + String(st->n) + ",\"avg\":" +
-                String(st->n ? st->total / st->n : 0) + ",\"max\":" + String(st->max) + ",\"over400\":" +
-                String(st->over) + "}";
-    }
-    return json + "}";
-}
-
 String slow_report() { return String(slow_count.load()) + "/" + String(slow_max_ms.load()) + "ms"; }
 bool degraded() { return degraded_mode; }
 
@@ -880,6 +805,25 @@ String list_dir(const String& path) {
     root.close();
     json += "]";
     return json;
+}
+
+
+String vat_path(const String& target) {
+    String path = target.startsWith("file://") ? target.substring(strlen("file://")) : target;
+    while (path.startsWith("//")) path = path.substring(1);
+    if (!path.startsWith("/")) path = "/" + path;
+    if (path != "/vat" && !path.startsWith("/vat/")) path = "/vat" + path;
+    while (path.length() > 4 && path.endsWith("/")) path.remove(path.length() - 1);
+    return path;
+}
+
+String refused_path(const String& path, bool writing) {
+    if (path.indexOf("..") >= 0) return "路径不能包含 ..";
+    if (path == "/vat/secrets.json" || path.startsWith("/vat/ssh")) return "密钥、密码与 SSH 主机配置不能通过文件读写，请用设置页";
+    if (path.startsWith("/vat/.")) return "系统标记文件不能访问";
+    if (writing && (path == "/vat/config.json" || path.startsWith("/vat/context") || path.startsWith("/vat/out/")))
+        return "这是系统维护的文件，不能直接写";
+    return "";
 }
 
 }  // namespace vat::storage

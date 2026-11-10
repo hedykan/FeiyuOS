@@ -15,6 +15,7 @@ BUILD_PROPS := --build-property upload.maximum_size=$(APP_SIZE)
 .PHONY: build upload flash wait-ready host-test mascot mascot-upload irdb-upload device-token release m5burner monitor clean e2e serial-log serial-stop probe-hardware probe-sd libs-status libs-custom libs-stock
 
 build:
+	tools/patch_libs.sh
 	arduino-cli compile -b '$(FQBN)' $(BUILD_PROPS) --build-path '$(BUILD_DIR)' '$(SKETCH)'
 
 upload: build serial-stop
@@ -32,7 +33,7 @@ wait-ready:
 # cJSON comes from the same ESP-IDF tree as the custom libraries.
 CJSON_DIR ?= ../../esp-libbuild/lib-builder/esp-idf/components/json/cJSON
 HOST_SRC := firmware/standalone_agent/src
-HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/prog_engine.cpp $(HOST_SRC)/ac_core.cpp $(HOST_SRC)/arena_ledger.cpp $(HOST_SRC)/ui_panel.cpp $(HOST_SRC)/web_token_core.cpp $(HOST_SRC)/ui_canvas.cpp
+HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/ac_core.cpp $(HOST_SRC)/arena_ledger.cpp $(HOST_SRC)/ui_panel.cpp $(HOST_SRC)/web_token_core.cpp $(HOST_SRC)/ui_canvas.cpp $(HOST_SRC)/lua_meta.cpp $(HOST_SRC)/pkg_catalog.cpp $(HOST_SRC)/console_buffer.cpp
 IREXT_C := $(wildcard $(HOST_SRC)/third_party/irext/*.c)
 host-test:
 	mkdir -p build/host

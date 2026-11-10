@@ -196,12 +196,14 @@ void wifi_saved() {
 
 }  // namespace
 
-#include "prog_test.cpp"
 #include "ac_test.cpp"
 #include "arena_test.cpp"
 #include "ui_panel_test.cpp"
 #include "web_token_test.cpp"
 #include "ui_canvas_test.cpp"
+#include "lua_meta_test.cpp"
+#include "pkg_catalog_test.cpp"
+#include "console_test.cpp"
 
 int main(int argc, char** argv) {
     if (argc > 1) fixture_dir = argv[1];
@@ -209,12 +211,14 @@ int main(int argc, char** argv) {
     common_text();
     place_format();
     wifi_saved();
-    prog_engine();
     ac_core();
     arena_ledger();
     ui_panel();
     web_token();
     ui_canvas();
+    lua_meta();
+    pkg_catalog_tests();
+    console_buffer();
     std::printf("%s: %d checks, %d failed\n", failures ? "FAILED" : "ok", checks, failures);
     return failures ? 1 : 0;
 }

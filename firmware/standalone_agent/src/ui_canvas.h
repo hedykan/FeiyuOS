@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "common.h"
@@ -22,6 +23,12 @@
 // (cx, cy); ["rotate", 0, 0, 0] stops.  Animation: "animate": {"every":
 // "100ms", "frames": 36, "step": 10} redraws every 100 ms with "{t}" =
 // frame × step (frames 0: until closed), e.g. ["rotate", "{t}", 120, 67].
+//
+// Variables: "vars": {"x": 10, "vx": 3} and "update": "x = x + vx  if x >
+// 230 or x < 10 then vx = -vx end" (Lua, run before every frame on a VM
+// kept while the canvas is open: lua_vm Script; t is the frame × step;
+// vat.stream reads sensors) and "{x}" in any argument is the value.  An
+// update without animate draws every 33 ms until closed.
 namespace vat::ui_canvas {
 
 constexpr std::size_t kMaxJson = 4096;
@@ -36,7 +43,8 @@ enum class Kind : uint8_t {
     FillArc, DrawBezier, DrawGradientLine, DrawString, DrawQr, DrawImage, ProgressBar, Rotate
 };
 
-constexpr uint32_t kMinFrameMs = 80;
+constexpr uint32_t kMinFrameMs = 33;
+constexpr std::size_t kMaxUpdate = 2048;  // bytes of Lua
 constexpr uint32_t kMaxFrames = 600;
 
 struct Op {
@@ -58,6 +66,8 @@ struct Spec {
     uint32_t frame_ms = 0;  // animation: 0 = still
     uint32_t frames = 0;    // 0 = until closed
     int step = 1;           // {t} = frame × step
+    String vars_json;       // "vars": starting values ("" when none)
+    String update;          // "update": Lua run before every frame ("" when none)
 };
 
 // false: `error` says which op or field is wrong.
@@ -67,6 +77,12 @@ bool parse(const String& json, Spec& out, String& error);
 void fill(std::vector<Op>& ops, const std::vector<String>& lines);
 // Replaces "{t}" with `t` (an animation frame).
 void fill_frame(std::vector<Op>& ops, long t);
+// Replaces "{name}" with the value of `vars` (numbers as number_text).
+using Lookup = std::function<bool(const String& name, String& value)>;
+void fill_vars(std::vector<Op>& ops, const Lookup& value);
+// Syntax check for "update" (the firmware sets lua_vm's; host tests run without).
+using Compiler = String (*)(const String& source);
+void set_compiler(Compiler compiler);
 // Rotation by `degrees` about (cx, cy), applied to a point.
 void rotate_point(int degrees, int cx, int cy, int& x, int& y);
 // "#RRGGBB", "#RGB" or a colour name → RGB888; false when unknown.

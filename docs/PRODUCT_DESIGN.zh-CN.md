@@ -4,7 +4,7 @@
 
 ## 实现目录
 
-- 本仓库是 Cardputer 实现：[构建、刷写、按键](../README.zh-CN.md)、[文档导航](README.zh-CN.md)、[自动验收](../tools/vat_e2e.py)。
+- 本仓库是 Cardputer 实现：[安装、配置、按键](../README.md)、[文档导航](README.zh-CN.md)、[自动验收](../tools/vat_e2e.py)。
 - 其他硬件（3DS、Switch）以后在工作区 `voice-agent-terminal/` 下与 `cardputer/` 同级各建一个仓库，同样以单机运行为目标，实现以本文的产品边界和设计原则为准。
 
 ## 产品定义

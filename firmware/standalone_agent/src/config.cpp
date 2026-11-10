@@ -88,6 +88,8 @@ String load() {
             next.terminal_font = font == 10 || font == 14 ? font : 12;
             const long context_kb = json_int(ui, "context_kb", next.context_kb);
             next.context_kb = context_kb == 32 || context_kb == 96 ? context_kb : 64;
+            next.status_items = json_str(ui, "status_items", next.status_items);
+            next.animation = constrain(json_int(ui, "animation", next.animation), 0, 2);
         }
         if (cJSON* gps = json_obj(config, "gps")) next.gps_enabled = json_bool(gps, "enabled", true);
         if (cJSON* ble = json_obj(config, "ble")) next.ble.enabled = json_bool(ble, "enabled", false);

@@ -331,8 +331,16 @@ String joined_results() {
 
 // Steps of the task go to storage as they happen (context::kTask).
 void task_message(cJSON* item) {
-    const String json = piece(item);
-    if (!json.isEmpty() && !context::task_append("," + json)) task.broken = true;
+    String json = piece(item);
+    if (json.isEmpty() && json_str(item, "role") == "tool") {
+        // Printing a long result failed (no memory): the model must still get an
+        // answer for this call, or the next request is refused (HTTP 400: an
+        // assistant message with tool_calls must be followed by tool messages).
+        cJSON* small = tool_result(json_str(item, "tool_call_id"), "ERROR: 内存不足，这一步的结果没能保存；换个更小的请求再试");
+        json = piece(small);
+        cJSON_Delete(small);
+    }
+    if (json.isEmpty() || !context::task_append("," + json)) task.broken = true;
 }
 
 Outcome finish(const String& reply) {

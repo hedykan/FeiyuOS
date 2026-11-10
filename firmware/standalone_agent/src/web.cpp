@@ -238,7 +238,7 @@ void handle_secret() {
     job.kind = worker::Kind::Secret;
     job.text = server.arg("plain");
     const uint32_t id = worker::submit(job);
-    job.text = String();
+    wipe(job.text);
     if (!id) return send_error(409, "busy");
     send_json(200, "{\"id\":" + String(id) + "}");
 }
@@ -269,10 +269,6 @@ void handle_screenshot() {
         server.sendContent(reinterpret_cast<const char*>(out.data()), row_bytes);
     }
 }
-
-volatile bool bench_running = false;  // DIAG
-uint32_t bench_hz = 0;
-String bench_result;
 
 void handle_reload() {
     const String problem = config::load();
@@ -354,6 +350,15 @@ void begin() {
     web_portal::register_routes(server);
     api_on("/api/status", HTTP_GET, handle_status);
     // DIAG: heap blocks and task stacks; compare two readings to find what stays allocated.
+    // DIAG: leak tracing, only with the heap-tracing IDF build (tools/heaptrace.py).
+    api_on("/api/heaptrace", HTTP_POST, [] {
+        send_json(200, diag::heap_trace(server.arg("action"), server.arg("records").toInt()));
+    });
+    api_on("/api/heaptrace", HTTP_GET, [] {
+        const String body = diag::heap_trace("dump", 0);
+        if (body.isEmpty()) return send_error(503, "low memory, retry");
+        send_json(200, body);
+    });
     api_on("/api/mem", HTTP_GET, [] {
         const String body = diag::mem_json();
         if (body.isEmpty()) return send_error(503, "low memory, retry");
@@ -369,26 +374,6 @@ void begin() {
     api_on("/api/action", HTTP_POST, handle_action);
     api_on("/api/key", HTTP_POST, [] { send_json(200, "{\"result\":\"" + ui::press(server.arg("k")) + "\"}"); });
     api_on("/api/reload", HTTP_POST, handle_reload);
-    // DIAG: the benchmark runs in its own task (core 0, like the worker) so
-    // the web server stays free to generate load while it runs.
-    api_on("/api/sd_bench", HTTP_POST, [] {
-        if (worker::busy() || bench_running) return send_error(409, "busy");
-        const uint32_t mhz = server.arg("mhz").toInt();
-        bench_hz = (mhz ? mhz : 25) * 1000000UL;
-        bench_result = "";
-        bench_running = true;
-        xTaskCreatePinnedToCore(
-            [](void*) {
-                bench_result = storage::bench(bench_hz);
-                bench_running = false;
-                vTaskDelete(nullptr);
-            },
-            "sd-bench", 8192, nullptr, 1, nullptr, 0);
-        send_json(200, "{\"started\":true}");
-    });
-    api_on("/api/sd_bench", HTTP_GET, [] {
-        send_json(200, bench_running ? String("{\"running\":true}") : bench_result);
-    });
     api_on("/api/secret", HTTP_POST, handle_secret);
     api_on("/api/screenshot", HTTP_GET, handle_screenshot);
     api_on("/api/reboot", HTTP_POST, [] {

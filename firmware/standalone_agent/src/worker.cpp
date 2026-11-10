@@ -2,6 +2,7 @@
 #include "registry.h"
 #include "policy.h"
 
+#include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
 
 #include <freertos/FreeRTOS.h>
@@ -87,11 +88,13 @@ bool agent_kind(Kind kind) {
            kind == Kind::ApproveAll || kind == Kind::Secret;
 }
 
+// release() (common.h), not = String(): that kept each slot's largest text
+// ever (13 KB after one E2E round, heap trace 2026-11-08).
 void clear_text(Record& record) {
-    record.transcript = String();
-    record.reply = String();
-    record.error = String();
-    record.calls = String();
+    release(record.transcript);
+    release(record.reply);
+    release(record.error);
+    release(record.calls);
 }
 
 void persist_record(Record& record) {
@@ -121,6 +124,7 @@ void update(uint32_t id, const std::function<void(Record&)>& mutate) {
     xSemaphoreTake(records_mutex, portMAX_DELAY);
     Record& record = records[id % kRecordCount];
     if (record.id != id) {
+        clear_text(record);  // record = Record{} would keep the old buffers (see release)
         record = Record{};
         record.id = id;
     }
@@ -284,6 +288,7 @@ bool transcribe(uint32_t id, const String& path, String& transcript) {
 
 void handle(uint32_t id, Job& job) {
     const unsigned long started = millis();
+    heap_caps_monitor_local_minimum_free_size_start();  // this job's own low water mark
     update(id, [&](Record& record) {
         record.kind = job.kind;
         record.status = "running";
@@ -341,7 +346,7 @@ void handle(uint32_t id, Job& job) {
         case Kind::TerminalInput: {
             ui::set_quiet_busy(true);
             const String result = tui::send_input("tui://current", job.text, job.keys, job.submit);
-            job.text = String();  // may be a password typed into a remote prompt
+            wipe(job.text);  // may be a password typed into a remote prompt
             delay(result == "已发送到当前 TUI" ? 700 : 0);
             refresh_terminal();
             update(id, [&](Record& record) {
@@ -383,7 +388,7 @@ void handle(uint32_t id, Job& job) {
             update(id, [&](Record& record) { record.transcript = task_transcript; });
             const auto outcome =
                 agent::resume(answer, job.text, [](const String& stage) { ui::set_stage(stage); });
-            job.text = String();  // the secret is gone once the step has run
+            wipe(job.text);  // the secret is gone once the step has run
             finish_agent(id, outcome);
             if (!outcome.paused) agent::maintain();
             break;
@@ -436,8 +441,11 @@ void handle(uint32_t id, Job& job) {
         if (record.status == "running") record.status = "done";
         persist_record(record);
     });
+    const std::size_t job_min = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    heap_caps_monitor_local_minimum_free_size_stop();
     if (job.kind != Kind::TerminalObserve) {
-        runtime_event("job_done", String(kind_name(job.kind)) + " id=" + id + " " + (millis() - started) + "ms");
+        runtime_event("job_done", String(kind_name(job.kind)) + " id=" + id + " " + (millis() - started) + "ms min=" +
+                                      String(static_cast<unsigned>(job_min)));
     }
 }
 
@@ -477,6 +485,8 @@ bool busy() { return running.load() || queued.load() > 0; }
 
 uint32_t running_ms() { return running.load() ? millis() - job_started.load() : 0; }
 
+void keep_alive() { job_started = millis(); }
+
 uint32_t submit(const Job& job) {
     if (busy()) return 0;
     const uint32_t id = next_id++;
@@ -496,9 +506,24 @@ uint32_t submit(const Job& job) {
 
 void set_result(uint32_t id, const String& reply, const String& error) {
     update(id, [&](Record& record) {
-        record.reply = reply;
-        record.error = error;
         record.status = error.isEmpty() ? "done" : "error";
+        if (!record.persisted) {
+            record.reply = reply;
+            record.error = error;
+            return;
+        }
+        // A program run reports after the conversation that started it was
+        // saved to the card and its text dropped: update the saved copy.
+        // Putting the text back in RAM kept ~1 KB per program run until the
+        // slot came round again (13 KB after one E2E round, heap trace 2026-11-08).
+        cJSON* stored = cJSON_Parse(storage::read_text(record_path(id), 16384).c_str());
+        if (!stored) stored = cJSON_CreateObject();
+        cJSON_DeleteItemFromObject(stored, "reply");
+        cJSON_DeleteItemFromObject(stored, "error");
+        cJSON_AddStringToObject(stored, "reply", reply.c_str());
+        cJSON_AddStringToObject(stored, "error", error.c_str());
+        storage::overwrite(record_path(id), json_print(stored));
+        cJSON_Delete(stored);
     });
 }
 

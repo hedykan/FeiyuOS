@@ -16,6 +16,7 @@
 #include "../policy.h"
 #include "../registry.h"
 #include "../storage.h"
+#include "../lua_vm.h"
 #include "../ui_canvas.h"
 #include "../ui_panel.h"
 #include "../ui_state.h"
@@ -30,7 +31,6 @@ using ui::panel_choice;
 using ui::post_overlay;
 
 constexpr char kAppDir[] = "/vat/things/apps";
-constexpr char kAppMenu[] = "本地应用";  // the panel Fn+A opens
 
 // The panel on screen with a source: refreshed from the worker while open.
 std::mutex lock;
@@ -54,6 +54,8 @@ void post_canvas(const String& name, const ui_canvas::Spec& spec, const std::vec
     overlay.frame_ms = spec.frame_ms;
     overlay.frames = spec.frames;
     overlay.step = spec.step;
+    overlay.vars_json = spec.vars_json;
+    overlay.update = spec.update;
     ui_canvas::fill(overlay.canvas, lines);
     for (const auto& op : overlay.canvas) {
         if (op.kind != ui_canvas::Kind::DrawImage) continue;
@@ -162,37 +164,13 @@ String open_app(const String& name) {
     return "已打开应用「" + name + "」";
 }
 
-void apps_menu_job(uint32_t id, const String&) {
-    ui_panel::Spec spec;
-    spec.title = kAppMenu;
-    spec.choices = app_names();
-    if (spec.choices.size() > ui_panel::kMaxChoices) spec.choices.resize(ui_panel::kMaxChoices);
-    if (spec.choices.empty()) spec.lines = {"还没有本地应用。", "对大肥鱼说：做一个看开发机负载的小面板，存成应用。"};
-    show(kAppMenu, spec);
-    worker::set_result(id, "apps menu");
-}
-
-void open_app_job(uint32_t id, const String& name) { worker::set_result(id, open_app(name)); }
-
-// Event bus (UI task): queue work only.
-void on_event(const String& target, const String& data) {
-    if (target == "ui://apps/menu") {
-        worker::submit({worker::Kind::Callback, "", "", {}, false, apps_menu_job});
-    } else if (target == String("ui://panel/") + kAppMenu) {
-        cJSON* d = cJSON_Parse(data.c_str());
-        const String choice = json_str(d, "choice");
-        cJSON_Delete(d);
-        if (!choice.isEmpty()) worker::submit({worker::Kind::Callback, choice, "", {}, false, open_app_job});
-    }
-}
-
 constexpr char kUsage[] =
     "即时界面（ui://）：要给用户看一个小面板、或让用户在几个选项里选一个时用。write target=ui://panel/名字，content 为 JSON 对象："
     "title 标题；lines 文字行数组（最多 12 行）；choices 选项数组（最多 8 个）；source 可选，打开期间定时刷新 lines，"
     "写成 read 或 exec 加目标，或 tool 加 arguments（与工具调用同形），再加 every（如 30s，至少 10 秒）。"
     "用户选定后 read ui://panel/名字 取结果，或建触发监听 ui://panel/名字（{event.choice}）。"
     "存成可反复打开的本地应用：write ui://apps/名字（content 同上）；打开 write ui://apps/名字/open；列出 read ui://apps；"
-    "删除 write ui://apps/名字/delete。设备上 Fn+A 打开应用列表。"
+    "删除 write ui://apps/名字/delete。设备上 Fn+A 打开程序页，程序和本地应用都列在那里。"
     "自由绘图用 write target=ui://canvas/名字，content 为 JSON 对象，ops 为绘制指令数组，每条写成 [指令名, 参数…]，"
     "指令与 M5GFX 同名同参：fillScreen、drawPixel、drawLine、drawFastHLine、drawFastVLine、drawRect、fillRect、"
     "drawRoundRect、fillRoundRect、drawCircle、fillCircle、drawEllipse、fillEllipse、drawTriangle、fillTriangle、"
@@ -200,14 +178,17 @@ constexpr char kUsage[] =
     "可加选项 size 1 到 4、color、datum 如 middle_center）、drawQr（文字 x y 宽）、drawImage（/vat/ 下图片 x y，最多一张）、"
     "progressBar（x y 宽 高 百分比 颜色 底色），颜色写 #RRGGBB 或 white red cyan 等；屏幕 240×135，最多 64 条；"
     "旋转用 [rotate, 角度, 中心x, 中心y] 作用于其后的图形，[rotate, 0, 0, 0] 取消；"
-    "动画在 content 顶层加 animate：every 每帧间隔如 100ms（至少 80ms）、frames 帧数（0 表示一直到关闭）、step 每帧增量，"
+    "动画在 content 顶层加 animate：every 每帧间隔如 100ms（至少 33ms）、frames 帧数（0 表示一直到关闭）、step 每帧增量，"
     "参数里的 {t} 换成 帧序号乘 step（{t} {1} {1#} 这类占位符在 JSON 里写成带引号的字符串），例如椭圆原地旋转：ops 先 [rotate, {t}, 120, 67] 再 [fillEllipse, 120, 67, 50, 20, cyan]，"
     "animate 为 every 100ms、frames 0、step 10。"
+    "变量动画：顶层加 vars（初值对象，如 x 为 20、vx 为 6）和 update（每帧先执行的一段 Lua 代码，如 x = x + vx  if x > 220 or x < 20 then vx = -vx end；可用 vars 里的变量、t 帧序号乘 step、math，以及 vat.stream 读传感器，不能调用其他能力），参数里写 {x} 取变量值；有 update 没 animate 时每 33ms 一帧直到关闭。"
     "可加 source 定时刷新，参数里的 {1} {2} 换成结果的第 1、2 行，{1#} 换成第 1 行里的第一个数字（用于大数字和进度条）。画布也能存成应用（ui://apps/名字，content 同上）。";
 
 class UiPackage : public Package {
 public:
-    UiPackage() { events::subscribe(on_event); }
+    UiPackage() {
+        ui_canvas::set_compiler([](const String& source) { return luavm::compile(source, "update"); });
+    }
 
     const char* usage() const override { return kUsage; }
 

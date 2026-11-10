@@ -14,25 +14,6 @@ namespace {
 
 constexpr std::size_t kMaxRead = 32768;  // the worker stores long results as out#
 
-String to_path(const String& target) {
-    String path = target.substring(strlen("file://"));
-    while (path.startsWith("//")) path = path.substring(1);
-    if (!path.startsWith("/")) path = "/" + path;
-    if (path != "/vat" && !path.startsWith("/vat/")) path = "/vat" + path;
-    while (path.length() > 4 && path.endsWith("/")) path.remove(path.length() - 1);
-    return path;
-}
-
-// Why `path` is off limits, or "" when it is fine.
-String refused(const String& path, bool writing) {
-    if (path.indexOf("..") >= 0) return "路径不能包含 ..";
-    if (path == "/vat/secrets.json" || path.startsWith("/vat/ssh")) return "密钥、密码与 SSH 主机配置不能通过文件读写，请用设置页";
-    if (path.startsWith("/vat/.")) return "系统标记文件不能访问";
-    if (writing && (path == "/vat/config.json" || path.startsWith("/vat/context") || path.startsWith("/vat/out/")))
-        return "这是系统维护的文件，不能直接写";
-    return "";
-}
-
 String listing(const String& path) {
     cJSON* list = cJSON_Parse(storage::list_dir(path).c_str());
     if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) == 0) {
@@ -75,8 +56,8 @@ public:
     }
 
     String execute(const String& tool, const cJSON* arguments, bool) override {
-        const String path = to_path(json_str(arguments, "target"));
-        const String why = refused(path, tool == "write");
+        const String path = storage::vat_path(json_str(arguments, "target"));
+        const String why = storage::refused_path(path, tool == "write");
         if (!why.isEmpty()) return "ERROR: " + why;
         if (tool == "read") {
             if (!storage::exists(path)) return "ERROR: 没有这个文件或目录：" + path;

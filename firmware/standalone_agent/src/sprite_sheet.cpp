@@ -8,7 +8,7 @@
 namespace vat::ui {
 namespace {
 
-// Layout (little-endian), as in ui_mascot.cpp:
+// Layout (little-endian), written by tools/pack_mascot.py:
 //     0  "VATM", version 1, frame size 32, state count, colour count
 //     8  frames per state [8]
 //    16  frame durations in ms, uint16 [8 states][8 frames]
@@ -79,6 +79,17 @@ bool SpriteSheet::read_state(int state, uint8_t* out, std::size_t capacity) cons
     fs::File file = storage::fs().open(path_, FILE_READ);
     if (!file) return false;
     const bool ok = file.seek(header_ + index * kFrameBytes) && file.read(out, bytes) == bytes;
+    file.close();
+    return ok;
+}
+
+bool SpriteSheet::read_frame(int state, int frame, uint8_t* out) const {
+    if (state < 0 || state >= states_ || frame < 0 || frame >= counts_[state]) return false;
+    std::size_t index = frame;
+    for (int s = 0; s < state; ++s) index += counts_[s];
+    fs::File file = storage::fs().open(path_, FILE_READ);
+    if (!file) return false;
+    const bool ok = file.seek(header_ + index * kFrameBytes) && file.read(out, kFrameBytes) == kFrameBytes;
     file.close();
     return ok;
 }

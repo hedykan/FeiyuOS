@@ -26,15 +26,19 @@
 #include "src/registry.h"
 #include "src/storage.h"
 #include "src/ui.h"
+#include "src/arena.h"
 #include "src/ui_splash.h"
 #include "src/web.h"
 #include "src/worker.h"
+#include "src/diag_mem.h"
 
-// UI loop task (keyboard, drawing, web pages, settings): 8 KB left only 3.7 KB
-// unused at the deepest point measured in v0.5.
-SET_LOOP_TASK_STACK_SIZE(12 * 1024);
+// UI loop task (keyboard, drawing, web pages, settings): the deepest point
+// used ~4.9 KB (quick E2E, 2026-11-09; 4.5 KB in v0.5), so 8 KB keeps ~1.6x.
+// /api/status loop_stack_free_min is the headroom left.
+SET_LOOP_TASK_STACK_SIZE(8 * 1024);
 
 void setup() {
+    vat::diag::trace_from_boot();  // heap-tracing builds only: what boot leaves behind
     Serial.begin(115200);
     auto cfg = M5.config();
     // Mic and speaker share I2S: neither runs at boot; recording starts the mic,
@@ -99,6 +103,7 @@ void setup() {
     heap_mark("ble");
     vat::worker::begin();
     heap_mark("worker");
+    vat::diag::begin();  // note failed allocations (logged from loop())
 
     bool online = false;
     if (vat::config::network_ready()) {
@@ -135,6 +140,7 @@ void setup() {
 }
 
 void loop() {
+    vat::diag::report();
     // Software watchdog for the worker (replaces the idle-task check).
     if (vat::worker::running_ms() > vat::worker::kStuckJobMs) {
         // No storage::flush() here: the stuck job may hold the card.

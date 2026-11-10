@@ -50,7 +50,7 @@ gh release create vX --repo hedykan/FeiyuOS --target main --title "肥鱼 OS vX"
 # 6. M5Burner 桌面端：新增版本（不公开，带上 docs/releases/vX.md 的本版更新）→ 分享码 → 试烧 → 公开
 node tools/m5burner.mjs version vX build/release/vX/feiyuos-vX-cardputer-adv.bin
 node tools/m5burner.mjs share <fid> vX       # 得到分享码，再用它下载、比对、写 0x0、看开机：
-#   curl https://m5burner-api.m5stack.com/api/firmware/share/<分享码>   → {"file": "<文件名>.bin"}
+#   curl https://m5burner-api.m5stack.com/api/firmware/share/<分享码>   → {"status":1,"data":{"file": "<文件名>.bin"}}
 #   curl -o share.bin https://m5burner-cdn.m5stack.com/firmware/<文件名>.bin
 #   sha256sum 与 build/release/vX/feiyuos-vX-cardputer-adv.bin 一致后再写 0x0
 node tools/m5burner.mjs publish <fid> vX on

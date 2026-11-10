@@ -3,7 +3,7 @@
 | 文档 | 内容 |
 |:--|:--|
 | [产品设计](PRODUCT_DESIGN.zh-CN.md) | 产品定义、双工作区、权限、记忆、MVP 范围 |
-| [Cardputer 固件](../README.zh-CN.md) | 构建、刷写、首次配置、按键 |
+| [Cardputer 固件](../README.md) | 安装、首次配置、界面、按键 |
 | [单机架构](ARCHITECTURE.zh-CN.md) | agent shell 定位与分层、任务划分、启动顺序、内存策略、源码结构 |
 | [操作 Agent 运行时](AGENT_RUNTIME.zh-CN.md) | 七工具、工具循环、Policy 与审批、能力包、模型上下文、SSH 与 TUI |
 | [扩展包开发手册](EXTENSION_PACKAGE_GUIDE.zh-CN.md) | **新增能力的唯一方式**：包接口、注册、规则、测试要求 |

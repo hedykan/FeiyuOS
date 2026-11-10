@@ -1,128 +1,20 @@
 [
- {
-  "id": "led",
-  "save": "led.json",
-  "run": "prog://测试-灯",
-  "reply_has": [
-   "完成",
-   "RGB 灯：红"
-  ]
- },
- {
-  "id": "branch",
-  "save": "branch.json",
-  "run": "prog://测试-分支",
-  "reply_has": [
-   "蓝"
-  ],
-  "reply_lacks": [
-   "RGB 灯：红"
-  ]
- },
- {
-  "id": "loop",
-  "save": "loop.json",
-  "run": "prog://测试-循环",
-  "count": {
-   "write device://local/led": 7
-  }
- },
- {
-  "id": "callee",
-  "save": "callee.json",
-  "run": "prog://测试-被调?x=乙&y=丙",
-  "reply_has": [
-   "参数 乙 丙"
-  ]
- },
- {
-  "id": "caller",
-  "save": "caller.json",
-  "run": "prog://测试-调用",
-  "reply_has": [
-   "返回：参数 甲 默认"
-  ]
- },
- {
-  "id": "missing_param",
-  "run": "prog://测试-被调",
-  "error_or_reply_has": [
-   "缺少参数 x"
-  ]
- },
- {
-  "id": "broken",
-  "save": "broken.json",
-  "run": "prog://测试-坏",
-  "error_or_reply_has": [
-   "失败"
-  ]
- },
- {
-  "id": "recover",
-  "save": "recover.json",
-  "run": "prog://测试-容错",
-  "reply_has": [
-   "错误：",
-   "没有能力包"
-  ]
- },
- {
-  "id": "ask",
-  "save": "ask.json",
-  "run": "prog://测试-问答",
-  "reply_has": [
-   "ask 正确"
-  ]
- },
- {
-  "id": "weather",
-  "save": "weather.json",
-  "run": "prog://测试-天气",
-  "reply_has": [
-   "天气",
-   "℃"
-  ]
- },
- {
-  "id": "wait",
-  "save": "wait.json",
-  "run": "prog://测试-等待",
-  "reply_has": [
-   "已排队"
-  ],
-  "then_runs_has": "测试-等待 完成",
-  "within_s": 40
- },
- {
-  "id": "confirm_refused",
-  "save": "confirm.json",
-  "save_refused": true
- },
- {
-  "id": "invalid",
-  "save": "invalid.json",
-  "save_error_has": "没有用 as 定义"
- },
- {
-  "id": "stream",
-  "save": "stream.json",
-  "run": "prog://测试-流",
-  "reply_has": [
-   "z=",
-   "pitch=",
-   "roll="
-  ],
-  "reply_lacks": [
-   "z=;",
-   "pitch=;",
-   "roll=;",
-   "ERROR"
-  ]
- },
- {
-  "id": "stream_invalid",
-  "save": "badstream.json",
-  "save_error_has": "不是流"
- }
+  {"id": "led", "name": "测试-灯", "save": "led.lua", "run": "prog://测试-灯", "reply_has": ["完成", "RGB 灯：红"]},
+  {"id": "branch", "name": "测试-分支", "save": "branch.lua", "run": "prog://测试-分支", "reply_has": ["蓝"], "reply_lacks": ["RGB 灯：红"]},
+  {"id": "loop", "name": "测试-循环", "save": "loop.lua", "run": "prog://测试-循环", "reply_has": ["写了 7 次"]},
+  {"id": "callee", "name": "测试-被调", "save": "callee.lua", "run": "prog://测试-被调?x=乙&y=丙", "reply_has": ["参数 乙 丙"]},
+  {"id": "caller", "name": "测试-调用", "save": "caller.lua", "run": "prog://测试-调用", "reply_has": ["返回：参数 甲 默认"]},
+  {"id": "missing_param", "run": "prog://测试-被调", "error_or_reply_has": ["缺少参数 x"]},
+  {"id": "broken", "name": "测试-坏", "save": "broken.lua", "run": "prog://测试-坏", "error_or_reply_has": ["失败"]},
+  {"id": "recover", "name": "测试-容错", "save": "recover.lua", "run": "prog://测试-容错", "reply_has": ["错误：", "没有能力包"]},
+  {"id": "ask", "name": "测试-问答", "save": "ask.lua", "run": "prog://测试-问答", "reply_has": ["ask 正确"]},
+  {"id": "weather", "name": "测试-天气", "save": "weather.lua", "run": "prog://测试-天气", "reply_has": ["天气", "℃"]},
+  {"id": "sleep", "name": "测试-等待", "save": "sleep.lua", "run": "prog://测试-等待", "reply_has": ["等待完成"]},
+  {"id": "sleep_limit", "name": "测试-睡太久", "save": "sleeplong.lua", "run": "prog://测试-睡太久", "error_or_reply_has": ["60000"]},
+  {"id": "confirm_refused", "name": "测试-需确认", "save": "confirm.lua", "save_refused": true},
+  {"id": "undeclared", "name": "测试-未声明", "save": "undeclared.lua", "run": "prog://测试-未声明", "reply_has": ["需要确认", "@uses exec ssh://开发机"]},
+  {"id": "invalid", "name": "测试-无效", "save": "invalid.lua", "save_error_has": "语法错误"},
+  {"id": "stream", "name": "测试-流", "save": "stream.lua", "run": "prog://测试-流", "reply_has": ["z=", "pitch=", "roll="], "reply_lacks": ["z=nil", "pitch=nil", "roll=nil", "ERROR"]},
+  {"id": "stream_invalid", "name": "测试-坏流", "save": "badstream.lua", "run": "prog://测试-坏流", "reply_has": ["流错误："]},
+  {"id": "trigger_program", "name": "测试-触发", "save": "trigger.lua"}
 ]

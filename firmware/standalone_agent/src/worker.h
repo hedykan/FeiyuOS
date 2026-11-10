@@ -36,6 +36,8 @@ void begin();
 bool busy();
 // How long the current job has been running (0 when idle).
 uint32_t running_ms();
+// The running job is alive (a program waiting for the user): restarts its stuck clock.
+void keep_alive();
 constexpr uint32_t kStuckJobMs = 180000;
 // Returns the job id, or 0 when another job is running/queued.
 uint32_t submit(const Job& job);

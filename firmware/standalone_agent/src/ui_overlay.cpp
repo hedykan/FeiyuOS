@@ -1,4 +1,5 @@
 #include "ui_canvas.h"
+#include "cjk_font.h"
 #include "arena.h"
 #include "ui_overlay.h"
 
@@ -9,6 +10,9 @@
 
 #include "common.h"
 #include "events.h"
+#include "lua_vm.h"
+#include "registry.h"
+#include "storage.h"
 #include "ui_kit.h"
 
 namespace vat::ui::overlay {
@@ -18,6 +22,8 @@ Overlay current;
 bool is_open = false;
 bool dirty = false;
 int cursor = 0;  // panel choice
+CursorSlide choice_bar;  // the highlight of the panel's choices
+bool choices_dirty = false;  // only the cursor moved: redraw the choice rows
 
 const char* overlay_name(Overlay::Kind kind) {
     switch (kind) {
@@ -30,8 +36,30 @@ const char* overlay_name(Overlay::Kind kind) {
     }
 }
 
+// The choice rows, bottom-up above the footer, each through the strip so the
+// sliding highlight (between two rows while it moves) never flickers.
+void draw_choices(Gfx& g) {
+    const int n = static_cast<int>(current.choices.size());
+    if (!n) return;
+    const int top = kHeight - kLine - n * kLine;
+    const int bar = choice_bar.follow(top + cursor * kLine - 1, n);
+    for (int i = 0; i < n; ++i) {
+        const int y = top + i * kLine;
+        const bool on = i == cursor;
+        band(g, y - 1, kLine, kBg, [&](Gfx& b, int t) {
+            const int offset = bar - (y - 1);
+            if (offset > -kLine && offset < kLine) {
+                b.fillRect(0, t + offset, kWidth, kLine, kSurface);
+                b.fillRect(0, t + offset, 2, kLine, kAccent);
+            }
+            b.setTextColor(on ? kAccent : kText);  // transparent: the bar shows behind the text
+            b.drawString(String(on ? "> " : "  ") + utf8_head(current.choices[i], 90), kPad, t + 1);
+        });
+    }
+}
+
 void draw_panel(Gfx& g) {
-    g.setFont(&fonts::efontCN_12);
+    g.setFont(&cjk::cn12);
     int y = 2;
     if (!current.title.isEmpty()) {
         g.setTextColor(kAccent, kBg);
@@ -49,13 +77,7 @@ void draw_panel(Gfx& g) {
             y += kLine;
         }
     }
-    y = text_bottom + (choice_rows ? 2 : 0);
-    for (int i = 0; i < choice_rows; ++i, y += kLine) {
-        const bool on = i == cursor;
-        if (on) g.fillRect(0, y - 1, kWidth, kLine, kSurface);
-        g.setTextColor(on ? kAccent : kText, on ? kSurface : kBg);
-        g.drawString(String(on ? "> " : "  ") + utf8_head(current.choices[i], 90), kPad, y);
-    }
+    draw_choices(g);
     g.setTextColor(kMuted, kBg);
     g.drawRightString(choice_rows ? "; . 选择  Enter 确定  ` 关闭" : "` 关闭", kWidth - kPad, footer_y);
 }
@@ -78,12 +100,37 @@ textdatum_t datum_of(const String& name) {
     return textdatum_t::top_left;
 }
 
-// Animated canvases draw into an 8-bit frame (32 KB, leased from the arena)
+// Animated canvases draw into an 8-bit frame (32 KB leased from the arena)
 // pushed in one go, so a redraw never shows a blank screen; without the
 // lease they draw straight to the display.
 LGFX_Sprite* frame = nullptr;
 bool frame_refused = false;  // the arena said no for this canvas: draw on screen, do not ask every frame
 uint32_t anim_frame = 0;
+// Canvas variables: live values, the parsed update, and its first error
+// (shown in the corner; the update then stops).
+luavm::Script canvas_script;  // vars + update, while the canvas is open
+String update_error;
+char shown_error[96] = "";  // update_error for the web task (plain bytes, no String)
+
+void drop_vars() {
+    canvas_script.close();
+    update_error = String();
+    shown_error[0] = 0;
+}
+
+void start_vars() {
+    drop_vars();
+    if (current.kind != Overlay::Kind::Canvas || (current.vars_json.isEmpty() && current.update.isEmpty())) return;
+    update_error = canvas_script.open(current.vars_json.isEmpty() ? String("{}") : current.vars_json, current.update);
+    if (!update_error.isEmpty()) strlcpy(shown_error, utf8_head(update_error, 90).c_str(), sizeof(shown_error));
+}
+
+// One frame of the update; t = frame × step.
+void step_vars(long t) {
+    if (!canvas_script.active() || !update_error.isEmpty()) return;
+    update_error = canvas_script.step(t);
+    if (!update_error.isEmpty()) strlcpy(shown_error, utf8_head(update_error, 90).c_str(), sizeof(shown_error));
+}
 unsigned long anim_last = 0;
 
 void drop_frame() {
@@ -145,7 +192,13 @@ void turned_ellipse(lgfx::LGFXBase& g, const Turn& t, int cx, int cy, int rx, in
 void draw_canvas_on(lgfx::LGFXBase& g) {
     using ui_canvas::Kind;
     std::vector<ui_canvas::Op> ops = current.canvas;
-    if (current.frame_ms) ui_canvas::fill_frame(ops, static_cast<long>(anim_frame) * current.step);
+    const long t = static_cast<long>(anim_frame) * current.step;
+    if (canvas_script.active()) {
+        step_vars(t);
+        ui_canvas::fill_vars(ops, [](const String& name, String& value) { return canvas_script.text(name, value); });
+    } else if (current.frame_ms) {
+        ui_canvas::fill_frame(ops, t);
+    }
     g.fillScreen(kBg);
     Turn turn;
     for (const auto& op : ops) {
@@ -213,7 +266,7 @@ void draw_canvas_on(lgfx::LGFXBase& g) {
                 ui_canvas::number(op.args[1], x);
                 ui_canvas::number(op.args[2], y);
                 turn.at(x, y);  // text moves with the turn; the glyphs stay upright
-                g.setFont(&fonts::efontCN_12);
+                g.setFont(&cjk::cn12);
                 g.setTextSize(op.size);
                 g.setTextDatum(datum_of(op.datum));
                 g.setTextColor(c);
@@ -253,6 +306,11 @@ void draw_canvas_on(lgfx::LGFXBase& g) {
             }
         }
     }
+    if (!update_error.isEmpty()) {  // the update stopped: say why on the canvas
+        g.setFont(&cjk::cn12);
+        g.setTextColor(kWarn, kBg);
+        g.drawString(utf8_head(update_error, 36), 2, kHeight - 14);
+    }
 }
 
 // Every canvas is drawn in memory and pushed whole (drawing op by op on the
@@ -280,7 +338,7 @@ void draw_overlay() {
     } else if (current.kind == Overlay::Kind::Text) {
         // Largest size that fits the whole text.  Only fonts already linked
         // for the terminal: another CJK font costs ~450 KB of flash.
-        static const lgfx::IFont* const fonts_by_size[] = {&fonts::efontCN_12, &fonts::efontCN_14, &fonts::efontCN_12};
+        static const lgfx::IFont* const fonts_by_size[] = {&cjk::cn12, &cjk::cn14, &cjk::cn12};
         static const uint8_t scales[] = {2, 1, 1};
         static const int heights[] = {26, 16, 14};
         std::vector<String> lines;
@@ -302,12 +360,12 @@ void draw_overlay() {
             else g.drawString(lines[i], kPad, y);
         }
         g.setTextSize(1);
-        g.setFont(&fonts::efontCN_12);
+        g.setFont(&cjk::cn12);
         g.setTextColor(kMuted, kBg);
         g.drawRightString("任意键返回", kWidth - kPad, kHeight - kLine);
     } else if (current.kind == Overlay::Kind::Qr) {
         const int x = qr_panel(g, current.text);
-        g.setFont(&fonts::efontCN_12);
+        g.setFont(&cjk::cn12);
         g.setTextColor(kText, kBg);
         int y = 4;
         for (const auto& line : wrap_text(g, current.text, kWidth - x - 2)) {
@@ -318,6 +376,9 @@ void draw_overlay() {
         g.setTextColor(kMuted, kBg);
         g.drawString("任意键返回", x, kHeight - kLine);
     } else if (current.kind == Overlay::Kind::Image) {
+        if (current.image.empty() && !current.image_path.isEmpty()) {
+            storage::read_bytes(current.image_path, current.image, 32768);  // drawn again: from the card
+        }
         const auto& b = current.image;
         const auto datum = textdatum_t::middle_center;
         bool ok = false;
@@ -325,7 +386,7 @@ void draw_overlay() {
         else if (b.size() > 3 && b[0] == 0xFF && b[1] == 0xD8) ok = g.drawJpg(b.data(), b.size(), 0, 0, kWidth, kHeight, 0, 0, 0.0f, 0.0f, datum);
         else if (b.size() > 2 && b[0] == 'B' && b[1] == 'M') ok = g.drawBmp(b.data(), b.size(), 0, 0, kWidth, kHeight, 0, 0, 0.0f, 0.0f, datum);
         if (!ok) {
-            g.setFont(&fonts::efontCN_12);
+            g.setFont(&cjk::cn12);
             g.setTextColor(kWarn, kBg);
             g.drawCentreString("图片无法解码", kWidth / 2, kHeight / 2 - 6);
         }
@@ -340,9 +401,13 @@ void draw_overlay() {
 
 bool open() { return is_open; }
 
+uint32_t canvas_frame() { return is_open && current.kind == Overlay::Kind::Canvas ? anim_frame : 0; }
+
+const char* canvas_error() { return shown_error; }
+
 const char* name() { return is_open ? overlay_name(current.kind) : ""; }
 
-void show(Overlay incoming) {
+bool show(Overlay incoming) {
     // A refresh of the panel on screen keeps the cursor.
     const bool same_panel = is_open && current.kind == incoming.kind &&
                             (current.kind == Overlay::Kind::Panel || current.kind == Overlay::Kind::Canvas) &&
@@ -354,15 +419,22 @@ void show(Overlay incoming) {
         frame_refused = false;  // a new canvas asks for memory again
         anim_frame = 0;
         anim_last = millis();
+        start_vars();
     }
     if (current.kind != Overlay::Kind::Canvas || !current.frame_ms) drop_frame();
-    if (!same_panel) cursor = 0;
+    if (!same_panel) {
+        cursor = 0;
+        choice_bar.reset();  // a new panel: the highlight starts in place
+    }
     cursor = std::min<int>(cursor, std::max<int>(0, static_cast<int>(current.choices.size()) - 1));
     is_open = dirty = true;
     set_overlay_kind(current.kind == Overlay::Kind::Panel    ? "panel:" + current.panel
                      : current.kind == Overlay::Kind::Canvas ? "canvas:" + current.panel
                                                              : String(overlay_name(current.kind)));
+    return !same_panel;
 }
+
+void suspend() { drop_frame(); }
 
 bool is_panel() { return is_open && current.kind == Overlay::Kind::Panel; }
 
@@ -390,7 +462,7 @@ bool panel_key(const Keyboard_Class::KeysState& state) {
     } else {
         return false;
     }
-    dirty = true;
+    choices_dirty = true;
     return false;
 }
 
@@ -401,12 +473,24 @@ void draw(bool force) {
         anim_last = millis();
         dirty = true;
     }
-    if (dirty || (force && current.kind != Overlay::Kind::Image)) draw_overlay();
+    if (!dirty && !force && is_open && current.kind == Overlay::Kind::Panel && (choices_dirty || choice_bar.sliding())) {
+        auto& g = M5Cardputer.Display;
+        g.startWrite();
+        draw_choices(g);
+        g.endWrite();
+        choices_dirty = false;
+        return;
+    }
+    if (dirty || force) {
+        choices_dirty = false;
+        draw_overlay();
+    }
 }
 
 void dismiss() {
     arena::give_back("canvas_image");
     drop_frame();
+    drop_vars();
     is_open = false;
     current = Overlay();
     set_overlay_kind("");

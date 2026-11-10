@@ -39,7 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests" / "cases"
 PCM = ROOT / "tests" / "pcm"
-ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"]
+ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12"]
 # quick: a representative case or two per phase (<= 5 min, after every flash);
 # normal: impacted phases (auto) or a named list, run whole;
 # all: release (<= 15 min); full: everything on the device (the old `all`).
@@ -103,11 +103,17 @@ IMPACT = {
     "firmware/standalone_agent/src/ops_ir.": ["s6"],
     "firmware/standalone_agent/src/prog_": ["s10"],
     "firmware/standalone_agent/src/events.": ["s10"],
+    "firmware/standalone_agent/src/console": ["s10"],
+    "firmware/standalone_agent/src/packages/http_package": ["s12"],
+    "firmware/standalone_agent/src/pkg_": ["s10", "s12"],
+    "firmware/standalone_agent/src/packages/pkg_package": ["s10", "s12"],
+    "tools/pkg_index.py": ["s12"],
+    "firmware/standalone_agent/src/net.": ["s8", "s12"],
     "firmware/standalone_agent/src/packages/program_package": ["s10"],
     "firmware/standalone_agent/src/packages/ask_package": ["s10"],
     "tests/programs/": ["s10"],
     "firmware/standalone_agent/src/packages/": ["s6"],
-    "firmware/standalone_agent/src/ui": ["s4"],
+    "firmware/standalone_agent/src/ui": ["s4", "s6", "s10", "s11"],
     "firmware/standalone_agent/src/ui_recorder.": ["s1", "s4"],
     "firmware/standalone_agent/src/worker.": ["s4", "s7"],
     "firmware/standalone_agent/src/storage.": ["s5", "s8", "s9"],
@@ -398,6 +404,15 @@ def validate_expect(expect: dict, record: dict) -> list[str]:
             failures.append("expected a clarification message")
         return failures
     names = [c["name"] for c in calls]
+    if "first_any" in expect:
+        # Several first steps are right (read the help first, or act at once):
+        # the first call's tool and a target prefix, any of them.
+        first = calls[0] if calls else {}
+        target = str(first.get("arguments", {}).get("target", ""))
+        if not any(first.get("name") == option["name"] and target.startswith(option["target"])
+                   for option in expect["first_any"]):
+            failures.append(f"first call: expected one of {expect['first_any']}, got {first.get('name')} {target!r}")
+        return failures
     if names != expect.get("call_names", []):
         failures.append(f"tools: expected {expect.get('call_names')}, got {names}")
         return failures
@@ -838,6 +853,8 @@ def phase_s4(device: Device, report: Report) -> None:
     device.action("page_ssh")
     screen = device.status()["screen"]
     report.add("S4", "ui_ssh_page", screen["page"] == "ssh" and mark in screen["body"], screen["header"])
+    device.action("toggle")  # Btn0: Agent, SSH, program, graphics (when a picture is open)
+    report.add("S4", "ui_toggle_program", device.status()["screen"]["page"] == "program")
     device.action("toggle")
     report.add("S4", "ui_toggle_agent", device.status()["screen"]["page"] == "agent")
     screen = device.status()["screen"]
@@ -1614,8 +1631,8 @@ def program_cases(device: Device, report: Report) -> None:
         if not wanted(cid) or (quick() and cid not in QUICK_PROGRAMS):
             continue
         if case.get("save"):
-            program = json.loads((PROGRAMS / case["save"]).read_text(encoding="utf-8"))
-            saved = tool_call(device, "write", "prog://" + program["name"], program)
+            source = (PROGRAMS / case["save"]).read_text(encoding="utf-8")
+            saved = tool_call(device, "write", "prog://" + case["name"], source)
             text = reply_text(saved)
             if case.get("save_refused"):
                 report.add("S10", f"{cid}_save_refused", "未执行" in text and "确认" in text, text[:160])
@@ -1634,24 +1651,103 @@ def program_cases(device: Device, report: Report) -> None:
         ok = ok and all(part in text for part in case.get("error_or_reply_has", []))
         for needle, count in case.get("count", {}).items():
             ok = ok and text.count(needle) == count
-        if case.get("then_runs_has"):  # queued (wait / ask inside a conversation): watch prog://runs
-            deadline = time.time() + case.get("within_s", 60)
-            runs = ""
-            while ok and time.time() < deadline:
-                time.sleep(1)
-                runs = reply_text(tool_call(device, "read", "prog://runs"))
-                if case["then_runs_has"] in runs:
-                    break
-            ok = ok and case["then_runs_has"] in runs
-            text += " | runs: " + runs
         report.add("S10", cid, ok, text[:200])
+
+
+def card_package_cases(device: Device, report: Report) -> None:
+    """A package on the card (tests/programs/pkg_echo.lua, echo://): found by
+    pkg://scan, off until the user enables it, then serving its target."""
+    if not wanted("card_package"):
+        return
+    path = "/vat/things/lua/测试-回声.lua"
+    device.write_file(path, (PROGRAMS / "pkg_echo.lua").read_text(encoding="utf-8"))
+    try:
+        tool_call(device, "write", "pkg://scan", "")
+        listed = reply_text(tool_call(device, "read", "pkg://list"))
+        line = next((item for item in listed.splitlines() if "测试-回声" in item), "")
+        report.add("S10", "card_package_pending", "[扩展包 echo://]" in line and "待确认" in line, line[:160])
+        text = reply_text(tool_call(device, "read", "echo://你好"))
+        report.add("S10", "card_package_off_until_enabled", "回声：你好" not in text, text[:160])
+        text = reply_text(tool_call(device, "write", "pkg://测试-回声/enable", ""))
+        report.add("S10", "card_package_enable_needs_confirm", "未执行" in text, text[:160])
+        device.text("启用卡上的扩展包 测试-回声")
+        device.resolve_all(approve=True)
+        text = reply_text(tool_call(device, "read", "echo://你好"))
+        report.add("S10", "card_package_read", "回声：你好" in text, text[:160])
+        text = reply_text(tool_call(device, "read", "echo://table"))
+        report.add("S10", "card_package_table_json", '"n":2' in text.replace(" ", ""), text[:160])
+        text = reply_text(tool_call(device, "read", "echo://fail"))
+        report.add("S10", "card_package_error", "ERROR" in text and "故意出错" in text, text[:160])
+        tool_call(device, "write", "pkg://测试-回声/disable", "")
+        text = reply_text(tool_call(device, "read", "echo://你好"))
+        report.add("S10", "card_package_disabled", "回声：你好" not in text, text[:160])
+    finally:
+        device.post("/api/delete", path=path)
+        tool_call(device, "write", "pkg://scan", "")
+
+
+def console_cases(device: Device, report: Report) -> None:
+    """The program page: a foreground run's console, stdin from the call,
+    typed input, ` interrupting, and the page following the run."""
+    if not wanted("console"):
+        return
+    name = "测试-控制台"
+    saved = reply_text(tool_call(device, "write", "prog://" + name,
+                                 (PROGRAMS / "console_io.lua").read_text(encoding="utf-8")))
+    if not report.add("S10", "console_save", "已保存程序" in saved or "已修改程序" in saved, saved[:120]):
+        return
+    text = reply_text(tool_call(device, "exec", "prog://" + name, stdin="飞鱼\n21"))
+    report.add("S10", "console_stdin", all(p in text for p in ("你好 飞鱼", "双倍 42", "这行是错误输出", "交互 true", "读完 true")),
+               text[:200])
+    screen = device.status()["screen"]
+    report.add("S10", "console_page", screen["page"] == "program" and "你好 飞鱼" in screen.get("body", ""),
+               f"{screen['page']} {screen.get('console')}")
+
+    def start(target: str) -> int:
+        device.wait_idle()
+        status, body = device.post("/api/job", kind="call", call=json.dumps(
+            {"tool": "exec", "arguments": {"target": target, "program": "run", "args": [], "confirm_required": False}},
+            ensure_ascii=False))
+        return json.loads(body)["id"] if status == 200 else 0
+
+    def finished(job_id: int, seconds: float = 20) -> dict:
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            record = device.get_json("/api/job", id=job_id)
+            if record.get("status") not in ("queued", "running"):
+                return record
+            time.sleep(0.3)
+        return {}
+
+    # Typed on the device: the program waits for a line, the keys go to it.
+    job = start("prog://" + name)
+    waiting = until(lambda: device.status()["screen"].get("console", {}).get("wait") == "line", 5)
+    device.key("abc")
+    device.key("enter")
+    until(lambda: device.status()["screen"].get("console", {}).get("wait") == "line", 5)
+    device.key("5")
+    device.key("enter")
+    until(lambda: device.status()["screen"].get("console", {}).get("wait") == "line", 5)
+    device.key("enter")  # the third read: an empty line (only the stdin of an exec ends with nil)
+    record = finished(job)
+    report.add("S10", "console_typed", waiting and "你好 abc" in reply_text(record) and "双倍 10" in reply_text(record)
+               and "交互 true" in reply_text(record), reply_text(record)[:200])
+
+    # ` interrupts a running program.
+    tool_call(device, "write", "prog://测试-停不下", "while true do vat.sleep(100) end")
+    job = start("prog://测试-停不下")
+    running = until(lambda: device.status()["screen"].get("console", {}).get("running") is True, 5)
+    device.key("esc")
+    record = finished(job)
+    report.add("S10", "console_interrupt", running and "已中断" in reply_text(record), reply_text(record)[:160])
+    device.action("page_agent")
 
 
 def trigger_cases(device: Device, report: Report) -> None:
     # One-off: fires by itself, runs a program, then disappears from the list.
     if wanted("trigger_once"):
         made = reply_text(tool_call(device, "write", "trigger://new",
-                                {"when": "time://in/8s", "run": {"exec": "prog://测试-灯"}}))
+                                {"when": "time://in/8s", "run": "prog://测试-触发"}))
         tid = re.search(r"#(\d+)", made)
         report.add("S10", "trigger_once_created", "已新建触发" in made and bool(tid), made[:160])
         # Polled (was a fixed 20 s): within the same 20 s it must have fired and left the list.
@@ -1659,9 +1755,9 @@ def trigger_cases(device: Device, report: Report) -> None:
         runs = listed = ""
         fired = gone = False
         while bool(tid):
-            runs = reply_text(tool_call(device, "read", "prog://runs"))
+            runs = reply_text(tool_call(device, "read", "prog://list"))  # its 最近 lines
             listed = reply_text(tool_call(device, "read", "trigger://list"))
-            fired = f"触发 #{tid.group(1)} 完成" in runs
+            fired = "测试-触发 完成" in runs
             gone = f"#{tid.group(1)} " not in listed
             if (fired and gone) or time.time() >= deadline:
                 break
@@ -1671,7 +1767,7 @@ def trigger_cases(device: Device, report: Report) -> None:
     # Daily: pause / resume without confirmation; deleting needs the user.
     if wanted("trigger_daily"):
         made = reply_text(tool_call(device, "write", "trigger://new",
-                                {"when": "time://every/03:33", "run": {"write": "device://local/led", "content": "off"}}))
+                                {"when": "time://every/03:33", "run": "prog://测试-灯"}))
         tid = re.search(r"#(\d+)", made)
         report.add("S10", "trigger_daily_created", "每天 03:33" in made and bool(tid), made[:160])
         if not tid:
@@ -1691,11 +1787,13 @@ def trigger_cases(device: Device, report: Report) -> None:
 
 def program_reads(device: Device, report: Report) -> None:
     listed = reply_text(tool_call(device, "read", "prog://list"))
-    report.add("S10", "list_shows_signatures", "测试-被调(x, y=默认)" in listed and "调用：测试-被调" in listed, listed[:200])
-    outline = reply_text(tool_call(device, "read", "prog://测试-调用"))
-    report.add("S10", "outline", "运行 测试-被调" in outline and "→ r" in outline, outline[:200])
+    report.add("S10", "list_shows_signatures", "测试-被调(x, y=默认)" in listed and "测试-调用" in listed, listed[:200])
+    source = reply_text(tool_call(device, "read", "prog://测试-调用"))
+    report.add("S10", "show_source", "vat.exec(\"prog://测试-被调?x=甲\")" in source, source[:200])
     helped = reply_text(tool_call(device, "read", "prog://help"))
-    report.add("S10", "help_examples", "【例子】" in helped and "trigger://new" in helped, helped[:80])
+    report.add("S10", "help", "@uses" in helped and "vat.after" in helped and "trigger://new" in helped, helped[:80])
+    pkgs = reply_text(tool_call(device, "read", "pkg://list"))
+    report.add("S10", "pkg_list", "测试-灯 [程序] 已启用" in pkgs, pkgs[:160])
     refused = reply_text(tool_call(device, "write", "prog://测试-坏/delete"))
     report.add("S10", "delete_needs_confirm", "未执行" in refused, refused[:160])
 
@@ -1711,9 +1809,10 @@ def program_intents(device: Device, report: Report) -> None:
     if wanted("intent_daily") and not quick():
         device.action("clear_history")
         record = device.text("以后每天凌晨 3 点 44 分把本机的灯关掉")
-        device.resolve_all(approve=True)
+        # Saving a program can ask first: the trigger may come after the approval.
+        records = [record] + device.resolve_all(approve=True)
         calls = [(c.get("name"), c["arguments"].get("target", ""), c["arguments"].get("content", ""))
-                 for c in record.get("calls", [])]
+                 for r in records for c in r.get("calls", [])]
         made = any(t == "trigger://new" and "time://every/03:44" in str(content) for _, t, content in calls)
         report.add("S10", "intent_daily_trigger", made, str(calls)[:200])
         listed = reply_text(tool_call(device, "read", "trigger://list"))
@@ -1725,15 +1824,173 @@ def program_intents(device: Device, report: Report) -> None:
 
 
 def phase_s10(device: Device, report: Report) -> None:
-    """Programs (prog://) and triggers (trigger://): the test programs in
-    tests/programs/ are saved and run through single tool calls, so results do
-    not depend on the model; a few cases then check the agent uses them."""
+    """Lua programs (prog://) and triggers (trigger://): the test programs in
+    tests/programs/*.lua are saved and run through single tool calls, so
+    results do not depend on the model; a few cases then check the agent uses them."""
     device.wait_idle()
     program_cases(device, report)
     program_reads(device, report)
+    card_package_cases(device, report)
+    console_cases(device, report)
     trigger_cases(device, report)
     program_intents(device, report)
     tool_call(device, "write", "device://local/led", "off")
+
+
+def http_fixture(device: Device):
+    """A small HTTP server on this host for S12: /json, /big (20000 bytes),
+    /headers (echoes them), POST /echo (records the body); anything else 404."""
+    import http.server
+    import socket
+    import threading
+    seen: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, code: int, body: str, kind: str = "application/json") -> None:
+            data = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            seen["headers"] = dict(self.headers)
+            if self.path == "/json":
+                self.reply(200, json.dumps({"ok": True, "n": 42}))
+            elif self.path == "/big":
+                self.reply(200, "x" * 20000, "text/plain")
+            elif self.path == "/headers":
+                self.reply(200, json.dumps(dict(self.headers)))
+            elif self.path.startswith("/pkg/") and urllib.parse.unquote(self.path[5:]) in seen.get("files", {}):
+                data = seen["files"][urllib.parse.unquote(self.path[5:])]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self.reply(404, "not here", "text/plain")
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            seen["body"] = self.rfile.read(length).decode("utf-8", "replace")
+            seen["type"] = self.headers.get("Content-Type", "")
+            self.reply(200, json.dumps({"got": seen["body"]}))
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 18765), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.connect((urllib.parse.urlparse(device.base).hostname, 80))
+    address = probe.getsockname()[0]
+    probe.close()
+    return server, f"http://{address}:18765", seen
+
+
+def pkg_install_cases(device: Device, report: Report, base: str, seen: dict) -> None:
+    """pkg://catalog, install, update, rollback against a catalog this host
+    serves (made by tools/pkg_index.py), and a download whose SHA-256 is wrong."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pkg_index", ROOT / "tools" / "pkg_index.py")
+    pkg_index = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pkg_index)
+    files = seen.setdefault("files", {})
+    name = "测试-安装"
+    v1 = '-- @about 安装测试\n-- @version 1\nreturn "安装测试 v1"\n'
+    v2 = '-- @about 安装测试\n-- @version 2\n-- @uses write device://local/led\nreturn "安装测试 v2"\n'
+
+    def publish(source: str, tamper: bool = False) -> None:
+        files[name + ".lua"] = source.encode("utf-8")
+        catalog = pkg_index.build({name + ".lua": files[name + ".lua"]})
+        if tamper:
+            catalog["packages"][0]["sha256"] = "0" * 64
+        files["index.json"] = json.dumps(catalog, ensure_ascii=False).encode("utf-8")
+
+    def run_it() -> str:
+        return reply_text(tool_call(device, "exec", "prog://" + name))
+
+    def approved(sentence: str) -> str:
+        record = device.text(sentence)
+        records = [record] + device.resolve_all(approve=True)
+        return json.dumps(records, ensure_ascii=False)
+
+    catalog_url = base + "/pkg/index.json"
+    try:
+        publish(v1)
+        text = reply_text(tool_call(device, "read", "pkg://catalog?url=" + catalog_url))
+        report.add("S12", "catalog_read", name + " v1" in text and "未安装" in text, text[:200])
+        text = reply_text(tool_call(device, "write", "pkg://install/" + name, ""))
+        report.add("S12", "install_needs_confirm", "未执行" in text, text[:160])
+        if quick():  # the rest takes four model turns
+            return
+        approved(f"安装在线目录里的「{name}」")
+        text = run_it()
+        report.add("S12", "install_runs", "安装测试 v1" in text, text[:160])
+        publish(v2)
+        text = reply_text(tool_call(device, "read", "pkg://catalog?url=" + catalog_url))
+        report.add("S12", "catalog_update_available", "可更新" in text, text[:200])
+        approved(f"把「{name}」更新到在线目录里的新版本")
+        text = run_it()
+        report.add("S12", "update_runs", "安装测试 v2" in text, text[:160])
+        approved(f"把「{name}」退回上一版")
+        text = run_it()
+        report.add("S12", "rollback_runs", "安装测试 v1" in text, text[:160])
+        publish(v2, tamper=True)
+        tool_call(device, "read", "pkg://catalog?url=" + catalog_url)
+        records = approved(f"把「{name}」更新到在线目录里的新版本")
+        text = run_it()
+        report.add("S12", "tampered_refused", "SHA-256 校验失败" in records and "安装测试 v1" in text,
+                   (records[-160:] + " | " + text)[:200])
+    finally:
+        for path in (f"/vat/things/lua/{name}.lua", f"/vat/things/lua/old/{name}.lua"):
+            device.post("/api/delete", path=path)
+        tool_call(device, "write", "pkg://scan", "")
+
+
+def phase_s12(device: Device, report: Report) -> None:
+    """The http package against a server on this host: GET, status errors, the
+    size limit, saving to the card, headers, secrets that only the device takes,
+    writes that need confirmation, and programs that need an @uses per site."""
+    device.wait_idle()
+    server, base, seen = http_fixture(device)
+    try:
+        text = reply_text(tool_call(device, "read", base + "/json"))
+        report.add("S12", "get_json", '"n": 42' in text, text[:160])
+        text = reply_text(tool_call(device, "read", base + "/missing"))
+        report.add("S12", "status_error", "HTTP 404" in text and "not here" in text, text[:160])
+        text = reply_text(tool_call(device, "read", base + "/big", max_bytes=1000))
+        report.add("S12", "too_large", "超过 1000 字节" in text, text[:160])
+        text = reply_text(tool_call(device, "read", base + "/big", save="file:///vat/cache/e2e-http.txt"))
+        report.add("S12", "save_to_card", "已保存 20000 字节" in text, text[:160])
+        text = reply_text(tool_call(device, "read", base + "/headers", headers={"X-Test": "fy-1"}))
+        report.add("S12", "custom_header", seen.get("headers", {}).get("X-Test") == "fy-1", text[:160])
+        text = reply_text(tool_call(device, "read", base + "/json",
+                                    headers={"Authorization": "Bearer {secret:e2e-none}"}))
+        report.add("S12", "secret_needs_device", "未执行" in text and "密" in text, text[:160])
+        text = reply_text(tool_call(device, "read", base + "/json", save="file:///vat/secrets.json"))
+        report.add("S12", "save_refuses_secrets", ("密钥" in text and "不能" in text) or "拒绝访问凭据" in text, text[:160])
+        text = reply_text(tool_call(device, "write", base + "/echo", {"a": 1}))
+        report.add("S12", "post_needs_confirm", "未执行" in text, text[:160])
+        script = 'local v, e = vat.read("%s/json") print(e)' % base
+        text = reply_text(tool_call(device, "write", "lua://run", script))
+        report.add("S12", "program_needs_uses", "@uses read " + base in text, text[:200])
+        if not quick():  # one model turn and an approval
+            seen.pop("body", None)
+            device.text(f'用 POST 把 JSON {{"hello": "fish"}} 发到 {base}/echo')
+            device.resolve_all(approve=True)
+            body = seen.get("body", "")
+            try:
+                ok = json.loads(body) == {"hello": "fish"} and "json" in seen.get("type", "")
+            except ValueError:
+                ok = False
+            report.add("S12", "post_after_approve", ok, body[:160])
+        pkg_install_cases(device, report, base, seen)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def phase_s11(device: Device, report: Report) -> None:
@@ -1782,9 +2039,12 @@ def phase_s11(device: Device, report: Report) -> None:
     text = reply_text(tool_call(device, "write", "ui://panel/e2e坏", json.dumps({"title": "x", "script": "rm"})))
     report.add("S11", "panel_unknown_field_refused", "不认识的字段" in text, text[:60])
 
-    # A choice is an event: a trigger runs a step with {event.choice}.
-    trigger = {"when": "ui://panel/e2e触发", "run": {"write": "memory://notes", "mode": "append",
-                                                    "content": "E2E 面板选了 {event.choice}"}}
+    # A choice is an event: a trigger runs a program, which gets it as input.event.
+    tool_call(device, "write", "prog://e2e面板记录",
+              "-- @about 记下面板的选择\n"
+              "vat.write('memory://notes', 'E2E 面板选了 ' .. input.event.choice, {mode = 'append'})\n"
+              "return input.event.choice")
+    trigger = {"when": "ui://panel/e2e触发", "run": "prog://e2e面板记录"}
     text = reply_text(tool_call(device, "write", "trigger://new", json.dumps(trigger, ensure_ascii=False)))
     trigger_id = re.search(r"#?(\d+)", text)
     report.add("S11", "panel_trigger_saved", "触发" in text and trigger_id is not None, text[:80])
@@ -1803,16 +2063,82 @@ def phase_s11(device: Device, report: Report) -> None:
     report.add("S11", "app_saved", "应用" in text, text[:60])
     text = reply_text(tool_call(device, "read", "ui://apps"))
     report.add("S11", "app_listed", "e2e应用" in text, text[:80])
-    device.key("fn+a")
-    menu = "panel" if until(lambda: device.status()["screen"].get("overlay") == "panel", 2.5) else device.status()["screen"].get("overlay")
+    # Fn+A: the program page lists programs and local apps; Enter opens the app
+    # on the graphics page.
+    page = device.key("fn+a")
+    listed = [line for line in page.get("body", "").split("\n") if line]
+    menu = page.get("page") if "[应用] e2e应用" in listed else f"not listed: {listed[:6]}"
+    for _ in range(listed.index("[应用] e2e应用") if "[应用] e2e应用" in listed else 0):
+        device.key(".")
     device.key("enter")
+    until(lambda: device.status()["screen"].get("overlay") == "panel", 2.5)
     # Kept fixed on purpose: the app reads every 10 s and the case checks it is
     # still open after one refresh; the screen model shows no refresh to wait on.
     time.sleep(13)
     opened = device.status()["screen"].get("overlay")
     device.key("esc")
-    report.add("S11", "apps_menu_fn_a_open", menu == "panel" and opened == "panel", f"{menu} -> {opened}")
+    report.add("S11", "apps_menu_fn_a_open", menu == "program" and opened == "panel", f"{menu} -> {opened}")
     device.post("/api/delete", path="/vat/things/apps/e2e应用.json")
+
+    # v0.6.2 canvas variables: an update without animate runs every 33 ms.
+    def screen() -> dict:
+        return device.status()["screen"]
+    ball = {"vars": {"x": 20, "vx": 6},
+            "update": "x = x + vx  if x > 220 or x < 20 then vx = -vx end",
+            "ops": [["fillScreen", "#101820"], ["fillCircle", "{x}", 67, 8, "cyan"], ["drawString", "{x}", 4, 4]]}
+    text = reply_text(tool_call(device, "write", "ui://canvas/e2e弹球", json.dumps(ball)))
+    up = until(lambda: screen().get("overlay") == "canvas", 2)
+    first = screen().get("canvas_frame", 0)
+    time.sleep(1.0)
+    after = screen()
+    frames = after.get("canvas_frame", 0) - first
+    report.add("S11", "canvas_vars_animate", "ERROR" not in text and up and frames >= 10 and not after.get("canvas_error"),
+               f"{text[:40]} frames/s={frames} error={after.get('canvas_error')!r}")
+    broken = {"vars": {"x": 1}, "update": "x = x + nothing", "ops": [["fillScreen", "red"]]}  # nil arithmetic
+    tool_call(device, "write", "ui://canvas/e2e坏画布", json.dumps(broken))
+    error = until(lambda: screen().get("canvas_error"), 2)
+    report.add("S11", "canvas_update_error_shown", bool(error), repr(error)[:80])
+    device.key("esc")
+    unknown = {"update": "x = = 1", "ops": [["fillScreen", "red"]]}  # refused when saved: a syntax error
+    text = reply_text(tool_call(device, "write", "ui://canvas/e2e坏画布", json.dumps(unknown)))
+    report.add("S11", "canvas_unknown_var_refused", "ERROR" in text and "update" in text, text[:80])
+
+    # v0.6.2 settings package (runs on the UI task) and D9.
+    rows = reply_text(tool_call(device, "read", "settings://"))
+    report.add("S11", "settings_read", "动画：" in rows and "顶栏：" in rows, rows[:120])
+    before_bar = re.search(r"顶栏：(.*)", rows)
+    text = reply_text(tool_call(device, "write", "settings://animation", "减弱"))
+    after = reply_text(tool_call(device, "read", "settings://"))
+    tool_call(device, "write", "settings://animation", "开")
+    report.add("S11", "settings_animation", "已设为" in text and "动画：减弱" in after, text[:60])
+    text = reply_text(tool_call(device, "write", "settings://statusbar", "时间,内存"))
+    report.add("S11", "settings_statusbar", "时间·剩余内存" in text, text[:60])
+    restore = before_bar.group(1).strip() if before_bar else "时间,电量,信号"
+    tool_call(device, "write", "settings://statusbar", "" if restore == "不显示" else restore.replace("·", ","))
+    text = reply_text(tool_call(device, "write", "settings://statusbar", "天气"))
+    report.add("S11", "settings_statusbar_unknown_refused", "ERROR" in text and "没有这些项" in text, text[:60])
+    text = reply_text(tool_call(device, "write", "settings://open/key/deepseek", ""))
+    opened = until(lambda: device.status()["screen"].get("setup"), 2)
+    for _ in range(4):  # form -> keys -> menu -> closed
+        if not device.status()["screen"].get("setup"):
+            break
+        device.key("`")
+    report.add("S11", "settings_open_key_form", "输入框" in text and bool(opened) and not device.status()["screen"].get("setup"),
+               text[:60])
+    text = reply_text(tool_call(device, "write", "settings://open/portal", ""))
+    report.add("S11", "settings_portal_needs_confirm", "未执行" in text and not device.status()["screen"].get("setup"), text[:60])
+    # D9 is now @uses: a program declaring a call that asks is confirmed when
+    # saved (a direct call cannot confirm); one that only reads is not.
+    declared = ("-- @input what battery\n-- @uses exec ssh://开发机\n"
+                "return vat.exec('ssh://开发机', 'touch', {'/tmp/vat-e2e/d9'})")
+    text = reply_text(tool_call(device, "write", "prog://e2e变量", declared))
+    plain = "-- @input what battery\nreturn vat.read('device://local/' .. input.what)"
+    saved = reply_text(tool_call(device, "write", "prog://e2e常量", plain))
+    ran = reply_text(tool_call(device, "exec", "prog://e2e常量"))
+    # Fixed names: later runs overwrite them (deleting asks, which a direct call cannot answer).
+    report.add("S11", "d9_uses_confirmed_at_save",
+               "未执行" in text and ("已保存程序" in saved or "已修改程序" in saved) and "电量" in ran,
+               (text + " | " + saved + " | " + ran)[:160])
     report.add("S11", "heap_after", device.status().get("free_heap", 0) > 60000, str(device.status().get("free_heap")))
 
 
@@ -1906,6 +2232,7 @@ def main() -> int:
             before = device.status()
             expected = device.expected_reboots
             phase_started = time.time()
+            device.action("page_agent")  # each phase starts on the Agent page
             globals()[f"phase_{phase}"](device, report)
             seconds[phase.upper()] = round(time.time() - phase_started)
             after = device.status()
