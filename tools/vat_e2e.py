@@ -727,7 +727,8 @@ def phase_s2_runtime(device: Device, report: Report) -> None:
             failures.append(" / ".join(case["contains_any"]))
         if case.get("requires_discover") and not any(c["name"] == "discover" for c in record.get("calls", [])):
             failures.append("missing discover")
-        report.add("S2", f"runtime:{case['id']}", not failures, "; ".join(failures) or record.get("reply", "")[:120])
+        detail = ("; ".join(failures) + " | reply: " + (record.get("reply") or record.get("error") or "")) if failures else record.get("reply", "")
+        report.add("S2", f"runtime:{case['id']}", not failures, detail[:240])
 
 
 
@@ -1743,6 +1744,63 @@ def console_cases(device: Device, report: Report) -> None:
     device.action("page_agent")
 
 
+def interval_trigger_cases(device: Device, report: Report) -> None:
+    """time://every/<duration>: runs every interval, refuses < 10 s, pauses
+    itself after 5 failures in a row, and trigger://clean removes it."""
+    if not wanted("trigger_every"):
+        return
+
+    def trigger_id(text: str) -> str:
+        match = re.search(r"#(\d+)", text)
+        return match.group(1) if match else ""
+
+    def line_of(tid: str) -> str:
+        listed = reply_text(tool_call(device, "read", "trigger://list"))
+        return next((line for line in listed.splitlines() if line.startswith(f"#{tid} ")), "")
+
+    text = reply_text(tool_call(device, "write", "trigger://new", {"when": "time://every/5s", "run": "prog://测试-灯"}))
+    report.add("S10", "trigger_every_too_short", "至少 10 秒" in text, text[:160])
+
+    made = reply_text(tool_call(device, "write", "trigger://new", {"when": "time://every/10s", "run": "prog://测试-灯"}))
+    tid = trigger_id(made)
+    report.add("S10", "trigger_every_created", "每隔 10s" in made and bool(tid), made[:160])
+    runs = re.compile(r"运行 (\d+) 次")
+    line = ""
+    deadline = time.time() + 40
+    while tid and time.time() < deadline:
+        line = line_of(tid)
+        found = runs.search(line)
+        if found and int(found.group(1)) >= 2:
+            break
+        time.sleep(2)
+    found = runs.search(line)
+    report.add("S10", "trigger_every_runs", bool(found) and int(found.group(1)) >= 2, line[:200])
+    if tid:
+        tool_call(device, "write", f"trigger://{tid}/pause", "")
+
+    # A program that always fails: paused after 5 runs in a row.
+    made = reply_text(tool_call(device, "write", "trigger://new", {"when": "time://every/10s", "run": "prog://测试-坏"}))
+    bad = trigger_id(made)
+    line = ""
+    deadline = time.time() + 90
+    while bad and time.time() < deadline:
+        line = line_of(bad)
+        if "已自动停用" in line:
+            break
+        time.sleep(3)
+    report.add("S10", "trigger_every_auto_pause", "已自动停用" in line and "连续失败 5 次" in line, line[:200])
+
+    text = reply_text(tool_call(device, "write", "trigger://clean", ""))
+    report.add("S10", "trigger_clean_needs_confirm", "未执行" in text, text[:160])
+    device.text("清理一下失效的触发")
+    device.resolve_all(approve=True)
+    gone = bool(bad) and not line_of(bad)
+    report.add("S10", "trigger_clean_removes", gone, line_of(bad)[:160] if bad else "no trigger")
+    if tid:  # the paused interval trigger: deleted (confirmed) so runs do not pile up triggers
+        device.text(f"删除触发 #{tid}")
+        device.resolve_all(approve=True)
+
+
 def trigger_cases(device: Device, report: Report) -> None:
     # One-off: fires by itself, runs a program, then disappears from the list.
     if wanted("trigger_once"):
@@ -1833,6 +1891,7 @@ def phase_s10(device: Device, report: Report) -> None:
     card_package_cases(device, report)
     console_cases(device, report)
     trigger_cases(device, report)
+    interval_trigger_cases(device, report)
     program_intents(device, report)
     tool_call(device, "write", "device://local/led", "off")
 

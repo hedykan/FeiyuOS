@@ -114,6 +114,8 @@ String status_json() {
     cJSON_AddStringToObject(status, "wifi", net::ssid().c_str());
     cJSON_AddStringToObject(status, "ip", net::ip().c_str());
     cJSON_AddNumberToObject(status, "wifi_rssi", net::rssi());
+    cJSON_AddStringToObject(status, "wifi_bssid", net::bssid().c_str());
+    cJSON_AddNumberToObject(status, "wifi_channel", net::channel());
     cJSON_AddNumberToObject(status, "free_heap", ESP.getFreeHeap());
     cJSON_AddNumberToObject(status, "min_free_heap", ESP.getMinFreeHeap());
     cJSON_AddNumberToObject(status, "max_block", ESP.getMaxAllocHeap());

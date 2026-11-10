@@ -360,4 +360,6 @@ void unwatch(const String& target) {
                   watches.end());
 }
 
+long duration_seconds(const String& text) { return parse_duration(text); }
+
 }  // namespace vat::timer

@@ -1,5 +1,7 @@
 #include "net.h"
 
+#include <atomic>
+
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 #include <WiFi.h>
@@ -519,6 +521,55 @@ String ip() {
 
 String ssid() { return WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(); }
 int rssi() { return WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0; }
+
+String bssid() { return WiFi.status() == WL_CONNECTED ? WiFi.BSSIDstr() : String(); }
+
+int channel() { return WiFi.status() == WL_CONNECTED ? WiFi.channel() : 0; }
+
+String link_text() {
+    if (WiFi.status() != WL_CONNECTED) return {};
+    return "bssid=" + WiFi.BSSIDstr() + " ch=" + String(WiFi.channel()) + " rssi=" + String(WiFi.RSSI());
+}
+
+String same_ssid_nodes() {
+    if (WiFi.status() != WL_CONNECTED) return {};
+    const String ssid = WiFi.SSID();
+    const String mine = WiFi.BSSIDstr();
+    const int found = WiFi.scanNetworks(false, false);
+    String out;
+    int listed = 0;
+    for (int i = 0; i < found && listed < 8; ++i) {
+        if (WiFi.SSID(i) != ssid) continue;
+        const String b = WiFi.BSSIDstr(i);
+        out += String(out.isEmpty() ? "" : " ") + b + " ch=" + String(WiFi.channel(i)) + " rssi=" + String(WiFi.RSSI(i)) +
+               (b == mine ? "*" : "");
+        ++listed;
+    }
+    WiFi.scanDelete();
+    return out.isEmpty() ? String("(scan found none)") : out;
+}
+
+namespace {
+std::atomic<uint8_t> link_events{0};    // bit 0: got an address, bit 1: lost the link
+std::atomic<uint8_t> lost_reason{0};
+bool handler_added = false;
+}  // namespace
+
+void report_link_changes() {
+    if (!handler_added) {
+        handler_added = true;
+        WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+            if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) link_events |= 1;
+            if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+                lost_reason = info.wifi_sta_disconnected.reason;
+                link_events |= 2;
+            }
+        });
+    }
+    const uint8_t events = link_events.exchange(0);
+    if (events & 2) runtime_event("wifi_lost", "reason=" + String(lost_reason.load()));
+    if (events & 1) runtime_event("wifi_link", ip() + " " + link_text());
+}
 String ap_name() { return setup_ap_name; }
 
 HttpResult post_json_to_file(const String& url, const String& api_key, const String& body,

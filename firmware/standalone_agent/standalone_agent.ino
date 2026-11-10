@@ -133,7 +133,10 @@ void setup() {
     vat::ui::splash::finish();
     vat::ui::show_ready();
     if (vat::storage::degraded()) vat::ui::set_notice("TF 卡不可用：已用板载备份启动，长上下文暂停", true);
-    vat::runtime_event("ready", vat::net::ip());
+    vat::runtime_event("ready", vat::net::ip() + " " + vat::net::link_text());
+    // Which access points carry this SSID (mesh nodes, a second router): when
+    // the LAN cannot reach the device, compare with the computer's BSSID.
+    vat::runtime_event("wifi_nodes", vat::net::same_ssid_nodes());
     heap_mark("ready");
     vat::runtime_event("boot_heap", heap_steps + " (KB)");
     vat::events::emit("device://boot");
@@ -151,6 +154,7 @@ void loop() {
     }
     M5Cardputer.update();
     vat::web::loop();
+    vat::net::report_link_changes();
     vat::portal::loop();
     vat::storage::tick();
     vat::local::sample_cpu();

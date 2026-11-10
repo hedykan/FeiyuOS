@@ -39,6 +39,10 @@ String triggers_text();
 String add_trigger(const String& content);
 String trigger_action(int id, const String& action, bool approved);  // pause | resume | delete
 String trigger_line(int id);
+// write trigger://clean: removes triggers whose program is gone and those that
+// paused themselves after failing (confirmed).
+String trigger_clean(bool approved);
+String trigger_clean_summary();
 
 // pkg:// (everything on the card: programs and packages)
 String scan();

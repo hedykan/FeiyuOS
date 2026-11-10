@@ -24,4 +24,7 @@ String cancel(const String& which);  // number from the list, "all", or text
 String watch(const String& target, String& normalized);
 void unwatch(const String& target);
 
+// "30s" "5m" "2h" "1d" "半小时" (a bare number is minutes) -> seconds, -1 when not a duration.
+long duration_seconds(const String& text);
+
 }  // namespace vat::timer

@@ -15,6 +15,7 @@
 #include "console.h"
 #include "lua_meta.h"
 #include "lua_vm.h"
+#include "ops_timer.h"
 #include "registry.h"
 #include "storage.h"
 #include "ui_state.h"
@@ -34,16 +35,39 @@ constexpr std::size_t kMaxFiles = 64;
 constexpr std::size_t kMaxTriggers = 32;
 constexpr std::size_t kMaxQueue = 8;
 
+constexpr long kMinInterval = 10;   // seconds: time://every/<duration>
+constexpr int kFailuresToPause = 5;  // in a row: the trigger pauses itself
+
 struct Trigger {
     int id = 0;
     String when;
     String run;  // "prog://名字?参数"
     bool paused = false;
     bool armed = false;
+    String paused_why;  // "" or why it paused itself (kept in triggers.json)
+    // Since boot, not saved (an interval trigger runs every few seconds):
+    uint32_t next_ms = 0;  // interval: when it is due
+    time_t last_run = 0;
+    bool last_ok = true;
+    String last_note;      // the result's or error's first line
+    int runs = 0;
+    int failures = 0;      // in a row
+    int skipped = 0;       // ticks skipped because the device was busy
+    bool queued = false;   // a run is waiting or running
 };
+
+// time://every/30s (an interval: seconds), 0 for the other events, -1 when
+// it looks like an interval but is not one ("every/5x").
+long interval_of(const String& when) {
+    if (!when.startsWith("time://every/")) return 0;
+    const String value = when.substring(strlen("time://every/"));
+    if (value.indexOf(':') >= 0) return 0;  // every/07:00: a daily time
+    return timer::duration_seconds(value);
+}
 
 struct Item {  // a queued run
     String label;
+    int trigger = 0;  // the trigger that queued it (0: none)
     String program;
     String query;
     String data;  // event data (JSON), "" when none
@@ -133,6 +157,7 @@ String describe_when(const String& when) {
     const int slash = when.indexOf('/', 7);
     const String kind = when.startsWith("time://") && slash > 0 ? when.substring(7, slash) : String();
     const String value = slash > 0 ? when.substring(slash + 1) : String();
+    if (kind == "every" && value.indexOf(':') < 0) return "每隔 " + value;
     if (kind == "every") return "每天 " + value;
     if (kind == "weekday") return "工作日 " + value;
     if (kind == "weekend") return "周末 " + value;
@@ -399,6 +424,7 @@ void save_triggers() {  // caller holds `lock`
         cJSON_AddStringToObject(item, "when", t.when.c_str());
         cJSON_AddStringToObject(item, "run", t.run.c_str());
         cJSON_AddBoolToObject(item, "paused", t.paused);
+        if (!t.paused_why.isEmpty()) cJSON_AddStringToObject(item, "paused_why", t.paused_why.c_str());
         cJSON_AddItemToArray(list, item);
     }
     write_json(kTriggers, list);
@@ -414,6 +440,7 @@ void read_triggers() {  // caller holds `lock`
         t.when = json_str(item, "when");
         t.run = json_str(item, "run");
         t.paused = json_bool(item, "paused", false);
+        t.paused_why = json_str(item, "paused_why");
         if (t.id > 0 && !t.when.isEmpty() && t.run.startsWith("prog://")) triggers.push_back(t);
     }
     cJSON_Delete(list);
@@ -470,6 +497,12 @@ void arm_triggers() {
                 ++it;
                 continue;
             }
+            if (interval_of(it->when) > 0) {  // ours: due one interval from now
+                it->armed = true;
+                it->next_ms = millis() + interval_of(it->when) * 1000UL;
+                ++it;
+                continue;
+            }
             String normalized;
             const String err = registry::watch(it->when, normalized);
             if (err.isEmpty()) {
@@ -488,13 +521,17 @@ void arm_triggers() {
     for (const auto& m : missed) note_recent(m);
 }
 
-void enqueue(const Item& item) {
+bool enqueue(const Item& item) {
     std::lock_guard<std::mutex> guard(lock);
     if (queue.size() >= kMaxQueue) {
         runtime_event("prog_queue_full", item.label);
-        return;
+        for (auto& t : triggers) {
+            if (t.id == item.trigger) t.queued = false;  // dropped: the next tick may queue it again
+        }
+        return false;
     }
     queue.push_back(item);
+    return true;
 }
 
 // "prog://名字?参数" -> name, query
@@ -508,12 +545,44 @@ void split_run(const String& run, String& name, String& query) {
 String item_json(const Item& item) {
     cJSON* o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "label", item.label.c_str());
+    cJSON_AddNumberToObject(o, "trigger", item.trigger);
     cJSON_AddStringToObject(o, "program", item.program.c_str());
     cJSON_AddStringToObject(o, "query", item.query.c_str());
     cJSON_AddStringToObject(o, "data", item.data.c_str());
     const String out = json_print(o);
     cJSON_Delete(o);
     return out;
+}
+
+// A trigger's run ended: its status; kFailuresToPause failures in a row pause it.
+void trigger_done(int id, bool ok, const String& note) {
+    String paused;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        for (auto& t : triggers) {
+            if (t.id != id) continue;
+            t.queued = false;
+            t.last_run = time(nullptr);
+            t.last_ok = ok;
+            String line = note;
+            const int nl = line.indexOf('\n');
+            if (nl >= 0) line = line.substring(0, nl);
+            t.last_note = utf8_head(line, 80);
+            ++t.runs;
+            t.failures = ok ? 0 : t.failures + 1;
+            if (t.failures >= kFailuresToPause && !t.paused) {
+                t.paused = true;
+                t.armed = false;
+                t.paused_why = "连续失败 " + String(t.failures) + " 次：" + t.last_note;
+                paused = "触发 #" + String(id) + " 连续失败 " + String(t.failures) + " 次，已自动停用";
+                save_triggers();
+            }
+        }
+    }
+    if (!paused.isEmpty()) {
+        note_recent(paused);
+        ui::set_notice(paused, true);
+    }
 }
 
 // One queued run, on the worker task.
@@ -523,6 +592,7 @@ void job(uint32_t job_id, const String& text) {
     const String program = json_str(o, "program");
     const String query = json_str(o, "query");
     const String data = json_str(o, "data");
+    const int trigger = json_int(o, "trigger", 0);
     cJSON_Delete(o);
     ui::set_busy("RUN 程序");
     ui::entry_begin("[程序] " + label);
@@ -531,6 +601,7 @@ void job(uint32_t job_id, const String& text) {
     ui::entry_finish(r.ok ? ui::Status::Done : ui::Status::Failed, summary, r.output, "[]");
     worker::set_result(job_id, r.ok ? r.result : String(), r.ok ? String() : r.error);
     ui::set_idle();
+    if (trigger) trigger_done(trigger, r.ok, summary);
 }
 
 String run_text(const String& name, const Outcome& r) {
@@ -578,8 +649,10 @@ void loop() {
                 }
                 Item item;
                 item.label = "触发 #" + String(it->id);
+                item.trigger = it->id;
                 split_run(it->run, item.program, item.query);
                 item.data = event.second;
+                it->queued = true;
                 due.push_back(item);
                 if (one_off(it->when)) {
                     it = triggers.erase(it);
@@ -589,6 +662,33 @@ void loop() {
                 }
             }
             if (changed) save_triggers();
+        }
+        for (const auto& item : due) enqueue(item);
+    }
+
+    // Interval triggers: due now, unless the last run is still queued or the
+    // device is busy, in which case this tick is skipped (runs never pile up).
+    {
+        std::vector<Item> due;
+        const bool busy = worker::busy() || agent::active();
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            const uint32_t now = millis();
+            for (auto& t : triggers) {
+                const long every = interval_of(t.when);
+                if (every <= 0 || t.paused || !t.armed || static_cast<int32_t>(now - t.next_ms) < 0) continue;
+                t.next_ms = now + every * 1000UL;
+                if (t.queued || busy) {
+                    ++t.skipped;
+                    continue;
+                }
+                Item item;
+                item.label = "触发 #" + String(t.id);
+                item.trigger = t.id;
+                split_run(t.run, item.program, item.query);
+                t.queued = true;
+                due.push_back(item);
+            }
         }
         for (const auto& item : due) enqueue(item);
     }
@@ -767,9 +867,17 @@ String trigger_line(int id) {
         if (t.id != id) continue;
         String name, query;
         split_run(t.run, name, query);
-        return "#" + String(t.id) + " " + describe_when(t.when) + " → 运行 " + name +
-               (query.isEmpty() ? String() : "（" + url_decode(query) + "）") +
-               (t.paused ? "（已停用）" : t.armed ? "" : "（等待对时）");
+        String line = "#" + String(t.id) + " " + describe_when(t.when) + " → 运行 " + name +
+                      (query.isEmpty() ? String() : "（" + url_decode(query) + "）") +
+                      (t.paused ? (t.paused_why.isEmpty() ? String("（已停用）") : "（已自动停用：" + t.paused_why + "）")
+                                : t.armed ? String() : String("（等待对时）"));
+        if (t.runs) {
+            line += "；开机以来运行 " + String(t.runs) + " 次，上次 " + clock_text(t.last_run, "%H:%M:%S") +
+                    (t.last_ok ? " 成功" : " 失败：" + t.last_note);
+            if (t.failures) line += "，连续失败 " + String(t.failures) + " 次";
+        }
+        if (t.skipped) line += "；忙时跳过 " + String(t.skipped) + " 次";
+        return line;
     }
     return "";
 }
@@ -807,12 +915,17 @@ String add_trigger(const String& content) {
         if (err.isEmpty() && triggers.size() >= kMaxTriggers) err = "触发已达上限 " + String(kMaxTriggers) + " 个";
     }
     String normalized;
-    if (err.isEmpty()) err = registry::watch(when, normalized);
+    const long every = interval_of(when);
+    if (err.isEmpty() && every < 0) err = "时间间隔写成 time://every/30s、every/5m、every/2h（每天某时刻写 every/07:00）";
+    else if (err.isEmpty() && every > 0 && every < kMinInterval) err = "间隔至少 " + String(kMinInterval) + " 秒";
+    else if (err.isEmpty() && every > 0) normalized = when;
+    else if (err.isEmpty()) err = registry::watch(when, normalized);
     if (!err.isEmpty()) return "ERROR: " + err;
     Trigger trig;
     trig.when = normalized;
     trig.run = run;
     trig.armed = true;
+    if (every > 0) trig.next_ms = millis() + every * 1000UL;
     {
         std::lock_guard<std::mutex> guard(lock);
         int id = 1;
@@ -841,6 +954,8 @@ String trigger_action(int id, const String& action, bool approved) {
             found->armed = false;
         } else if (action == "resume") {
             found->paused = false;
+            found->paused_why = String();
+            found->failures = 0;
             found->armed = false;  // armed again below
         } else if (action == "delete") {
             if (!approved) return "ERROR: 删除触发需要用户确认";
@@ -851,10 +966,73 @@ String trigger_action(int id, const String& action, bool approved) {
         }
         save_triggers();
     }
-    if (action != "resume" && !shared) registry::unwatch(when);
+    if (action != "resume" && !shared && interval_of(when) == 0) registry::unwatch(when);
     if (action == "resume") arm_triggers();
     if (action == "delete") return "已删除触发 #" + String(id);
     return trigger_line(id);
+}
+
+// What clean() would remove: triggers whose program is gone, and those that
+// paused themselves after failing.  "" when there is nothing.
+String clean_plan(std::vector<int>* ids) {
+    std::vector<std::pair<int, String>> list;  // id, run
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        for (const auto& t : triggers) {
+            if (!t.paused_why.isEmpty()) list.push_back({t.id, String()});
+            else list.push_back({t.id, t.run});
+        }
+    }
+    String out;
+    for (const auto& item : list) {
+        String why;
+        if (item.second.isEmpty()) {
+            why = "失败后已自动停用";
+        } else {
+            String name, query;
+            split_run(item.second, name, query);
+            Entry e;
+            if (!load_entry(name, e)) why = "程序「" + name + "」已经不在了";
+        }
+        if (why.isEmpty()) continue;
+        if (ids) ids->push_back(item.first);
+        out += String(out.isEmpty() ? "" : "；") + "#" + String(item.first) + "（" + why + "）";
+    }
+    return out;
+}
+
+String trigger_clean_summary() {
+    const String plan = clean_plan(nullptr);
+    return plan.isEmpty() ? String("清理触发：没有要清理的") : "清理触发，删除 " + plan;
+}
+
+String trigger_clean(bool approved) {
+    std::vector<int> ids;
+    const String plan = clean_plan(&ids);
+    if (ids.empty()) return "没有要清理的触发（程序都在，也没有失败后自动停用的）";
+    if (!approved) return "ERROR: 清理触发需要用户确认";
+    std::vector<String> whens;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        for (const int id : ids) {
+            for (auto it = triggers.begin(); it != triggers.end(); ++it) {
+                if (it->id != id) continue;
+                whens.push_back(it->when);
+                triggers.erase(it);
+                break;
+            }
+        }
+        save_triggers();
+    }
+    for (const auto& when : whens) {
+        bool shared = false;
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            for (const auto& t : triggers) shared = shared || t.when == when;
+        }
+        if (!shared && interval_of(when) == 0) registry::unwatch(when);
+    }
+    return "已清理 " + String(static_cast<int>(ids.size())) + " 个触发：" + plan;
 }
 
 // ---------------------------------------------------------------- pkg://

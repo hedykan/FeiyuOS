@@ -47,6 +47,7 @@ public:
         out.push_back({"time://at/18:30", "某个时刻一次（也可 2026-11-08 09:00）"});
         out.push_back({"time://in/10m", "多久以后一次"});
         out.push_back({"time://every/07:00", "每天这个时刻"});
+        out.push_back({"time://every/30s", "每隔多久一次（30s、5m、2h；至少 10 秒；忙时跳过这一轮）"});
         out.push_back({"time://weekday/09:00", "工作日这个时刻"});
         out.push_back({"time://weekend/10:00", "周末这个时刻"});
     }

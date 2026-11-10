@@ -32,6 +32,17 @@ String ip();
 String ssid();
 int rssi();
 String ap_name();
+// The access point the station is on: "bssid=aa:bb:cc:dd:ee:ff ch=2 rssi=-40"
+// ("" when not connected).  Several routers or mesh nodes may share the SSID.
+String link_text();
+String bssid();
+int channel();
+// Every access point with the station's SSID (a blocking scan, ~2 s):
+// "aa:bb:cc:dd:ee:ff ch=2 rssi=-40*" (* = the one in use), space separated.
+String same_ssid_nodes();
+// Main loop: logs the station's link changes (wifi_link / wifi_lost) noted by
+// the Wi-Fi event handler, which runs on a small task and must not write the card.
+void report_link_changes();
 
 struct HttpResult {
     int status = 0;

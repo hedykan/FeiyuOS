@@ -8,6 +8,7 @@
 //   read  trigger://list
 //   write trigger://new          content: {"when": "...", "run": "prog://名字?参数"}
 //   write trigger://编号/pause | /resume | /delete
+//   write trigger://clean        (confirmed) triggers of deleted programs / paused after failing
 #include "../common.h"
 #include "../events.h"
 #include "../prog_runtime.h"
@@ -24,9 +25,9 @@ constexpr char kUsage[] =
     "为空）。写或改程序前先 read prog://help 看写法（vat.read、vat.write、vat.exec 调用各项能力，需要确认的能力在开头用 "
     "-- @uses 声明，保存时由用户确认一次），并 read prog://list 看已有的，能复用就调用。用户问有哪些程序、哪些可以清理或删掉时，"
     "先 read prog://list（每个程序的说明、最近运行、被哪些触发使用），据此建议，删除仍要用户确认。新建触发 write "
-    "target=trigger://new，content 为 JSON，含 when 与 run：when 是事件，如 time://every/07:00（每天）、"
+    "target=trigger://new，content 为 JSON，含 when 与 run：when 是事件，如 time://every/07:00（每天）、time://every/30s（每隔多久，至少 10 秒，设备忙时跳过这一轮）、"
     "time://weekday/09:00、time://at/18:30（一次）、time://in/10m（一次）、device://boot（开机），不要用 cron；run 是 "
-    "prog://程序名?参数。只做一件事也写成一两行的程序再建触发。查看 read trigger://list；停用 write trigger://编号/pause；"
+    "prog://程序名?参数。只做一件事也写成一两行的程序再建触发。查看 read trigger://list；停用 write trigger://编号/pause；清理失效的触发 write trigger://clean；"
     "删除 write prog://名字/delete 或 trigger://编号/delete（用户要删时直接调用，设备会弹出确认，不要先用文字反问）。";
 
 // read prog://help: the whole language (read on demand, costs nothing in the prompt).
@@ -157,6 +158,7 @@ public:
         String path, query;
         if (target.startsWith("trigger://")) {
             split(target, strlen("trigger://"), path, query);
+            if (path == "clean") return false;
             return !path.endsWith("/delete");  // new / pause / resume: a trigger only runs confirmed programs
         }
         split(target, strlen("prog://"), path, query);
@@ -171,6 +173,7 @@ public:
         if (target.startsWith("trigger://")) {
             split(target, strlen("trigger://"), path, query);
             if (path.endsWith("/delete")) return "删除触发 " + programs::trigger_line(path.toInt());
+            if (path == "clean") return programs::trigger_clean_summary();
             return {};
         }
         split(target, strlen("prog://"), path, query);
@@ -186,6 +189,7 @@ public:
             split(target, strlen("trigger://"), path, query);
             if (tool == "read" || path.isEmpty() || path == "list") return programs::triggers_text();
             if (path == "new") return programs::add_trigger(content);
+            if (path == "clean") return programs::trigger_clean(approved);
             const int slash = path.indexOf('/');
             if (slash < 0) return "ERROR: 用 trigger://编号/pause、/resume 或 /delete";
             return programs::trigger_action(path.substring(0, slash).toInt(), path.substring(slash + 1), approved);
