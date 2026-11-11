@@ -14,7 +14,7 @@ String tool_read(const cJSON* arguments);
 String tool_write(const cJSON* arguments);
 String resources_json();
 void probe_hardware();  // once at boot, after M5Cardputer.begin()
-String status_json();
+String status_json(bool for_model = false);  // for_model: without the IP and BSSID
 // Main loop: idle share of each core over the last 10 s window (FreeRTOS run-time stats).
 void sample_cpu();
 String clipboard();

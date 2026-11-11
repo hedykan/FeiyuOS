@@ -1,3 +1,4 @@
+#include <new>
 #include "registry.h"
 
 #include <algorithm>
@@ -187,6 +188,7 @@ String discover_resources(const String& query, int limit) {
     int remaining = limit;
     const auto query_terms = terms(query);
     std::vector<std::pair<int, Package*>> ranked;
+    for (auto* package : installed) package->find(query_terms, list, remaining);  // what the query names, first
     for (auto* package : installed) ranked.push_back({match_score(*package, query_terms), package});
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](const auto& a, const auto& b) { return a.first > b.first; });
@@ -485,11 +487,49 @@ bool read_stream(const String& target, String& out, uint32_t wait_ms) {
     }
 }
 
+namespace {
+cJSON* offered = nullptr;
+String offered_text;
+int wanted = 0;
+}  // namespace
+
+bool data_wanted() { return wanted > 0; }
+
+void want_data(bool on) { wanted += on ? 1 : -1; }
+
+void offer_data(cJSON* data, const String& text) {
+    cJSON_Delete(offered);
+    if (wanted <= 0) {  // nobody will take it
+        cJSON_Delete(data);
+        offered = nullptr;
+        offered_text = String();
+        return;
+    }
+    offered = data;
+    offered_text = text;
+}
+
+cJSON* take_data(String* text) {
+    cJSON* data = offered;
+    offered = nullptr;
+    if (text) *text = offered_text;
+    offered_text = String();
+    return data;
+}
+
 String execute(const String& tool, const cJSON* arguments, bool approved, const String& secret) {
+    cJSON_Delete(take_data());  // an offer nobody took belongs to an earlier call
     for (auto* package : installed) {
         if (!package->supports(tool, arguments)) continue;
-        return secret.isEmpty() ? package->execute(tool, arguments, approved)
-                                : package->execute_secret(tool, arguments, approved, secret);
+        // A package that runs out of memory (a container that cannot grow) must not
+        // take the device down: the call fails and says so.
+        try {
+            return secret.isEmpty() ? package->execute(tool, arguments, approved)
+                                    : package->execute_secret(tool, arguments, approved, secret);
+        } catch (const std::bad_alloc&) {
+            runtime_event("low_memory", tool + " " + utf8_head(json_str(arguments, "target"), 60));
+            return "ERROR: 设备内存不足，这一步没有做成；换个更小的请求，或稍后再试";
+        }
     }
     // No package owns it: say so instead of guessing.
     String what = json_str(arguments, "target");

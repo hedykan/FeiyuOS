@@ -798,6 +798,8 @@ String list_dir(const String& path) {
         json += String(static_cast<unsigned long>(entry.size()));
         json += ",\"dir\":";
         json += entry.isDirectory() ? "true" : "false";
+        json += ",\"mtime\":";  // seconds since 1970 (0 when the clock was not set)
+        json += String(static_cast<unsigned long>(entry.getLastWrite()));
         json += "}";
         entry.close();
         entry = root.openNextFile();

@@ -75,9 +75,15 @@ String load() {
         if (cJSON* agent = json_obj(config, "agent")) {
             next.agent_url = json_str(agent, "url", next.agent_url);
             next.agent_model = json_str(agent, "model", next.agent_model);
-            next.agent_round_timeout_ms = json_int(agent, "timeout_ms", next.agent_round_timeout_ms);
+            // 25 s and 60 s were the defaults up to 0.7.1 and are in every saved
+            // configuration that copied the example; they are too short for a round
+            // that writes a program, so those two values mean "the default".
+            const uint32_t round_ms = json_int(agent, "timeout_ms", next.agent_round_timeout_ms);
+            if (round_ms != 25000) next.agent_round_timeout_ms = round_ms;
+            next.agent_max_tokens = constrain(json_int(agent, "max_tokens", next.agent_max_tokens), 256, 8000);
             next.agent_persona = sanitize_persona(json_str(agent, "persona", next.agent_persona));
-            next.agent_total_timeout_ms = json_int(agent, "total_timeout_ms", next.agent_total_timeout_ms);
+            const uint32_t total_ms = json_int(agent, "total_timeout_ms", next.agent_total_timeout_ms);
+            if (total_ms != 60000) next.agent_total_timeout_ms = total_ms;
         }
         if (cJSON* ui = json_obj(config, "ui")) {
             next.brightness = constrain(json_int(ui, "brightness", next.brightness), 8, 255);

@@ -1881,6 +1881,67 @@ def program_intents(device: Device, report: Report) -> None:
             device.resolve_all(approve=True)
 
 
+def v072_cases(device: Device, report: Report) -> None:
+    """0.7.2: patch writes, reading part of a program, a run shown in sections, calls that return
+    tables, and the three streams (debug://).  Single tool calls: nothing depends on the model."""
+    if not wanted("v072"):
+        return
+    name = "测试-补丁"
+    tool_call(device, "write", "prog://" + name, "local n = 1\nprint('数字 ' .. n)\nreturn n\n")
+    text = reply_text(tool_call(device, "write", f"prog://{name}/patch", "<<<<\nlocal n = 1\n====\nlocal n = 42\n>>>>"))
+    report.add("S10", "v072_patch", "已改 1 处" in text, text[:160])
+    text = reply_text(tool_call(device, "exec", "prog://" + name))
+    report.add("S10", "v072_run_sections", all(x in text for x in ("【结果】42", "【输出】", "数字 42", "运行 #")), text[:200])
+    text = reply_text(tool_call(device, "write", f"prog://{name}/patch", "<<<<\nlocal n = 7\n====\nlocal n = 8\n>>>>"))
+    report.add("S10", "v072_patch_not_found", "没找到" in text and "没有改动" in text, text[:160])
+    text = reply_text(tool_call(device, "write", f"prog://{name}/patch", "<<<<\nn\n====\nm\n>>>>"))
+    report.add("S10", "v072_patch_ambiguous", "出现" in text and "次" in text, text[:160])
+    text = reply_text(tool_call(device, "read", f"prog://{name}?grep=LOCAL"))
+    report.add("S10", "v072_read_grep", "1: local n = 42" in text, text[:160])
+    text = reply_text(tool_call(device, "read", f"prog://{name}?lines=2-2"))
+    report.add("S10", "v072_read_lines", "print('数字 ' .. n)" in text and "local n" not in text, text[:160])
+
+    tables = "测试-返回表"
+    tool_call(device, "write", "prog://" + tables,
+              'local b = vat.read("device://local/battery")\n'
+              'local led = vat.write("device://local/led", "蓝")\n'
+              'local r = vat.exec("prog://测试-补丁")\n'
+              'vat.log("记一笔")\n'
+              'print(type(b.percent), type(b.usb), led.color, r.ok, r.result, tostring(b):sub(1, 6), "接" .. r)\n'
+              'print({a = 1})\n'
+              'return vat.now().ms > 0\n')
+    text = reply_text(tool_call(device, "exec", "prog://" + tables))
+    report.add("S10", "v072_tables", "number\tboolean\t蓝\ttrue\t42\t电量\t接42" in text, text[:260])
+    report.add("S10", "v072_print_table_json", '{"a":1}' in text, text[:260])
+    report.add("S10", "v072_log_is_stderr", "【错误输出】" in text and "记一笔" in text.split("【错误输出】")[-1] and "[+" in text,
+               text[-160:])
+    run_id = re.search(r"运行 #(\d+)", text)
+    text = reply_text(tool_call(device, "read", f"debug://stdout?prog={tables}&n=1"))
+    report.add("S10", "v072_debug_stdout", tables in text and "结果=成功" in text and "number" in text, text[:200])
+    text = reply_text(tool_call(device, "read", f"debug://stderr?prog={tables}&n=1"))
+    report.add("S10", "v072_debug_stderr", "记一笔" in text, text[:200])
+    if report.add("S10", "v072_run_has_number", bool(run_id), text[:80]):
+        text = reply_text(tool_call(device, "read", "debug://run/" + run_id.group(1)))
+        report.add("S10", "v072_debug_run", all(x in text for x in ("【输入】", "【输出】", "【错误输出】", "记一笔")), text[:200])
+
+    bad = "测试-坏行"
+    tool_call(device, "write", "prog://" + bad, "local t = nil\nprint('开始')\nreturn t.x\n")
+    text = reply_text(tool_call(device, "exec", "prog://" + bad))
+    report.add("S10", "v072_error_line", "【出错的行】第 3 行：return t.x" in text and "开始" in text, text[:260])
+    text = reply_text(tool_call(device, "read", f"debug://stderr?prog={bad}&failed=1"))
+    report.add("S10", "v072_debug_failed", "结果=失败" in text and "attempt to index" in text, text[:200])
+
+    reads = "测试-读入"
+    tool_call(device, "write", "prog://" + reads, "print('读到 ' .. tostring(io.read()))\n")
+    text = reply_text(tool_call(device, "exec", "prog://" + reads, args=["你好"]))
+    report.add("S10", "v072_args_are_input", "读到 你好" in text, text[:160])
+    text = reply_text(tool_call(device, "read", f"debug://stdin?prog={reads}&n=1"))
+    report.add("S10", "v072_debug_stdin", "你好" in text, text[:160])
+
+    text = reply_text(tool_call(device, "read", "device://local/status"))
+    report.add("S10", "v072_status_for_model", "free_heap" in text and "wifi_bssid" not in text and '"ip"' not in text, text[:120])
+
+
 def phase_s10(device: Device, report: Report) -> None:
     """Lua programs (prog://) and triggers (trigger://): the test programs in
     tests/programs/*.lua are saved and run through single tool calls, so
@@ -1888,6 +1949,7 @@ def phase_s10(device: Device, report: Report) -> None:
     device.wait_idle()
     program_cases(device, report)
     program_reads(device, report)
+    v072_cases(device, report)
     card_package_cases(device, report)
     console_cases(device, report)
     trigger_cases(device, report)
@@ -2124,9 +2186,16 @@ def phase_s11(device: Device, report: Report) -> None:
     report.add("S11", "app_listed", "e2e应用" in text, text[:80])
     # Fn+A: the program page lists programs and local apps; Enter opens the app
     # on the graphics page.
-    page = device.key("fn+a")
-    listed = [line for line in page.get("body", "").split("\n") if line]
+    device.key("fn+a")
+
+    def menu_rows():
+        return [line for line in device.status()["screen"].get("body", "").split("\n") if line]
+    until(lambda: "[应用] e2e应用" in menu_rows(), 4)  # drawn from the cache first, refreshed on the next pass
+    page = device.status()["screen"]
+    listed = menu_rows()
     menu = page.get("page") if "[应用] e2e应用" in listed else f"not listed: {listed[:6]}"
+    for _ in range(len(listed) + 2):  # the cursor stays where the page was left: up to the top first
+        device.key(";")
     for _ in range(listed.index("[应用] e2e应用") if "[应用] e2e应用" in listed else 0):
         device.key(".")
     device.key("enter")
@@ -2138,6 +2207,25 @@ def phase_s11(device: Device, report: Report) -> None:
     device.key("esc")
     report.add("S11", "apps_menu_fn_a_open", menu == "program" and opened == "panel", f"{menu} -> {opened}")
     device.post("/api/delete", path="/vat/things/apps/e2e应用.json")
+
+    # The program page: newest first, Del then Y deletes the selected item.
+    tool_call(device, "write", "prog://测试-可删", "return 1")
+    device.key("fn+a")
+    def program_rows():
+        return [line for line in device.status()["screen"].get("body", "").split("\n") if line]
+    until(lambda: program_rows()[:1] == ["[程序] 测试-可删"], 4)  # drawn from the cache first, refreshed on the next pass
+    listed = program_rows()
+    report.add("S11", "program_list_newest_first", bool(listed) and listed[0] == "[程序] 测试-可删", str(listed[:3]))
+    if "[程序] 测试-可删" in listed:
+        for _ in range(len(listed) + 2):  # the cursor stays where the page was left: up to the top first
+            device.key(";")
+        for _ in range(listed.index("[程序] 测试-可删")):
+            device.key(".")
+        device.key("del")
+        device.key("y")
+    remaining = reply_text(tool_call(device, "read", "prog://list"))
+    report.add("S11", "program_page_delete", "测试-可删" not in remaining, remaining[:120])
+    device.action("page_agent")
 
     # v0.6.2 canvas variables: an update without animate runs every 33 ms.
     def screen() -> dict:

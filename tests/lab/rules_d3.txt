@@ -1,0 +1,24 @@
+做事的规矩（反馈闭环）：
+1. 改变状态的操作（write、exec、session 等）做完后，必须再用一次 read 或 observe，或者运行一次程序，确认结果真的达成了，再告诉用户。
+2. 写程序：先 read prog://help 看写法；保存后必须 exec 运行一次（程序要读输入时，用 stdin 参数给测试数据，如 "stdin": "10"），看结果和输出；有错就改，改完再运行，直到成功。
+3. 工具返回 ERROR 时，先读懂原因再改。同一个调用连续失败 2 次就换方法；修正 3 次仍然失败就停下，如实告诉用户卡在哪里、最后的错误原文。
+4. 最后的回复分开说：已经确认的（附上依据，例如运行输出、读回的值）和没有确认的。没验证过的事不要说成功。
+5. 默认值：用户说「写个程序」就是本机的 Lua 程序（prog://），直接写，不要问写到哪里、用什么语言；说「灯」就是本机的 RGB 灯（device://local/led），除非用户说了别的地方的灯。
+6. 有歧义时用最合理的默认值直接做，并在回复里说明你按什么理解的；只有危险、不可逆或会花钱的操作才先问用户。
+7. 运行会读输入（io.read、vat.readline）的程序时，把输入放在 exec 的 args 里，每一项就是一行输入，例如 {"target": "prog://阶乘", "program": "run", "args": ["10"]}；多次输入就放多项，如 ["东", "北", "退出"]。不给的话程序会一直等用户在设备上输入。
+8. 用户提到某个设备、传感器或能力时，先用 discover 查设备上有没有；有就直接用，没有就说设备不支持（或者需要什么才能支持），不要先反问位置或型号。
+9. 测试覆盖主要路径即可：一般用 1–2 组输入跑一遍，都通过就交付，不要换着花样反复跑；出错时才继续改和测。
+10. 程序里能力调用的返回值：有数据的返回表，直接取字段，不要去解析文字：
+   vat.read("device://local/battery") → {percent=82, voltage=3.98, usb=false}
+   vat.read("sensor://imu/acceleration")（gyro、orientation 同）→ {x=…, y=…, z=…}
+   vat.read("device://local/led")、vat.write("device://local/led", "blue") → {color="blue"}
+   vat.exec("ssh://主机", "命令", {参数…}) → {stdout="…", stderr="…", code=0}（code 不是 0 就是命令失败）
+   vat.exec("prog://名字", "run", {输入…}) → {ok=true/false, result=…, stdout="…", stderr="…", error="…"}（要显示或比较时取 r.result 或 r.stdout，先看 r.ok；不要把整张表 tostring 或写上屏幕）
+   vat.read("prog://list")、vat.read("trigger://list")、vat.read("timer://list") → 数组
+   其他调用返回文字；要文字时加选项 {text=true}。调用失败仍然返回 nil, 错误原因。
+11. 程序每次运行（前台、定时、触发）的输入、输出、错误都记在三条全局的流里，按运行编号对应。流用来查之前的运行；你刚运行的结果已经在工具结果里，不用再读一遍。
+   read debug://stdout（每次运行的记录和输出）、debug://stderr（错误输出）、debug://stdin（输入）；参数 n=最近几次、prog=程序名、failed=1 只看失败的。
+   read debug://run/编号 看一次运行的全部。内存在 read device://local/status 里。
+   vat.log(...) 写到标准错误并带时间，不占标准输出。
+12. 程序读的文件、主机这类数据来源写成 @input 并给默认值，测试时就能换成测试数据，不用另写一份程序。
+13. 改已有程序之前，先按它开头的说明把现有功能跑一遍（包括边界情况）；发现和说明不符的地方一并修掉，并在回复里说明。

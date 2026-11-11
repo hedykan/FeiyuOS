@@ -82,6 +82,6 @@
   {
     "id": "ambiguous_light",
     "input": "把灯打开。",
-    "expect": {"no_tool": true}
+    "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/led"}]}
   }
 ]

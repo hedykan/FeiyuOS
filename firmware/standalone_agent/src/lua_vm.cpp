@@ -2,6 +2,7 @@
 
 #include <esp_heap_caps.h>
 #include <multi_heap.h>
+#include <time.h>
 
 #include <algorithm>
 #include <cctype>
@@ -21,7 +22,10 @@
 namespace vat::luavm {
 namespace {
 
-constexpr int kMaxArenas = 4;
+// More, smaller blocks: after a while the heap has 80 KB free in pieces of a few KB,
+// and a VM that could only grow by 8 KB or more stopped at its first block (a 6 KB
+// program then failed to compile with 17 KB in use, of the 48 KB it may have).
+constexpr int kMaxArenas = 10;
 
 struct Arena {
     uint8_t* block = nullptr;
@@ -62,7 +66,7 @@ bool grow(Context& c, std::size_t need) {
     // VM grows by more blocks later).  The largest free block is no promise
     // (TLSF rounds requests up to a size class), so try and shrink by a
     // quarter until it fits, down to what this request needs.
-    const std::size_t floor = std::max<std::size_t>(need + 512, 8192);
+    const std::size_t floor = std::max<std::size_t>(need + 512, 3072);
     uint8_t* block = nullptr;
     while (size >= floor && !(block = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)))) {
         size = size * 3 / 4;
@@ -156,12 +160,42 @@ void hook(lua_State* L, lua_Debug*) {
     check_time(L);
 }
 
-void append_output(lua_State* L, const String& text, bool error = false) {
+// Compiling needs several times the source in VM memory: about 7 KB of source is
+// what 48 KB holds (measured: 6.9 KB compiles, 8.3 KB does not).
+constexpr char kTooBig[] = "程序太大，设备的内存放不下（Lua 最多 48 KB，大约是 7 KB 源码）：先把写法收紧（去掉重复的代码和多余的注释）；还放不下，再把不需要共用数据的部分拆成另一个程序，用 vat.exec 调用";
+
+constexpr std::size_t kKeepHead = 512;
+constexpr char kGap[] = "\n…（中间省略）…\n";
+
+std::size_t char_start(const String& text, std::size_t at) {  // the next UTF-8 character boundary
+    while (at < text.length() && (static_cast<uint8_t>(text[at]) & 0xC0) == 0x80) ++at;
+    return at;
+}
+
+// Adds to a run's output, keeping its beginning and its end once it is longer
+// than kMaxOutput: the start shows what ran, the end where it stopped.
+void keep(String& out, const String& text) {
+    if (text.length() > kMaxOutput) {  // one huge piece: its own beginning and end
+        keep(out, utf8_head(text, kKeepHead));
+        keep(out, text.substring(char_start(text, text.length() - (kMaxOutput - kKeepHead))));
+        return;
+    }
+    out += text;
+    if (out.length() <= kMaxOutput) return;
+    const int gap = out.indexOf(kGap);
+    const String head = gap >= 0 ? out.substring(0, gap) : utf8_head(out, kKeepHead);
+    const std::size_t from = gap >= 0 ? gap + strlen(kGap) : head.length();
+    const std::size_t room = kMaxOutput - head.length() - strlen(kGap);
+    const std::size_t start = char_start(out, std::max(from, out.length() - room));
+    out = head + kGap + out.substring(start);
+}
+
+// `error`: the run's standard error when it has one (options.errors), shown
+// in the warning colour on the console unless `plain`.
+void append_output(lua_State* L, const String& text, bool error = false, bool plain = false) {
     auto& c = context(L);
-    if (foreground(c)) console::write(text, error);
-    String& out = *c.output;
-    if (out.length() >= kMaxOutput) return;
-    out += utf8_head(text, kMaxOutput - out.length());
+    if (foreground(c)) console::write(text, error && !plain);
+    keep(error && c.options && c.options->errors ? *c.options->errors : *c.output, text);
 }
 
 String joined(lua_State* L, int from) {  // io.write's arguments, as text
@@ -200,6 +234,9 @@ int read_input(lua_State* L, const String& prompt, const char* format) {
     if (got != console::Got::Value) {
         lua_pushnil(L);
         return 1;
+    }
+    if (const auto* options = context(L).options) {
+        if (options->inputs) keep(*options->inputs, line + "\n");
     }
     while (format && *format == '*') ++format;  // Lua 5.1's "*l" / "*n"
     if (format && *format == 'n') {
@@ -245,16 +282,64 @@ int lua_interactive(lua_State* L) {  // vat.interactive(): someone is at the key
     return 1;
 }
 
-int lua_print(lua_State* L) {
+cJSON* to_json(lua_State* L, int index, int depth_now);
+
+// A value as print shows it: a plain table as JSON, so what it holds is
+// visible ("table: 0x3fc9…" tells nobody anything).
+String shown(lua_State* L, int index) {
+    if (lua_istable(L, index)) {
+        if (luaL_getmetafield(L, index, "__tostring") == LUA_TNIL) {
+            cJSON* value = to_json(L, index, 0);
+            const String text = json_print(value);
+            cJSON_Delete(value);
+            return text;
+        }
+        lua_pop(L, 1);
+    }
+    const String text = luaL_tolstring(L, index, nullptr);
+    lua_pop(L, 1);
+    return text;
+}
+
+String shown_all(lua_State* L) {
     const int n = lua_gettop(L);
     String line;
     for (int i = 1; i <= n; ++i) {
         if (i > 1) line += "\t";
-        line += luaL_tolstring(L, i, nullptr);
-        lua_pop(L, 1);
+        line += shown(L, i);
     }
-    append_output(L, line + "\n");
+    return line;
+}
+
+int lua_print(lua_State* L) {
+    append_output(L, shown_all(L) + "\n");
     return 0;
+}
+
+int lua_log(lua_State* L) {  // vat.log(...): standard error, with the time since the program started
+    char stamp[20];
+    snprintf(stamp, sizeof(stamp), "[+%.2fs] ", (millis() - context(L).started) / 1000.0);
+    append_output(L, String(stamp) + shown_all(L) + "\n", true, true);
+    return 0;
+}
+
+int lua_now(lua_State* L) {  // vat.now() -> {ms=…, time="HH:MM:SS", date="YYYY-MM-DD"}; only ms until the clock is set
+    lua_newtable(L);
+    lua_pushinteger(L, millis());
+    lua_setfield(L, -2, "ms");
+    const time_t now = time(nullptr);
+    if (now > 1700000000) {
+        struct tm parts;
+        localtime_r(&now, &parts);
+        char text[16];
+        strftime(text, sizeof(text), "%H:%M:%S", &parts);
+        lua_pushstring(L, text);
+        lua_setfield(L, -2, "time");
+        strftime(text, sizeof(text), "%Y-%m-%d", &parts);
+        lua_pushstring(L, text);
+        lua_setfield(L, -2, "date");
+    }
+    return 1;
 }
 
 // ---- JSON <-> Lua
@@ -407,17 +492,85 @@ void add_options(lua_State* L, int index, cJSON* args) {
     }
 }
 
+// A call that gave nothing: nil and why, and a line on the run's standard error
+// naming the source line, so a program that ignores the nil still leaves a trace.
+int refuse(lua_State* L, const char* tool, const String& target, const String& why) {
+    const auto& c = context(L);
+    if (c.options && c.options->errors) {
+        lua_Debug ar;
+        String where;
+        if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "l", &ar) && ar.currentline > 0) {
+            where = "第 " + String(ar.currentline) + " 行 ";
+        }
+        append_output(L, "[警告] " + where + "vat." + tool + "(" + target + ") 失败：" + why + "\n", true);
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, why.c_str());
+    return 2;
+}
+
+// The data of a call (registry::offer_data) as a table that still works where
+// the text did: tostring, `..` and the string methods (r:match(…)) act on the
+// text, so programs written when calls returned text keep running, and
+// tostring(r) is never "table: 0x…".
+int data_tostring(lua_State* L) {
+    lua_pushvalue(L, lua_upvalueindex(1));
+    return 1;
+}
+
+int data_method(lua_State* L) {  // r:method(…): the string function, with the text in place of r
+    const int n = lua_gettop(L);
+    lua_pushvalue(L, lua_upvalueindex(1));  // the function
+    lua_pushvalue(L, lua_upvalueindex(2));  // the text
+    for (int i = 2; i <= n; ++i) lua_pushvalue(L, i);
+    lua_call(L, n >= 1 ? n : 1, LUA_MULTRET);
+    return lua_gettop(L) - n;
+}
+
+int data_index(lua_State* L) {  // a field the data does not have: a string method, or nil
+    lua_getglobal(L, "string");
+    lua_pushvalue(L, 2);
+    lua_rawget(L, -2);
+    if (!lua_isfunction(L, -1)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_pushcclosure(L, data_method, 2);
+    return 1;
+}
+
+int data_concat(lua_State* L) {
+    luaL_tolstring(L, 1, nullptr);
+    luaL_tolstring(L, 2, nullptr);
+    lua_concat(L, 2);
+    return 1;
+}
+
+void push_json(lua_State* L, const cJSON* item, int depth_now);
+
+void push_data(lua_State* L, const cJSON* data, const String& text) {
+    push_json(L, data, 0);
+    if (!lua_istable(L, -1)) return;
+    lua_newtable(L);
+    lua_pushstring(L, text.c_str());
+    lua_pushcclosure(L, data_tostring, 1);
+    lua_setfield(L, -2, "__tostring");
+    lua_pushstring(L, text.c_str());
+    lua_pushcclosure(L, data_index, 1);
+    lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, data_concat);
+    lua_setfield(L, -2, "__concat");
+    lua_setmetatable(L, -2);
+}
+
 // One tool call as the model would make it.  Policy decides; a call it would
 // ask about runs only when the program's confirmed @uses cover it; secrets
 // are never asked for.
 int call_tool(lua_State* L, const char* tool, cJSON* args) {
     check_time(L);
     const String target = json_str(args, "target");
-    if (target.startsWith("lua://")) {
-        lua_pushnil(L);
-        lua_pushstring(L, "Lua 程序里不能运行 lua://");
-        return 2;
-    }
+    if (target.startsWith("lua://")) return refuse(L, tool, target, "Lua 程序里不能运行 lua://");
     const auto verdict = policy::evaluate(tool, args);
     const auto* uses = context(L).options->uses;
     bool approved = false;
@@ -439,28 +592,32 @@ int call_tool(lua_State* L, const char* tool, cJSON* args) {
                 "（可用 * 结尾，如 https://api.example.com/*），保存时由用户确认";
     }
     if (error.isEmpty() && !registry::needs_secret(tool, args).isEmpty()) error = "需要输入密钥，程序里不能输入：先让肥鱼调用一次";
-    if (!error.isEmpty()) {
-        lua_pushnil(L);
-        lua_pushstring(L, error.c_str());
-        return 2;
-    }
+    if (!error.isEmpty()) return refuse(L, tool, target, error);
+    registry::want_data(true);
     const String out = registry::execute(tool, args, approved);
-    if (out.startsWith("ERROR") || out.startsWith("没有能力包可处理")) {
-        lua_pushnil(L);
-        lua_pushstring(L, out.c_str());
-        return 2;
+    String text;
+    Json data(registry::take_data(&text));
+    registry::want_data(false);
+    if (text.isEmpty()) text = out;
+    const bool as_text = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "text"));  // the option {text = true}
+    const bool failed = out.startsWith("ERROR") || out.startsWith("没有能力包可处理");
+    // Data comes back as a table.  A failure is nil and why, whatever failed: a
+    // program that was called and ended with an error is a failed call like any other.
+    if (data.p && !as_text && !failed) {
+        push_data(L, data.p, text);
+        return 1;
     }
-    if (std::strcmp(tool, "exec") == 0 && target.startsWith("prog://")) {
-        // Another program: hand back what it returned, not the sentence around it.
-        static const char kDone[] = "完成，结果：";
-        const int at = out.indexOf(kDone);
-        if (at >= 0) {
-            String value = out.substring(at + strlen(kDone));
-            const int tail = value.indexOf("\n输出：");
-            if (tail >= 0) value = value.substring(0, tail);
-            if (value == "（无）") value = String();
-            lua_pushstring(L, value.c_str());
-            return 1;
+    if (failed) return refuse(L, tool, target, out);
+    registry::Package::StreamSpec spec;
+    if (!as_text && std::strcmp(tool, "read") == 0 && registry::stream_spec(target, spec)) {
+        // A stream read once: its fields, as vat.stream gives them.
+        String value;
+        if (registry::read_stream(target, value)) {
+            Json parsed(cJSON_Parse(value.c_str()));
+            if (parsed.p) {
+                push_data(L, parsed.p, out);
+                return 1;
+            }
         }
     }
     lua_pushstring(L, out.c_str());
@@ -475,7 +632,11 @@ Json target_args(lua_State* L) {
 }
 
 void add_content(lua_State* L, int index, cJSON* args, const char* key) {
-    if (lua_type(L, index) == LUA_TTABLE) {
+    if (lua_type(L, index) == LUA_TTABLE && luaL_getmetafield(L, index, "__tostring") != LUA_TNIL) {
+        lua_pop(L, 1);  // the data of a call (push_data): written as its text, not as JSON
+        cJSON_AddStringToObject(args, key, luaL_tolstring(L, index, nullptr));
+        lua_pop(L, 1);
+    } else if (lua_type(L, index) == LUA_TTABLE) {
         Json content(to_json(L, index, 0));
         cJSON_AddStringToObject(args, key, json_print(content.p).c_str());
     } else {
@@ -588,7 +749,8 @@ const luaL_Reg kVat[] = {{"read", lua_read},       {"write", lua_write},        
                          {"observe", lua_observe}, {"input", lua_input},         {"session", lua_session},
                          {"stream", lua_stream},   {"after", lua_after},         {"json", lua_json},
                          {"tojson", lua_tojson},   {"urlencode", lua_urlencode}, {"sleep", lua_sleep},
-                         {"millis", lua_millis},   {"log", lua_print},           {"readline", lua_readline},
+                         {"millis", lua_millis},   {"log", lua_log},             {"readline", lua_readline},
+                         {"now", lua_now},
                          {"key", lua_key},         {"clear", lua_clear},         {"interactive", lua_interactive},
                          {nullptr, nullptr}};
 
@@ -674,7 +836,8 @@ bool run(const String& source, const String& name, const Options& options, Strin
         lua_pushcfunction(L, traceback);
         const String chunk = "=" + name;
         if (luaL_loadbufferx(L, source.c_str(), source.length(), chunk.c_str(), "t") != LUA_OK) {
-            error = String("语法错误：") + lua_tostring(L, -1);
+            const String problem = lua_tostring(L, -1);
+            error = problem.indexOf("not enough memory") >= 0 ? String(kTooBig) : "语法错误：" + problem;
         } else if (lua_pcall(L, 0, 1, -2) != LUA_OK) {
             error = lua_tostring(L, -1) ? String(lua_tostring(L, -1)) : String("运行出错");
         } else if (options.entry) {
@@ -723,10 +886,11 @@ String compile(const String& source, const String& name) {
             error = lua_tostring(L, -1);
         }
     } catch (...) {
-        error = "Lua 内存不足";
+        error = "not enough memory";
     }
     lua_close(L);
     release(c);
+    if (error.indexOf("not enough memory") >= 0) error = kTooBig;  // compiling ran out of the VM's memory
     return error;
 }
 

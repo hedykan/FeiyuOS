@@ -44,7 +44,15 @@ public:
     String execute(const String& tool, const cJSON* arguments, bool) override {
         const String target = json_str(arguments, "target");
         if (is_imu(target)) return hw::imu_text();
-        if (hw::is_led_target(target)) return tool == "read" ? hw::led_text() : hw::set_led(json_str(arguments, "content"));
+        if (hw::is_led_target(target)) {
+            const String text = tool == "read" ? hw::led_text() : hw::set_led(json_str(arguments, "content"));
+            if (!text.startsWith("ERROR")) {
+                cJSON* data = cJSON_CreateObject();
+                cJSON_AddStringToObject(data, "color", hw::led_text().substring(String("RGB 灯：").length()).c_str());
+                offer_data(data);
+            }
+            return text;
+        }
         const int count = json_str(arguments, "content").toInt();
         return hw::request_beep(count > 0 ? count : 1);
     }

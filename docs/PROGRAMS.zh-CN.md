@@ -33,11 +33,13 @@ return w
 
 | 函数 | 说明 |
 |:--|:--|
-| `vat.read / write / exec / observe / input / session` | 与模型的七个工具相同，经 Policy 与注册中心交给扩展包；失败返回 `nil, 原因` |
+| `vat.read / write / exec / observe / input / session` | 与模型的七个工具相同，经 Policy 与注册中心交给扩展包；失败返回 `nil, 原因`，并在标准错误里记一行带行号的警告。有数据的调用返回表，见下 |
 | `vat.stream(target)` | 流的最新值（表，如 `a.x`） |
 | `vat.after("25m", "prog://名字?参数")` | 过一段时间运行某个程序一次（建一个一次性触发） |
 | `vat.sleep(ms)` | 原地等待，单次最长 60 秒 |
-| `vat.json / tojson / urlencode / millis / log` | 工具函数 |
+| `vat.json / tojson / urlencode / millis` | 工具函数 |
+| `vat.log(...)` | 写到标准错误，前面带程序开始以来的时间 `[+1.23s]`；不占标准输出的 2 KB |
+| `vat.now()` | `{ms, time, date}`；没对时的时候只有 `ms` |
 | `print(...)`、`io.write(...)`、`io.stderr:write(...)` | 标准输出（`io.write` 不换行，`\r` 回到行首覆盖）；标准错误红色 |
 | `io.read()`、`io.read("n")`、`vat.readline("提示")` | 标准输入：读一行 / 一个数；用户在程序页输入，` 中断；`exec` 带 `stdin` 时从它读，读完返回 `nil` |
 | `vat.key(超时毫秒)` | 读一个按键：`"a"`、`"enter"`、`"del"`、`"tab"`、`"space"`（`; . , /` 约定为上下左右），超时 `nil` |
@@ -53,7 +55,35 @@ return w
 | 用户对肥鱼说「运行…」（`exec prog://`），或在程序页（Fn+A）选中回车 | 前台：自动切到程序页 | 实时显示；同时作为结果的「输出：」给肥鱼（2 KB） | 键盘；`exec` 带 `stdin` 时先从它读 | 30 分钟、2 亿条指令；` 中断 |
 | 触发器（定时、事件、`vat.after`） | 后台：不切页 | 只记在「最近」和结果里 | 没有：`io.read` 返回 `nil, 原因` | 150 秒、2000 万条指令 |
 
-程序调用的程序跟着最外层的运行走。前台运行的输出存在 `/vat/things/lua/logs/名字.txt`（只留最近一次）。程序画的画面（`device://local/display/*`、`ui://`）在图形页显示；程序读一行输入时自动切回程序页，输完再回到图形页；读按键（`vat.key`）时画面不动。
+程序调用的程序跟着最外层的运行走。每次运行（前台、后台、被别的程序调用）结束后，它的输入、输出、错误追加到三条全局的流里，见 2.4。程序画的画面（`device://local/display/*`、`ui://`）在图形页显示；程序读一行输入时自动切回程序页，输完再回到图形页；读按键（`vat.key`）时画面不动。
+
+### 2.1.1 返回值
+
+有数据的调用返回表，程序直接取字段：
+
+| 调用 | 返回 |
+|:--|:--|
+| `vat.read("device://local/battery")` | `{percent, voltage, usb}` |
+| `vat.read("sensor://imu/acceleration")`、`gyro` | `{x, y, z}`；`orientation` 是 `{pitch, roll}`（凡是流，读一次都得到它的字段） |
+| 读写 `device://local/led` | `{color}` |
+| `vat.exec("ssh://主机", 命令, {参数})` | `{stdout, stderr, code}` |
+| `vat.exec("prog://名字", "run", {输入})` | `{ok, result, stdout, stderr}`；对方出错时和别的调用一样返回 `nil, 原因` |
+
+这些表当文字用时就是原来那句话：`tostring(r)`、`r .. ""`、`r:match(...)` 等字符串方法都作用在文字上（程序的调用是对方 `return` 的结果），所以按文字结果写的旧程序照常运行。加选项 `{text=true}` 得到纯文字。其他调用返回文字。扩展包用 `registry::offer_data()` 交出数据。
+
+`print` 一个表显示成 JSON。输出超过 2 KB 时保留开头 512 字节和结尾。
+
+### 2.1.2 改程序的一部分
+
+- `write prog://名字/patch`：content 是若干段 `<<<<`（换行）原文（换行）`====`（换行）新文字（换行）`>>>>`。原文必须和程序里的文字完全一致并且只出现一次；找不到或出现多次时报错，程序不改动。改完照常做语法检查和权限确认。
+- `read prog://名字?grep=关键词`：匹配的行，带行号。`read prog://名字?lines=120-160`：这一段原文。
+
+### 2.4 运行记录：三条全局的流
+
+- `/vat/io/stdin.log`、`stdout.log`、`stderr.log`，所有程序共用。每次运行有一个编号，在流里以一行头开始：`== 11-11 02:00:03 #128 每日备份 来源=触发:每天 结果=失败 耗时=1.2s 内存峰值=18KB ==`。标准输出流每次运行都写头行（它同时是运行记录），另外两条只在有内容时写。
+- 每条流 64 KB（没有 TF 卡时 16 KB），满了变成 `.1`，留两份。
+- 读：`read debug://stdout | stderr | stdin`（`?n=最近几次&prog=名字&failed=1`），`read debug://run/编号`。工具返回的运行结果里带着「运行 #编号」。
+- 运行结果分段给模型：【结果】【输出】【错误输出】，失败时还有【出错的行】和【调用栈】。
 
 ### 2.2 权限（D9 的新形式）
 

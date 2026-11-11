@@ -27,6 +27,7 @@ Package* make_grove_package();
 Package* make_ir_package();
 Package* make_ui_package();
 Package* make_program_package();
+Package* make_debug_package();
 Package* make_pkg_package();
 Package* make_ask_package();
 Package* make_lua_package();
@@ -54,11 +55,14 @@ void register_builtin() {
     add(make_timer_package());
     add(make_grove_package());
     add(make_ir_package());
-    add(make_program_package());
     add(make_pkg_package());
     add(make_ask_package());
     add(make_lua_package());
     add(make_ui_package());
+    // Programs and their run records after the other built-ins: their usage is the
+    // longest and the one most worth being read last.
+    add(make_program_package());
+    add(make_debug_package());
     add(make_card_package());  // last: the TF card's packages never shadow a built-in target
     for (auto* catalog : make_catalog_packages()) add(catalog);
 }

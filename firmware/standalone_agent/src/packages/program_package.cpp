@@ -2,6 +2,8 @@
 // triggers (trigger://) that run a program on a time or an event.  Files and
 // runs in prog_runtime, the VM in lua_vm; design in docs/PROGRAMS.zh-CN.md.
 //   write prog://名字            content: Lua source (create or replace)
+//   write prog://名字/patch      content: <<<< old ==== new >>>> blocks (replace parts)
+//   read  prog://名字?grep=词 | ?lines=开始-结束   part of the source
 //   exec  prog://名字?参数=值    run it
 //   read  prog://list | prog://名字 | prog://help | prog://help/examples | prog://legacy/名字
 //   write prog://名字/delete
@@ -9,6 +11,7 @@
 //   write trigger://new          content: {"when": "...", "run": "prog://名字?参数"}
 //   write trigger://编号/pause | /resume | /delete
 //   write trigger://clean        (confirmed) triggers of deleted programs / paused after failing
+#include <new>
 #include "../common.h"
 #include "../events.h"
 #include "../prog_runtime.h"
@@ -28,7 +31,22 @@ constexpr char kUsage[] =
     "target=trigger://new，content 为 JSON，含 when 与 run：when 是事件，如 time://every/07:00（每天）、time://every/30s（每隔多久，至少 10 秒，设备忙时跳过这一轮）、"
     "time://weekday/09:00、time://at/18:30（一次）、time://in/10m（一次）、device://boot（开机），不要用 cron；run 是 "
     "prog://程序名?参数。只做一件事也写成一两行的程序再建触发。查看 read trigger://list；停用 write trigger://编号/pause；清理失效的触发 write trigger://clean；"
-    "删除 write prog://名字/delete 或 trigger://编号/delete（用户要删时直接调用，设备会弹出确认，不要先用文字反问）。";
+    "删除 write prog://名字/delete 或 trigger://编号/delete（用户要删时直接调用，设备会弹出确认，不要先用文字反问）。"
+    "写程序：保存后必须 exec 运行一次，看结果和输出；有错就改，改完再运行，直到成功。测试覆盖主要路径即可，一般用 1 到 2 组输入跑一遍，"
+    "都通过就交付，出错时才继续改和测。程序的输入有两种，不要混用：运行前就定好的参数用 -- @input 声明，运行时写在地址里（prog://名字?n=10）；"
+    "运行中要用户在键盘上输入的（用户说让我输入、问我、等我回答时就是这种）用 io.read 或 vat.readline 读，"
+    "测试时把输入放在 exec 的 args 里，每一项就是一行输入，多次输入就放多项；不给的话程序会一直等用户在设备上输入。"
+    "程序里能力调用的返回值：有数据的调用返回一张表，用一个变量接住再取字段，不要解析文字："
+    "local b = vat.read('device://local/battery')，取 b.percent、b.voltage、b.usb；"
+    "local a = vat.read('sensor://imu/acceleration')（gyro 同），取 a.x、a.y、a.z，orientation 取 pitch、roll；"
+    "读写 device://local/led 的结果取 color；"
+    "local r = vat.exec('ssh://主机', '命令', {参数})，取 r.stdout、r.stderr、r.code（code 不是 0 就是命令失败）；"
+    "local r, err = vat.exec('prog://名字', 'run', {输入})，成功时取 r.result（对方 return 的值）、r.stdout、r.stderr，要显示或比较时用 r.result 或 r.stdout。"
+    "其他调用返回文字。任何调用失败（包括被调用的程序出错）都返回 nil 和原因，写成 local v, err = vat.read(...)，先判断 v 是不是 nil。"
+    "vat.log 写到标准错误并带时间，不占标准输出。"
+    "改已有的程序：大程序不用整份读，read prog://名字?grep=关键词 看匹配的行（带行号），read prog://名字?lines=120-160 看其中一段原文。"
+    "只改一小部分时不用整份重写：write prog://名字/patch，content 的每一段依次是：一行 <<<<，要替换的原文（和程序里完全一致，包括缩进，"
+    "并且只出现一次），一行 ====，替换成的新文字，一行 >>>>；可以连着写多段。新写程序或大改仍然用 write prog://名字 整份保存。";
 
 // read prog://help: the whole language (read on demand, costs nothing in the prompt).
 constexpr char kHelp[] = R"HELP(程序（prog://，Lua 5.4）与触发（trigger://）说明
@@ -50,13 +68,24 @@ vat.stream("sensor://imu/acceleration")      取流的最新值，返回表，�
 vat.after("25m", "prog://名字?参数")          过一段时间再运行某个程序（一次；重启后仍有效）
 vat.sleep(毫秒)                               原地等待，最长 60000（一分钟）；更久用 vat.after
 vat.json(文字) 解析 JSON 成表；vat.tojson(表) 转成 JSON 文字；vat.urlencode(文字)
-vat.millis() 开机以来的毫秒；print(...) 或 vat.log(...) 写输出（io.write 不换行，io.stderr:write 红色）
-io.read() / vat.readline("提示")              读用户在键盘上输入的一行（io.read("n") 读数字）；exec 时给 stdin="第一行\n第二行" 就从它读，读完返回 nil
+vat.millis() 开机以来的毫秒；vat.now() 得到 {ms=…, time="14:03:59", date="2026-11-11"}（没对时的时候只有 ms）
+print(...) 写标准输出（io.write 不换行；print 一个表会显示成 JSON）；vat.log(...) 写标准错误并带上程序开始以来的时间，不占输出的 2 KB（io.stderr:write 也写标准错误）
+io.read() / vat.readline("提示")              读用户在键盘上输入的一行（io.read("n") 读数字）；exec 时给 args（每项一行）或 stdin="第一行\n第二行" 就从它读，读完返回 nil
 vat.key(超时毫秒)                              读一个按键（"a" "enter" "del"；; . , / 当上下左右），超时返回 nil
 vat.clear() 清空程序页；vat.interactive() 有人在看（用户让你运行或在程序页启动；触发器在后台运行时为 false，读输入返回 nil）
-调用另一个程序：local r = vat.exec("prog://名字?x=1")，r 是对方 return 的结果（最多嵌套 3 层）
+调用另一个程序：local r = vat.exec("prog://名字?x=1", "run", {"第一行输入"})，成功时 r 是表：r.result（对方 return 的结果）、r.stdout、r.stderr；对方出错时和别的调用一样返回 nil 和原因（最多嵌套 3 层）
+【返回值】有数据的调用返回表，直接取字段：电量 {percent, voltage, usb}；sensor://imu/acceleration、gyro {x, y, z}，orientation {pitch, roll}；灯 {color}；ssh 的 exec {stdout, stderr, code}；程序的 exec 见上。
+这些表当文字用时就是原来那句话：tostring(r)、r .. ""、r:match(...) 都作用在文字上；要原文也可以加选项 {text=true}。其他调用返回文字。调用失败返回 nil 和原因，并在标准错误里记一行带行号的警告。
+【改程序】只改一部分：write prog://名字/patch，content 写成若干段
+<<<<
+要替换的原文（和程序里完全一致，并且只出现一次）
+====
+新文字
+>>>>
+看程序的一部分：read prog://名字?grep=关键词（带行号）或 read prog://名字?lines=120-160。
+【运行记录】每次运行的输入、输出、错误记在三条全局的流里：read debug://stdout、debug://stderr、debug://stdin（?n=最近几次&prog=名字&failed=1），read debug://run/编号 看一次运行的全部。
 
-【规则与上限】单次运行最长 150 秒（sleep 也算）；内存 48 KB；死循环会被停下。后台运行（触发）的程序不要长时间 sleep，分段用 vat.after。可用的 Lua 库：string table math utf8 coroutine；没有 io、os、文件和网络库，一切通过 vat。
+【规则与上限】单次运行最长 150 秒（sleep 也算）；内存 48 KB，所以一个程序的源码大约 7 KB 是上限（每次调用另一个程序都是重新开始，不共用数据）；死循环会被停下。后台运行（触发）的程序不要长时间 sleep，分段用 vat.after。可用的 Lua 库：string table math utf8 coroutine；没有 io、os、文件和网络库，一切通过 vat。
 
 【触发】新建：write trigger://new，content 为 {"when": 事件, "run": "prog://名字?参数"}
 时间：time://at/18:30（或 2026-11-08 09:00）一次、time://in/10m 一次、time://every/07:00 每天、time://weekday/09:00 工作日、time://weekend/10:00 周末；开机：device://boot。一次性的触发执行后自动删除。可用事件见 discover(resources) 里标「可作触发」的项。事件的数据在程序里是 input.event。
@@ -163,6 +192,9 @@ public:
         }
         split(target, strlen("prog://"), path, query);
         if (path.endsWith("/delete")) return false;
+        if (path.endsWith("/patch")) {
+            return !programs::patch_needs_confirm(path.substring(0, path.length() - 6), json_str(arguments, "content"));
+        }
         return !programs::needs_confirm(json_str(arguments, "content"));
     }
 
@@ -178,6 +210,9 @@ public:
         }
         split(target, strlen("prog://"), path, query);
         if (path.endsWith("/delete")) return "删除程序「" + path.substring(0, path.length() - 7) + "」";
+        if (path.endsWith("/patch")) {
+            return programs::patch_summary(path.substring(0, path.length() - 6), json_str(arguments, "content"));
+        }
         return programs::save_summary(path, json_str(arguments, "content"));
     }
 
@@ -195,19 +230,33 @@ public:
             return programs::trigger_action(path.substring(0, slash).toInt(), path.substring(slash + 1), approved);
         }
         split(target, strlen("prog://"), path, query);
-        if (tool == "exec") return programs::run(path, query, json_str(arguments, "stdin"));
+        if (tool == "exec") {
+            // What the program reads: the stdin text, or the args, one line each.
+            String input = json_str(arguments, "stdin");
+            if (input.isEmpty()) {
+                const cJSON* item = nullptr;
+                cJSON_ArrayForEach(item, cJSON_GetObjectItemCaseSensitive(arguments, "args")) {
+                    if (!input.isEmpty()) input += "\n";
+                    if (cJSON_IsString(item)) input += item->valuestring;
+                    else if (cJSON_IsNumber(item)) input += String(item->valuedouble, item->valuedouble == static_cast<long>(item->valuedouble) ? 0 : 4);
+                }
+            }
+            return programs::run(path, query, input);
+        }
         if (tool == "read") {
             if (path.isEmpty() || path == "list") return programs::list_text();
             if (path == "help") return kHelp;
             if (path == "help/examples") return kHelpExamples;
             if (path == "legacy") return programs::legacy_text();
             if (path.startsWith("legacy/")) return programs::legacy_show(path.substring(7));
+            if (!query.isEmpty()) return programs::show_part(path, query);
             return programs::show(path);
         }
         if (path.endsWith("/delete")) {
             if (!approved) return "ERROR: 删除程序需要用户确认";
             return programs::remove(path.substring(0, path.length() - 7));
         }
+        if (path.endsWith("/patch")) return programs::patch(path.substring(0, path.length() - 6), content, approved);
         if (reserved(path)) return "ERROR: 程序名不能是 list、help、legacy";
         if (path.indexOf('/') >= 0) return "ERROR: 保存用 write prog://名字，删除用 prog://名字/delete";
         return programs::save(path, content, approved);
@@ -217,6 +266,29 @@ public:
 
     void hints(std::vector<Hint>& out) override {
         out.push_back({"程序与定时", "", "每天早上 7 点叫我起床并说天气"});
+    }
+
+    // A saved program the query names: without this, "修一下工具箱" sends the model
+    // looking for a project called 工具箱 on some host.
+    void find(const std::vector<String>& terms, cJSON* list, int& remaining) override {
+        std::vector<programs::ProgramInfo> saved;
+        try {
+            saved = programs::runnable();
+        } catch (const std::bad_alloc&) {
+            runtime_event("low_memory", "discover programs");
+        }
+        for (const auto& p : saved) {
+            String hay = p.name + " " + p.about;
+            hay.toLowerCase();
+            bool hit = false;
+            String name = p.name;
+            name.toLowerCase();
+            for (const auto& term : terms) hit = hit || term == name || (term.length() > 3 && hay.indexOf(term) >= 0);
+            if (!hit) continue;
+            String kind = "program：已保存的程序";
+            if (!p.about.isEmpty()) kind += "：" + utf8_head(p.about, 90);
+            if (!add_resource(list, remaining, ("prog://" + p.name).c_str(), kind.c_str())) return;
+        }
     }
 
     void resources(cJSON* list, int& remaining) override {

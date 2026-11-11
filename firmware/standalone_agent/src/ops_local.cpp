@@ -14,6 +14,7 @@
 #include "context.h"
 #include "net.h"
 #include "ops_hw.h"
+#include "registry.h"
 #include "storage.h"
 #include "ui_state.h"
 #include "worker.h"
@@ -89,7 +90,7 @@ void probe_hardware() {
     cap_bus = answers(M5.Ex_I2C, kCapExpander) ? "grove_g2_g1" : "none";
 }
 
-String status_json() {
+String status_json(bool for_model) {
     cJSON* status = cJSON_CreateObject();
     cJSON_AddStringToObject(status, "runtime", "standalone");
     cJSON_AddStringToObject(status, "board", board_name().c_str());
@@ -112,9 +113,10 @@ String status_json() {
     cJSON_AddStringToObject(status, "cpu_idle", cpu_text(idle_percent).c_str());
     cJSON_AddStringToObject(status, "cpu_idle_min", cpu_text(idle_percent_min).c_str());
     cJSON_AddStringToObject(status, "wifi", net::ssid().c_str());
-    cJSON_AddStringToObject(status, "ip", net::ip().c_str());
+    // The model's copy leaves out what identifies the network: it goes to the model provider.
+    if (!for_model) cJSON_AddStringToObject(status, "ip", net::ip().c_str());
     cJSON_AddNumberToObject(status, "wifi_rssi", net::rssi());
-    cJSON_AddStringToObject(status, "wifi_bssid", net::bssid().c_str());
+    if (!for_model) cJSON_AddStringToObject(status, "wifi_bssid", net::bssid().c_str());
     cJSON_AddNumberToObject(status, "wifi_channel", net::channel());
     cJSON_AddNumberToObject(status, "free_heap", ESP.getFreeHeap());
     cJSON_AddNumberToObject(status, "min_free_heap", ESP.getMinFreeHeap());
@@ -153,9 +155,14 @@ String clipboard() { return storage::read_text("/vat/memory/clipboard.txt", 2000
 
 String tool_read(const cJSON* arguments) {
     const String target = json_str(arguments, "target");
-    if (target == "device://local/status") return status_json();
+    if (target == "device://local/status") return status_json(true);
     if (target == "device://local/settings") return settings_json();
     if (target == "device://local/battery") {
+        cJSON* data = cJSON_CreateObject();
+        cJSON_AddNumberToObject(data, "percent", M5Cardputer.Power.getBatteryLevel());
+        cJSON_AddNumberToObject(data, "voltage", hw::battery_mv() / 1000.0);
+        cJSON_AddBoolToObject(data, "usb", hw::usb_connected());
+        registry::offer_data(data);
         return hw::battery_text();
     }
     if (target == "device://local/display/brightness") return "亮度 " + String(config::get().brightness);

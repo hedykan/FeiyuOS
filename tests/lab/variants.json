@@ -1,0 +1,23 @@
+[
+ {"name": "base", "about": "固件现在的设置：6 轮、每轮输出最多 700 token、不思考", "steps": 6, "max_tokens": 700, "effort": "none"},
+ {"name": "big", "about": "10 轮、每轮输出 4000 token、不思考", "steps": 10, "max_tokens": 4000, "effort": "none"},
+ {"name": "think", "about": "big + 思考（reasoning_effort=medium）", "steps": 10, "max_tokens": 4000, "effort": "medium"},
+ {"name": "verify", "about": "big + 反馈闭环的规矩（tests/lab/rules_verify.txt）", "steps": 10, "max_tokens": 4000, "effort": "none", "rules_file": "tests/lab/rules_verify.txt"},
+ {"name": "verify2", "about": "verify + 默认值与少反问、测试给 stdin（tests/lab/rules_verify2.txt）", "steps": 10, "max_tokens": 4000, "effort": "none", "rules_file": "tests/lab/rules_verify2.txt"},
+ {"name": "verify3", "about": "verify2，但测试输入放在 exec 的 args 里（每项一行）（tests/lab/rules_verify3.txt）", "steps": 10, "max_tokens": 4000, "effort": "none", "rules_file": "tests/lab/rules_verify3.txt"},
+ {"name": "e4", "about": "verify3 + 工具结果统一格式和「怎么改」提示（present=v2）", "steps": 10, "max_tokens": 4000, "effort": "none", "rules_file": "tests/lab/rules_e4.txt", "present": "v2"},
+ {"name": "e3", "about": "e4 + 程序运行结果分段：输出保留头尾、错误输出、出错行源码、调用失败自动警告、print 表转 JSON（io=v2）", "steps": 10, "max_tokens": 4000, "effort": "none", "rules_file": "tests/lab/rules_e3.txt", "present": "v2", "io": "v2"},
+ {"name": "e2", "about": "e3 + 程序里能力调用返回表（structured），提示词写明字段", "steps": 10, "max_tokens": 4000, "effort": "none", "rules_file": "tests/lab/rules_e2.txt", "present": "v2", "io": "v2", "structured": true},
+ {"name": "d1", "about": "e2 + 三条全局输入输出流和 debug://（只靠 discover 发现，提示词不提）", "rules_file": "tests/lab/rules_e2.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true},
+ {"name": "d1r", "about": "d1 + 提示词写明三条流的读法（规矩 11）", "rules_file": "tests/lab/rules_d1.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true},
+ {"name": "d2", "about": "d1r 改三处：内存并进 device://local/status、最后一轮要求只做文字总结、规矩 11 说明流用来查之前的运行", "rules_file": "tests/lab/rules_d2.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true},
+ {"name": "d2_700", "about": "d2，但每轮输出最多 700 token（固件现值）", "rules_file": "tests/lab/rules_d2.txt", "steps": 10, "max_tokens": 700, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true},
+ {"name": "d2_8k", "about": "d2，但每轮输出最多 8000 token", "rules_file": "tests/lab/rules_d2.txt", "steps": 10, "max_tokens": 8000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true},
+ {"name": "d2_noio", "about": "d2，但程序运行结果不分段（关掉 E3，io=v1）", "rules_file": "tests/lab/rules_d2.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v1", "structured": true, "debug": true, "final_note": true},
+ {"name": "d3", "about": "d2 + 两条约定：数据来源做成 @input；改已有程序前先按说明跑一遍（规矩 12、13）", "rules_file": "tests/lab/rules_d3.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true},
+ {"name": "d3_8k", "about": "d3，每轮输出最多 8000 token", "rules_file": "tests/lab/rules_d3.txt", "steps": 10, "max_tokens": 8000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true},
+ {"name": "d3p", "about": "d3 + 局部修改 write prog://名字/patch（规矩 14）", "rules_file": "tests/lab/rules_d3p.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true, "patch": true},
+ {"name": "d4", "about": "d2 + 局部修改和按行读程序（规矩 12）+ discover 能查到已保存的程序", "rules_file": "tests/lab/rules_d4.txt", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true, "patch": true, "ranges": true, "discover_programs": true},
+ {"name": "d4_8k", "about": "d4，每轮输出最多 8000 token", "rules_file": "tests/lab/rules_d4.txt", "steps": 10, "max_tokens": 8000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true, "patch": true, "ranges": true, "discover_programs": true},
+ {"name": "fw", "about": "固件源码里的提示词（不另加规矩），其余同 d4：用来确认搬进固件的措辞", "steps": 10, "max_tokens": 4000, "effort": "none", "present": "v2", "io": "v2", "structured": true, "debug": true, "final_note": true, "patch": true, "ranges": true, "discover_programs": true}
+]

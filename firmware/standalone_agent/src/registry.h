@@ -68,6 +68,9 @@ public:
     // Appends safe resource summaries ({target, kind, ...}) for
     // discover(resources); decrement `remaining` per item.
     virtual void resources(cJSON* list, int& remaining) {}
+    // Things of this package that the query names (a saved program, a host): they
+    // go first in discover(resources).  `terms` are the query's words, lowercase.
+    virtual void find(const std::vector<String>& terms, cJSON* list, int& remaining) {}
 
     // Events this package can emit (targets such as "time://every/07:00"), for
     // discover and for whoever builds on the event bus.
@@ -145,6 +148,17 @@ String needs_secret(const String& tool, const cJSON* arguments);
 // Whether the package that owns this call declares it local and reversible.
 bool reversible(const String& tool, const cJSON* arguments);
 String execute(const String& tool, const cJSON* arguments, bool approved, const String& secret = String());
+// A package may hand over the data of the call it is running beside the text it
+// returns: the model reads the text, a Lua program gets the data (vat.read
+// returns a table).  `text` is what that table gives where a program uses it as
+// a string ("" = the call's result).  Takes ownership; one offer per call,
+// cleared when the next call starts.  Worker task only.
+void offer_data(cJSON* data, const String& text = String());
+// True while a Lua program is making a call: only then is building the data worth its memory.
+bool data_wanted();
+void want_data(bool on);  // around a program's call; nests (programs calling programs)
+// The offer of the call that just returned, nullptr when none (the caller deletes it).
+cJSON* take_data(String* text = nullptr);
 std::vector<Package::Hint> hints();
 // A package's summary and usage (what the agent is told), for the help page.
 String package_help(const String& id);

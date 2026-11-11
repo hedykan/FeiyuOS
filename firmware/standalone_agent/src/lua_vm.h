@@ -35,6 +35,11 @@ struct Options {
     // console, io.read / vat.readline / vat.key read the keyboard, and the
     // limits are 30 minutes and kForegroundInstructions (` interrupts).
     bool foreground = false;
+    // The run's standard error (vat.log, io.stderr, a warning for every call that
+    // failed) and standard input (the lines it read).  nullptr: errors go with
+    // the output, inputs are not kept.
+    String* errors = nullptr;
+    String* inputs = nullptr;
 };
 constexpr uint32_t kForegroundMs = 30 * 60 * 1000;
 constexpr uint64_t kForegroundInstructions = 200000000;
@@ -46,7 +51,8 @@ struct Stats {
     uint32_t ms = 0;
 };
 
-// Runs `source` (text only).  print() and vat.log() go to `output`; the
+// Runs `source` (text only).  print() goes to `output` (its beginning and end
+// when it is longer than kMaxOutput), vat.log() to options.errors; the
 // script's return value, as text, to `result`.  false with `error`.
 bool run(const String& source, const String& name, const Options& options, String& output, String& result,
          String& error, Stats& stats);

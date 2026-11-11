@@ -1,3 +1,4 @@
+#include <new>
 #include "events.h"
 #include "cjk_font.h"
 #include "ui.h"
@@ -47,12 +48,23 @@ struct ProgramItem {
     String name;
     String about;
     bool app = false;  // a local app (ui://apps): opens on the graphics page
+    time_t used = 0;   // last run / saved / changed: the list is newest first
 };
+int delete_pending = -1;   // the item Del asked about (Y deletes it), -1: none
+// The list is cached: reading every program's header from the card takes a
+// moment, so entering the page draws the cache and refreshes it a frame later,
+// only when something changed (programs, a run, or a minute went by).
+bool program_items_loaded = false;
+bool program_items_stale = true;
+uint32_t program_items_at = 0;
+uint32_t program_items_gen = 0;
+uint32_t program_items_run = 0;
 std::vector<ProgramItem> program_items;
 bool program_list = true;  // false: the console (a run, or the last one's output)
 int program_cursor = 0;
 int output_scroll = 0;     // display rows up from the newest
 uint32_t console_drawn = UINT32_MAX;
+int program_layout = -1;   // what the program page shows (list / console); -1: clear it first
 uint32_t console_second = 0;
 CursorSlide program_bar;
 CursorSlide program_scroll;
@@ -410,7 +422,7 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
         if (row.head) {
             text_color(kMuted);
             g.drawString(e.time, kPad, y);
-            text_color(e.status == Status::Cancelled ? kMuted : kText);
+            text_color(e.status == Status::Cancelled ? kMuted : sel ? kAccent : kText);
             g.drawString(short_row ? fit(g, row.text, right - kPad * 2 - 44 - 14) : row.text, kPad + 44, y);
             icon(g, right - kPad - 10, y + 1, e.status, sel);
         } else if (row.text == "\x01stage") {
@@ -696,14 +708,29 @@ void switch_page(Page next);
 
 void refresh_program_items() {
     program_items.clear();
-    for (const auto& p : programs::runnable()) program_items.push_back({p.first, p.second, false});
+    delete_pending = -1;
+    try {  // the list is rebuilt while a task may hold most of the heap: a failed allocation shows a shorter list
+        for (const auto& p : programs::runnable()) program_items.push_back({p.name, p.about, false, p.used});
+    } catch (const std::bad_alloc&) {
+        runtime_event("low_memory", "program list");
+    }
     cJSON* list = cJSON_Parse(storage::list_dir("/vat/things/apps").c_str());
     const cJSON* entry = nullptr;
     cJSON_ArrayForEach(entry, list) {
         const String file = json_str(entry, "name");
-        if (file.endsWith(".json")) program_items.push_back({file.substring(0, file.length() - 5), String(), true});
+        if (!file.endsWith(".json")) continue;
+        const cJSON* mtime = cJSON_GetObjectItemCaseSensitive(entry, "mtime");
+        program_items.push_back({file.substring(0, file.length() - 5), String(), true,
+                                 cJSON_IsNumber(mtime) ? static_cast<time_t>(mtime->valuedouble) : 0});
     }
     cJSON_Delete(list);
+    std::stable_sort(program_items.begin(), program_items.end(),
+                     [](const ProgramItem& a, const ProgramItem& b) { return a.used > b.used; });
+    program_items_loaded = true;
+    program_items_stale = false;
+    program_items_at = millis();
+    program_items_gen = programs::generation();
+    program_items_run = console::head().started;
     program_cursor = std::clamp(program_cursor, 0, std::max(0, static_cast<int>(program_items.size()) - 1));
 }
 
@@ -719,6 +746,12 @@ void program_footer(Gfx& screen, const String& text, uint16_t color) {
 
 void draw_program_list(Gfx& g) {
     const int count = program_items.size();
+    if (!program_items_loaded) {
+        g.fillRect(0, kBarHeight, kWidth, kHeight - kBarHeight, kBg);
+        g.setTextColor(kMuted, kBg);
+        g.drawCentreString("读取中…", kWidth / 2, 54);
+        return;
+    }
     if (count == 0) {
         g.fillRect(0, kBarHeight, kWidth, kHeight - kBarHeight, kBg);
         g.setTextColor(kMuted, kBg);
@@ -742,7 +775,12 @@ void draw_program_list(Gfx& g) {
     });
     const int below = kProgramTop - 1 + slots * kLine;
     if (below < kHeight - kLine) g.fillRect(0, below, kWidth, kHeight - kLine - below, kBg);
-    program_footer(g, console::head().name.isEmpty() ? "; . 选择  Enter 运行" : "; . 选择  Enter 运行  / 上次输出", kMuted);
+    if (delete_pending >= 0 && delete_pending < count) {
+        program_footer(g, "删除「" + program_items[delete_pending].name + "」？Y 删除  N 取消", kWarn);
+    } else {
+        program_footer(g, console::head().name.isEmpty() ? "; . 选择  Enter 运行  Del 删除"
+                                                         : "; . 选择  Enter 运行  Del 删除  / 上次输出", kMuted);
+    }
 }
 
 void draw_console(Gfx& g) {
@@ -793,7 +831,18 @@ void draw_program_page(bool force, uint32_t version_now) {
     Gfx& g = M5Cardputer.Display;
     g.startWrite();
     g.setTextWrap(false, false);
+    // Coming from another page (the Agent page leaves its stage line at the
+    // bottom) or between list and console: start from a clear screen once.
+    const int layout = program_list ? 1 : 2;
+    if (layout != program_layout) {
+        g.fillScreen(kBg);
+        program_layout = layout;
+    }
     top_bar(g, snapshot());
+    // The strips the rows and the footer do not cover.
+    g.fillRect(0, kBarHeight, kWidth, kProgramTop - 1 - kBarHeight, kBg);
+    const int rows_end = kProgramTop - 1 + kProgramRows * kLine;
+    g.fillRect(0, rows_end, kWidth, kHeight - kLine - rows_end, kBg);
     if (program_list) draw_program_list(g);
     else draw_console(g);
     g.endWrite();
@@ -851,12 +900,34 @@ void program_key(const Keyboard_Class::KeysState& state, bool esc) {
         else if (has_char(state, '.')) output_scroll = std::max(0, output_scroll - 1);
         else if (state.enter || esc || has_char(state, ',')) {
             program_list = true;
-            refresh_program_items();
+            program_items_stale = true;  // a run may have changed the order
         }
         drawn_version = UINT32_MAX;
         return;
     }
     const int count = program_items.size();
+    if (delete_pending >= 0) {  // Del asked: Y deletes, anything else cancels
+        if (has_char(state, 'y') && delete_pending < count) {
+            const ProgramItem item = program_items[delete_pending];
+            String result;
+            if (item.app) {
+                result = storage::remove("/vat/things/apps/" + item.name + ".json") ? "已删除应用「" + item.name + "」"
+                                                                                     : "ERROR: 删除失败";
+            } else {
+                result = programs::remove(item.name);
+            }
+            set_notice(result.startsWith("ERROR: ") ? result.substring(7) : result, result.startsWith("ERROR"));
+            refresh_program_items();
+        }
+        delete_pending = -1;
+        drawn_version = UINT32_MAX;
+        return;
+    }
+    if (count && state.del) {
+        delete_pending = program_cursor;
+        drawn_version = UINT32_MAX;
+        return;
+    }
     if (count && has_char(state, ';')) program_cursor = std::max(0, program_cursor - 1);
     else if (count && has_char(state, '.')) program_cursor = std::min(count - 1, program_cursor + 1);
     else if (has_char(state, '/') && !console::head().name.isEmpty()) {
@@ -1006,7 +1077,14 @@ void switch_page(Page next) {
     if (next == Page::Graphics && !overlay::open()) return;
     if (current_page == Page::Graphics && next != Page::Graphics) overlay::suspend();
     if (next == Page::Graphics && current_page != Page::Graphics) previous_page = current_page;
-    if (next == Page::Program && current_page != Page::Program) refresh_program_items();
+    if (next == Page::Program && current_page != Page::Program) {
+        // Drawn now from the cache; loop() refreshes it a frame later if needed.
+        if (!program_items_loaded || programs::generation() != program_items_gen ||
+            console::head().started != program_items_run || millis() - program_items_at > 60000) {
+            program_items_stale = true;
+        }
+        program_layout = -1;  // drawn from a clear screen
+    }
     if (next != current_page) timeline_scroll.reset();
     current_page = next;
     view = View::List;
@@ -1071,9 +1149,38 @@ void submit_secret(bool cancel_input) {
 
 void dispatch_keys(const Keyboard_Class::KeysState& state);
 
+// A held ; or . repeats (lists, the timeline, help, the console's output)
+// after 400 ms, every 70 ms.  Not on the SSH page, where they go to the
+// remote terminal, nor while a program reads single keys.
+bool repeats(const Keyboard_Class::KeysState& state) {
+    if (state.fn || state.ctrl || state.opt || state.enter || state.del || state.word.size() != 1) return false;
+    if (state.word[0] != ';' && state.word[0] != '.') return false;
+    if (current_page == Page::Terminal && !settings::active()) return false;
+    return console::waiting() != console::Wait::Key;
+}
+
 void handle_keys() {
-    if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
-    dispatch_keys(M5Cardputer.Keyboard.keysState());
+    static uint32_t held_since = 0;
+    static uint32_t last_repeat = 0;
+    auto& keyboard = M5Cardputer.Keyboard;
+    if (keyboard.isChange()) {
+        held_since = 0;
+        if (!keyboard.isPressed()) return;
+        const auto state = keyboard.keysState();
+        dispatch_keys(state);
+        if (repeats(state)) held_since = last_repeat = millis();
+        return;
+    }
+    if (!held_since || !keyboard.isPressed()) return;
+    const uint32_t now = millis();
+    if (now - held_since < 400 || now - last_repeat < 70) return;
+    const auto state = keyboard.keysState();
+    if (!repeats(state)) {
+        held_since = 0;
+        return;
+    }
+    last_repeat = now;
+    dispatch_keys(state);
 }
 
 void dispatch_keys(const Keyboard_Class::KeysState& state) {
@@ -1154,7 +1261,7 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
             switch_page(Page::Program);
             if (!console::head().running && !program_list) {
                 program_list = true;
-                refresh_program_items();
+                program_items_stale = true;
             }
         }
         else if (state.enter && current_page == Page::Agent && !busy && model.pending.empty()) {
@@ -1503,6 +1610,17 @@ void loop() {
     }
     if (worker::busy()) note_activity();
     render();
+    // A program saved or removed while the page is open (the agent wrote one): the
+    // list was only checked when the page was entered.
+    if (current_page == Page::Program && program_items_loaded && programs::generation() != program_items_gen) {
+        program_items_stale = true;
+    }
+    // The program list, once the page (from the cache) is on screen.
+    if (current_page == Page::Program && program_list && program_items_stale && program_layout != -1 &&
+        !settings::active()) {
+        refresh_program_items();
+        drawn_version = UINT32_MAX;
+    }
 }
 
 }  // namespace vat::ui

@@ -64,6 +64,7 @@ def system_prompt() -> str:
         match = re.search(r'constexpr char kUsage\[\] =\s*((?:\s*"[^"\\]*")+);', source.read_text())
         if match:
             parts.append("".join(re.findall(r'"([^"\\]*)"', match.group(1))))
+    parts.append(raw_literal("kClosingPrompt", "PROMPT"))  # after the packages, as agent.cpp sends it
     return "".join(parts)
 
 

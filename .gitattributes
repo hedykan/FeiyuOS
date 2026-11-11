@@ -1,3 +1,4 @@
 # Private working notes stay in this repository's history but are left out of
 # `git archive` (tools/publish_snapshot.sh), i.e. out of the public release.
 WORK_PROGRESS.md export-ignore
+CLAUDE.md export-ignore

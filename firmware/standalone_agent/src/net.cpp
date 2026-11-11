@@ -343,7 +343,9 @@ HttpResult exchange(const char* method, const String& url, const String& api_key
     cancel::set_socket(secure ? tls.fd() : plain.fd());
     HTTPClient http;
     http.setConnectTimeout(12000);
-    http.setTimeout(timeout_ms);
+    // HTTPClient keeps this in 16 bits: 90000 became 24464 and a round that wrote a
+    // program timed out sooner than before.
+    http.setTimeout(static_cast<uint16_t>(std::min<uint32_t>(timeout_ms, 65000)));
     http.setReuse(false);
     if (!http.begin(client, url)) {
         cancel::clear_socket();

@@ -13,6 +13,7 @@
 #include "agent.h"
 #include "common.h"
 #include "console.h"
+#include "io_log.h"
 #include "lua_meta.h"
 #include "lua_vm.h"
 #include "ops_timer.h"
@@ -196,15 +197,20 @@ struct Entry {
     State state = State::Broken;
 };
 
+// entries() reads approved.json once for all of them (it was read and parsed
+// again for every file: the program page took a few hundred ms to open).
+const cJSON* approved_cache = nullptr;
+
 State state_of(const String& name, const lua_meta::Header& h, const String& problem) {
     if (!problem.isEmpty()) return State::Broken;
-    cJSON* root = object_at(kApproved);
+    cJSON* owned = approved_cache ? nullptr : object_at(kApproved);
+    const cJSON* root = approved_cache ? approved_cache : owned;
     const cJSON* entry = json_obj(root, name.c_str());
     const bool off = json_bool(entry, "off", false);
     // valueint saturates at INT_MAX: a digest above 2^31 must be read as a double
     const cJSON* d = cJSON_GetObjectItemCaseSensitive(entry, "digest");
     const uint32_t confirmed = cJSON_IsNumber(d) ? static_cast<uint32_t>(d->valuedouble) : 0;
-    cJSON_Delete(root);
+    cJSON_Delete(owned);
     if (off) return State::Off;
     if (must_confirm(h) && confirmed != lua_meta::digest(h)) return State::Pending;
     return State::Enabled;
@@ -252,11 +258,15 @@ void set_off(const String& name, bool off) {
 std::vector<Entry> entries() {
     std::vector<Entry> out;
     cJSON* index = read_json(kIndex);
+    cJSON* approved = object_at(kApproved);
+    approved_cache = approved;
     const cJSON* item = nullptr;
     cJSON_ArrayForEach(item, index) {
         Entry e;
         if (load_entry(json_str(item, "name"), e)) out.push_back(e);
     }
+    approved_cache = nullptr;
+    cJSON_Delete(approved);
     cJSON_Delete(index);
     return out;
 }
@@ -324,15 +334,20 @@ String users_of(const String& name) {  // triggers that run `name`
 struct Outcome {
     bool ok = false;
     String result;
-    String output;
+    String output;  // standard output
+    String errors;  // standard error: vat.log, io.stderr, warnings for calls that failed
+    String inputs;  // the lines it read
     String error;
+    luavm::Stats stats;
+    long id = 0;    // the run's number in the three streams (0: it never started)
 };
 
 // Started with Enter on the program page: missing inputs are asked for on the
 // console.  A tool call reports them instead (the agent asks the user).
 bool ask_inputs = false;
 
-Outcome run_checked(const String& name, const String& query, const String& event_json, bool foreground) {
+Outcome run_checked(const String& name, const String& query, const String& event_json, bool foreground,
+                    const String& origin) {
     Outcome o;
     Entry e;
     if (!load_entry(name, e)) {
@@ -377,10 +392,26 @@ Outcome run_checked(const String& name, const String& query, const String& event
     options.uses = &e.header.uses;
     options.input = input;
     options.foreground = foreground;
+    options.errors = &o.errors;
+    options.inputs = &o.inputs;
     luavm::Stats stats;
     o.ok = luavm::run(storage::read_text(path_of(name), lua_meta::kMaxSource), name, options, o.output, o.result, o.error,
                       stats);
     cJSON_Delete(input);
+    o.stats = stats;
+    {  // every run goes into the three streams: what it read, printed and got wrong
+        iolog::Run record;
+        record.program = name;
+        record.origin = origin;
+        record.ok = o.ok;
+        record.ms = stats.ms;
+        record.peak = stats.peak;
+        record.in = o.inputs;
+        record.out = o.output;
+        record.err = o.errors;
+        if (!o.ok) record.err += o.error + "\n";
+        o.id = iolog::record(record);
+    }
     runtime_event("prog_run", name + (o.ok ? " done" : " failed") + " peak=" + String(static_cast<unsigned>(stats.peak)) +
                                   " arena=" + String(static_cast<unsigned>(stats.arena)) + " ms=" + String(stats.ms));
     record_stat(name, false, o.ok, o.ok ? o.result : o.error);
@@ -393,15 +424,18 @@ Outcome run_checked(const String& name, const String& query, const String& event
 // run the same way.  One worker task: plain variables.
 int run_level = 0;
 bool run_foreground = false;
+String next_origin;  // who starts the next outermost run, for the streams ("" = a tool call)
 
 Outcome run_program(const String& name, const String& query, const String& event_json, bool foreground,
                     const String& stdin_text = String()) {
     const bool top = run_level == 0;
     if (top) run_foreground = foreground;
     const bool fg = run_foreground;
+    const String origin = !top ? String("程序调用") : !next_origin.isEmpty() ? next_origin : String(fg ? "前台" : "后台");
+    if (top) next_origin = String();
     if (top && fg) console::start(name, stdin_text);
     ++run_level;
-    Outcome o = run_checked(name, query, event_json, fg);
+    Outcome o = run_checked(name, query, event_json, fg, origin);
     --run_level;
     if (top && fg) {
         const bool stopped = cancel::requested();
@@ -409,7 +443,6 @@ Outcome run_program(const String& name, const String& query, const String& event
         console::finish(o.ok ? (o.result.isEmpty() ? String("完成") : "完成：" + utf8_head(o.result, 120))
                              : stopped ? String("已中断") : String("失败"),
                         !o.ok);
-        storage::write_text(String(kDir) + "/logs/" + name + ".txt", console::text());
     }
     return o;
 }
@@ -596,6 +629,7 @@ void job(uint32_t job_id, const String& text) {
     cJSON_Delete(o);
     ui::set_busy("RUN 程序");
     ui::entry_begin("[程序] " + label);
+    next_origin = (trigger ? "触发:" : "后台:") + label;
     const Outcome r = run_program(program, query, data, false);
     const String summary = r.ok ? (r.result.isEmpty() ? String("完成") : r.result) : r.error;
     ui::entry_finish(r.ok ? ui::Status::Done : ui::Status::Failed, summary, r.output, "[]");
@@ -604,10 +638,53 @@ void job(uint32_t job_id, const String& text) {
     if (trigger) trigger_done(trigger, r.ok, summary);
 }
 
+// A run as the model reads it: the result, the output, the error output, and
+// for a failure the source line and the frames of the program, each apart.
 String run_text(const String& name, const Outcome& r) {
-    String out = r.ok ? "程序「" + name + "」完成，结果：" + (r.result.isEmpty() ? String("（无）") : r.result)
-                      : "ERROR: 程序「" + name + "」失败：" + r.error;
-    if (!r.output.isEmpty()) out += "\n输出：\n" + r.output;
+    if (!r.id && !r.ok) return "ERROR: 程序「" + name + "」失败：" + r.error;  // it never started
+    const String stats = (r.stats.instructions ? "指令 " + String(r.stats.instructions) + " · " : String()) + "内存峰值 " +
+                         String(r.stats.peak / 1024.0, 1) + " KB · 运行 #" + String(r.id);
+    String out;
+    if (r.ok) {
+        out = "程序「" + name + "」完成 · " + stats + "\n【结果】" + (r.result.isEmpty() ? String("（无）") : r.result);
+    } else {
+        // "名字:行: 原因", then Lua's traceback.
+        const int cut = r.error.indexOf('\n');
+        const String first = cut < 0 ? r.error : r.error.substring(0, cut);
+        out = "ERROR: 程序「" + name + "」失败：" + first + " · " + stats;
+        const String prefix = name + ":";
+        if (first.startsWith(prefix)) {
+            const long line = first.substring(prefix.length()).toInt();
+            const String source = storage::read_text(path_of(name), lua_meta::kMaxSource);
+            int at = 0;
+            for (long n = 1; n < line && at >= 0; ++n) at = source.indexOf('\n', at) < 0 ? -1 : source.indexOf('\n', at) + 1;
+            if (line > 0 && at >= 0 && at < static_cast<int>(source.length())) {
+                const int end = source.indexOf('\n', at);
+                String text = source.substring(at, end < 0 ? source.length() : end);
+                text.trim();
+                out += "\n【出错的行】第 " + String(line) + " 行：" + utf8_head(text, 200);
+            }
+        }
+        String frames;
+        int count = 0;
+        int at = cut;
+        while (at >= 0 && count < 4) {
+            const int end = r.error.indexOf('\n', at + 1);
+            String frame = r.error.substring(at + 1, end < 0 ? r.error.length() : end);
+            frame.trim();
+            if (frame.startsWith(prefix)) {
+                frames += (count++ ? " ← " : "") + frame;
+            }
+            at = end;
+        }
+        if (count) out += "\n【调用栈】" + frames;
+    }
+    String output = r.output;
+    output.trim();
+    out += "\n【输出】\n" + (output.isEmpty() ? String("（无）") : output);
+    String errors = r.errors;
+    errors.trim();
+    if (!errors.isEmpty()) out += "\n【错误输出】\n" + errors;
     return out;
 }
 
@@ -715,15 +792,25 @@ void loop() {
 String list_text() {
     String out;
     int n = 0;
-    for (const auto& e : entries()) {
-        if (!e.header.package.isEmpty()) continue;
-        ++n;
-        out += "- " + signature(e.name, e.header);
-        if (!e.header.about.isEmpty()) out += "：" + e.header.about;
-        if (e.state != State::Enabled) out += String("（") + state_word(e.state) + "）";
-        const String used = users_of(e.name);
-        if (!used.isEmpty()) out += "；被" + used + "使用";
-        out += "\n";
+    {  // one entry at a time: the list is read while a task holds much of the heap
+        cJSON* index = read_json(kIndex);
+        cJSON* approved = object_at(kApproved);
+        approved_cache = approved;
+        const cJSON* item = nullptr;
+        cJSON_ArrayForEach(item, index) {
+            Entry e;
+            if (!load_entry(json_str(item, "name"), e) || !e.header.package.isEmpty()) continue;
+            ++n;
+            out += "- " + signature(e.name, e.header);
+            if (!e.header.about.isEmpty()) out += "：" + e.header.about;
+            if (e.state != State::Enabled) out += String("（") + state_word(e.state) + "）";
+            const String used = users_of(e.name);
+            if (!used.isEmpty()) out += "；被" + used + "使用";
+            out += "\n";
+        }
+        approved_cache = nullptr;
+        cJSON_Delete(approved);
+        cJSON_Delete(index);
     }
     String head = n ? "共 " + String(n) + " 个程序：\n" : String("还没有程序。写一个：write prog://名字，content 为 Lua 源码（read prog://help）\n");
     {
@@ -743,11 +830,109 @@ String list_text() {
 String show(const String& name) {
     Entry e;
     if (!load_entry(name, e)) return "ERROR: 没有程序「" + name + "」（read prog://list 查看）";
+    const String source = storage::read_text(path_of(name), lua_meta::kMaxSource);
+    int lines = 1;
+    for (std::size_t i = 0; i < source.length(); ++i) lines += source[i] == '\n';
     String out = signature(name, e.header) + String("（") + state_word(e.state) + "，" + String(static_cast<unsigned>(e.size)) +
-                 " 字节）";
+                 " 字节，" + String(lines) + " 行）";
     if (!e.problem.isEmpty()) out += "\n声明有误：" + e.problem;
     for (const auto& u : e.header.uses) out += "\n权限：" + lua_meta::describe(u);
-    return out + "\n源码：\n" + storage::read_text(path_of(name), lua_meta::kMaxSource);
+    return out + "\n源码：\n" + source;
+}
+
+// read prog://名字?grep=关键词 | ?lines=120-160: part of a program, so a large
+// one need not be read whole (it would be filed and paged, a round per 4 KB).
+String show_part(const String& name, const String& query) {
+    if (!storage::exists(path_of(name))) return "ERROR: 没有程序「" + name + "」（read prog://list 查看）";
+    cJSON* q = parse_query(query);
+    String grep = json_str(q, "grep");
+    const String range = json_str(q, "lines");
+    cJSON_Delete(q);
+    if (grep.isEmpty() && range.isEmpty()) return "ERROR: 用 ?grep=关键词 或 ?lines=开始-结束";
+    grep.toLowerCase();
+    const int dash = range.indexOf('-');
+    const long first = grep.isEmpty() ? std::max(1L, range.substring(0, dash < 0 ? range.length() : dash).toInt()) : 1;
+    const long last = grep.isEmpty() ? (dash < 0 ? first : range.substring(dash + 1).toInt()) : 0;
+    constexpr std::size_t kPartBytes = 3600;  // one tool result, not filed
+    const String source = storage::read_text(path_of(name), lua_meta::kMaxSource);
+    String body;
+    long line = 0;
+    long hits = 0;
+    int at = 0;
+    while (at < static_cast<int>(source.length())) {
+        int end = source.indexOf('\n', at);
+        if (end < 0) end = source.length();
+        ++line;
+        const String text = source.substring(at, end);
+        at = end + 1;
+        if (!grep.isEmpty()) {
+            String lowered = text;
+            lowered.toLowerCase();
+            if (lowered.indexOf(grep) < 0) continue;
+            ++hits;
+            if (body.length() < kPartBytes) body += String(line) + ": " + text + "\n";
+        } else if (line >= first && line <= last && body.length() < kPartBytes) {
+            body += text + "\n";
+        }
+    }
+    if (!grep.isEmpty()) {
+        if (!hits) return name + " 里没有匹配「" + grep + "」的行（共 " + String(line) + " 行）";
+        return name + " 里匹配「" + grep + "」的行（共 " + String(hits) + " 行，格式 行号: 内容）：\n" + utf8_head(body, kPartBytes);
+    }
+    if (body.isEmpty()) return "ERROR: " + name + " 只有 " + String(line) + " 行";
+    return name + " 第 " + String(first) + "–" + String(std::min(last, line)) + " 行（共 " + String(line) + " 行）：\n" +
+           utf8_head(body, kPartBytes);
+}
+
+// write prog://名字/patch: the program with each block applied.  A block is
+//   <<<<
+//   the text to replace (exactly as in the program, found exactly once)
+//   ====
+//   the new text
+//   >>>>
+// `blocks` counts them; `error` says what is wrong and nothing is changed.
+String patched(const String& name, const String& text, int& blocks, String& error) {
+    blocks = 0;
+    if (!storage::exists(path_of(name))) {
+        error = "没有程序「" + name + "」（read prog://list 查看）";
+        return {};
+    }
+    String source = storage::read_text(path_of(name), lua_meta::kMaxSource);
+    static const char kOpen[] = "<<<<\n";
+    static const char kMid[] = "\n====\n";
+    int at = 0;
+    while (true) {
+        const int open = text.indexOf(kOpen, at);
+        if (open < 0) break;
+        const int mid = text.indexOf(kMid, open + strlen(kOpen));
+        const int close = mid < 0 ? -1 : text.indexOf(">>>>", mid + strlen(kMid) - 1);
+        if (mid < 0 || close < 0) {
+            error = "补丁格式不对：每段写成 <<<<（换行）原文（换行）====（换行）新文字（换行）>>>>";
+            return {};
+        }
+        const String old = text.substring(open + strlen(kOpen), mid);
+        String fresh = close > mid + static_cast<int>(strlen(kMid)) ? text.substring(mid + strlen(kMid), close) : String();
+        if (fresh.endsWith("\n")) fresh.remove(fresh.length() - 1);
+        ++blocks;
+        int found = 0;
+        int where = -1;
+        for (int i = old.isEmpty() ? -1 : source.indexOf(old); i >= 0; i = source.indexOf(old, i + 1)) {
+            if (!found++) where = i;
+        }
+        if (found == 0) {
+            error = "第 " + String(blocks) + " 段的原文在程序里没找到（要和程序里的文字完全一致，包括缩进和空格）；程序没有改动。先 read prog://" +
+                    name + " 看原文";
+            return {};
+        }
+        if (found > 1) {
+            error = "第 " + String(blocks) + " 段的原文在程序里出现 " + String(found) + " 次，多带几行上下文让它只出现一次；程序没有改动";
+            return {};
+        }
+        source = source.substring(0, where) + fresh + source.substring(where + old.length());
+        at = close + 4;
+    }
+    if (!blocks) error = "补丁格式不对：每段写成 <<<<（换行）原文（换行）====（换行）新文字（换行）>>>>";
+    return source;
 }
 
 String save(const String& name, const String& source, bool approved) {
@@ -755,12 +940,12 @@ String save(const String& name, const String& source, bool approved) {
     lua_meta::Header h;
     if (err.isEmpty()) err = lua_meta::parse(source, h);
     if (err.isEmpty() && !h.package.isEmpty()) err = "这是扩展包（@package），放进卡里后用 pkg:// 管理";
-    String trimmed = source;
-    trimmed.trim();
-    if (err.isEmpty() && trimmed.startsWith("{")) err = "程序现在用 Lua 写（read prog://help）；旧的 JSON 格式不再支持";
+    std::size_t first = 0;  // the first character that is not blank (no copy of the source for this)
+    while (first < source.length() && isspace(static_cast<unsigned char>(source[first]))) ++first;
+    if (err.isEmpty() && first < source.length() && source[first] == '{') err = "程序现在用 Lua 写（read prog://help）；旧的 JSON 格式不再支持";
     if (err.isEmpty()) {
         const String problem = luavm::compile(source, name);
-        if (!problem.isEmpty()) err = "语法错误：" + problem;
+        if (!problem.isEmpty()) err = problem.startsWith("程序太大") ? problem : "语法错误：" + problem;
     }
     const bool existed = storage::exists(path_of(name));
     if (err.isEmpty() && !existed && index_names().size() >= kMaxFiles) err = "程序已达上限 " + String(kMaxFiles) + " 个，先删掉不用的";
@@ -788,8 +973,44 @@ String remove(const String& name) {
     return "已删除「" + name + "」";
 }
 
+String patch(const String& name, const String& text, bool approved) {
+    int blocks = 0;
+    String error;
+    const String source = patched(name, text, blocks, error);
+    if (!error.isEmpty()) return "ERROR: " + error;
+    const String saved = save(name, source, approved);
+    return saved.startsWith("ERROR") ? saved : "已改 " + String(blocks) + " 处。" + saved;
+}
+
+bool patch_needs_confirm(const String& name, const String& text) {
+    int blocks = 0;
+    String error;
+    const String source = patched(name, text, blocks, error);
+    return error.isEmpty() && needs_confirm(source);  // a patch that does not apply is refused without asking
+}
+
+String patch_summary(const String& name, const String& text) {
+    int blocks = 0;
+    String error;
+    const String source = patched(name, text, blocks, error);
+    return error.isEmpty() ? save_summary(name, source) : String();
+}
+
 String run(const String& name, const String& query, const String& stdin_text) {
-    return run_text(name, run_program(name, query, "", true, stdin_text));
+    const Outcome r = run_program(name, query, "", true, stdin_text);
+    // A program that calls this one gets the run as data (nil and the error when it
+    // failed, as for any call); its text is what was returned.
+    const String text = run_text(name, r);
+    if (registry::data_wanted()) {
+        cJSON* data = cJSON_CreateObject();
+        cJSON_AddBoolToObject(data, "ok", r.ok);
+        cJSON_AddStringToObject(data, "result", r.result.c_str());
+        cJSON_AddStringToObject(data, "stdout", r.output.c_str());
+        cJSON_AddStringToObject(data, "stderr", r.errors.c_str());
+        cJSON_AddStringToObject(data, "error", r.error.c_str());
+        registry::offer_data(data, r.ok ? r.result : text);
+    }
+    return text;
 }
 
 bool launch(const String& name) {
@@ -798,6 +1019,7 @@ bool launch(const String& name) {
     job.text = name;
     job.callback = [](uint32_t id, const String& program) {
         ask_inputs = true;
+        next_origin = "程序页";
         const String out = run(program, "");
         ask_inputs = false;
         worker::set_result(id, out);
@@ -805,11 +1027,42 @@ bool launch(const String& name) {
     return worker::submit(job) != 0;
 }
 
-std::vector<std::pair<String, String>> runnable() {
-    std::vector<std::pair<String, String>> out;
-    for (const auto& e : entries()) {
-        if (e.header.package.isEmpty()) out.push_back({e.name, e.header.about});
+// One entry at a time (entries() holds every header at once: with 40 programs on
+// the card that array needed a block the heap did not have while a task was
+// running, and the failed allocation took the device down).
+std::vector<ProgramInfo> runnable() {
+    std::vector<ProgramInfo> out;
+    cJSON* stats = object_at(kStats);
+    cJSON* files = cJSON_Parse(storage::list_dir(kDir).c_str());
+    cJSON* index = read_json(kIndex);
+    cJSON* approved = object_at(kApproved);
+    approved_cache = approved;
+    out.reserve(cJSON_GetArraySize(index));
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, index) {
+        Entry e;
+        if (!load_entry(json_str(item, "name"), e)) continue;
+        if (!e.header.package.isEmpty()) continue;
+        ProgramInfo p{e.name, e.header.about, 0};
+        const cJSON* stat = json_obj(stats, e.name.c_str());
+        for (const char* key : {"last", "created"}) {
+            const cJSON* t = cJSON_GetObjectItemCaseSensitive(stat, key);
+            if (cJSON_IsNumber(t)) p.used = std::max<time_t>(p.used, static_cast<time_t>(t->valuedouble));
+        }
+        const cJSON* file = nullptr;
+        cJSON_ArrayForEach(file, files) {
+            if (json_str(file, "name") == e.name + ".lua") {
+                const cJSON* t = cJSON_GetObjectItemCaseSensitive(file, "mtime");
+                if (cJSON_IsNumber(t)) p.used = std::max<time_t>(p.used, static_cast<time_t>(t->valuedouble));
+            }
+        }
+        out.push_back(p);
     }
+    approved_cache = nullptr;
+    cJSON_Delete(approved);
+    cJSON_Delete(index);
+    cJSON_Delete(files);
+    cJSON_Delete(stats);
     return out;
 }
 

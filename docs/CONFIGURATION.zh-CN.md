@@ -42,8 +42,9 @@
   "agent": {
     "url": "https://api.deepseek.com/chat/completions",
     "model": "deepseek-flash",
-    "timeout_ms": 25000,
-    "total_timeout_ms": 60000
+    "timeout_ms": 60000,
+    "total_timeout_ms": 300000,
+    "max_tokens": 4000
   },
   "ui": {"brightness": 128, "screen_timeout_seconds": 60, "volume": 40},
   "default_ssh_profile": "开发机"
@@ -53,6 +54,7 @@
 - 全部字段可省略，缺省值即上例。
 - `stt.provider` 可选 `qwen` 或 `openrouter`（OpenRouter 时 `model` 如 `openai/whisper-large-v3`）。
 - `agent.url` 接受任何 OpenAI 兼容的 chat completions 端点；Key 取 `providers.deepseek.api_key`。
+- `agent.max_tokens` 是模型每轮最多输出多少 token（256–8000，默认 4000）。写程序时整份源码都在这一轮的输出里，700 会把程序截断；4000 够写 4 KB 以内的程序和打补丁。`agent.timeout_ms`、`agent.total_timeout_ms` 随之放宽到 60 秒（最多 65 秒，HTTP 库的限制）和 300 秒；配置里写着 0.7.1 及以前的默认值（25000、60000）时按新默认值处理。
 - 三段时间分开算：`stt.timeout_ms` 是一次语音识别请求；`agent.timeout_ms` 是模型每轮；`agent.total_timeout_ms` 是一个任务里**模型请求的累计时间**。执行工具（SSH、高德、联网搜索、本机动作）不计入，各工具有自己的超时；等待用户确认或输入密码也不计入。运行日志 `agent_done` 记录 `model=` 与 `tools=` 两项耗时。
 - `default_ssh_profile`：启动远程 Agent 时未指定主机所用的 profile；缺省为第一个 profile。
 - `ui.*` 也会被语音设置（亮度、息屏、音量）写回。

@@ -187,7 +187,9 @@ void list(Gfx& g, const std::vector<Line>& lines) {
     const int slots = std::min(kRows, count);
     scrolled_rows(g, kTop, slots, scroll_px, count, bar_at, [&](Gfx& b, int i, int y) {
         const auto& l = lines[i];
-        b.setTextColor(l.color);
+        // The selected row in the accent colour (as on the program page);
+        // rows with a colour of their own (warnings, muted) keep it.
+        b.setTextColor(i == cursor && l.color == kText ? kAccent : l.color);
         b.drawString(fit(b, l.left, kWidth - kPad * 2 - b.textWidth(l.right) - 8), kPad, y);
         b.setTextColor(kMuted);
         b.drawRightString(l.right, kWidth - kPad, y);

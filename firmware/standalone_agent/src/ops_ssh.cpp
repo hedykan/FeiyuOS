@@ -11,6 +11,7 @@
 #include "config.h"
 #include "context.h"
 #include "net.h"
+#include "registry.h"
 #include "storage.h"
 
 namespace vat::ssh {
@@ -448,6 +449,13 @@ String tool_exec(const cJSON* arguments, bool approved, const String& secret) {
     const auto result = context::on_card() ? run_keeping(profile, command, stdin_data, 20000)
                                            : run(profile, command, stdin_data, 20000);
     password_line = String();
+    if (registry::data_wanted()) {  // for a program: what the command printed, what it complained about, and its exit code
+        cJSON* data = cJSON_CreateObject();
+        cJSON_AddStringToObject(data, "stdout", result.out.c_str());
+        cJSON_AddStringToObject(data, "stderr", result.err.c_str());
+        cJSON_AddNumberToObject(data, "code", result.exit_code);
+        registry::offer_data(data);
+    }
     if (!result.ok) {
         if (!result.remote_file.isEmpty()) run(profile, "rm -f " + shell_quote(result.remote_file), nullptr, 8000, 64);
         if (program == "sudo" && result.err.indexOf("incorrect password") >= 0) return "sudo 密码不正确，未执行";

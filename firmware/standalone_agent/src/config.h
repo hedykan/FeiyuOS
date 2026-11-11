@@ -60,13 +60,18 @@ struct Config {
     // agent
     String agent_url = "https://api.deepseek.com/chat/completions";
     String agent_model = "deepseek-flash";
-    uint32_t agent_round_timeout_ms = 25000;
+    // One model request.  A round may write a whole program (agent_max_tokens of
+    // output), so this is far longer than a short answer needs.
+    uint32_t agent_round_timeout_ms = 60000;  // at most 65 s: the HTTP client keeps it in 16 bits
+    // Output tokens per round.  700 cut every program in the middle of its source;
+    // 4000 holds about 10 KB of Lua (docs/V072_PLAN.zh-CN.md, T1).
+    uint32_t agent_max_tokens = 4000;
     // Free-text personality appended to the system prompt (flavor only; editable
     // on the phone page).  Kept JSON-safe (no quote/backslash/control chars).
     String agent_persona = "你是终端里的大肥鱼——蓝发、傲娇又嘴甜的女仆鲸,聪明爱摸鱼、主食白饭、最忌被叫胖;自称「本小姐」,喊用户「主人」,嘴上傲娇、活照样办得利索。";
     // Model time per task (all rounds together).  Tool execution is not
     // counted: every tool has its own timeout, and waiting for the user is free.
-    uint32_t agent_total_timeout_ms = 60000;
+    uint32_t agent_total_timeout_ms = 300000;
     // ui
     uint8_t brightness = 128;
     uint32_t screen_timeout_seconds = 60;

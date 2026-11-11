@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <time.h>
 #include <cJSON.h>
 
 #include <vector>
@@ -20,6 +21,11 @@ void loop();
 // prog:// (programs)
 String list_text();
 String show(const String& name);
+String show_part(const String& name, const String& query);  // ?grep=关键词 | ?lines=开始-结束
+// write prog://名字/patch: replaces parts of the saved source (see prog_runtime.cpp).
+String patch(const String& name, const String& text, bool approved);
+bool patch_needs_confirm(const String& name, const String& text);
+String patch_summary(const String& name, const String& text);
 String save(const String& name, const String& source, bool approved);
 String remove(const String& name);
 // From a tool call or the program page: a foreground run (the console;
@@ -27,8 +33,14 @@ String remove(const String& name);
 String run(const String& name, const String& query, const String& stdin_text = String());
 // The program page's Enter on a program: runs it on the worker; false when busy.
 bool launch(const String& name);
-// Programs the page lists: name and about, in index order (packages excluded).
-std::vector<std::pair<String, String>> runnable();
+// Programs the page lists (packages excluded): name, about and when it was
+// last used (run, saved or changed on the card; seconds, 0 when unknown).
+struct ProgramInfo {
+    String name;
+    String about;
+    time_t used = 0;
+};
+std::vector<ProgramInfo> runnable();
 bool needs_confirm(const String& source);              // declares uses: confirm the save
 String save_summary(const String& name, const String& source);
 String legacy_text();                                  // old JSON programs, to be translated
