@@ -91,7 +91,7 @@ void finish(const String& status, bool failed) {
     state.failed = failed;
     state.status = status;
     state.wait = Wait::None;
-    preset = String();
+    release(preset);  // assigning "" would keep the buffer of the longest input
     preset_given = false;
     changed();
 }

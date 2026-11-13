@@ -4,7 +4,10 @@
 
 #include "storage.h"
 
+#include <esp_heap_caps.h>
 #include <esp_system.h>
+
+#include <atomic>
 
 namespace vat {
 
@@ -24,13 +27,29 @@ String reset_reason() {
     }
 }
 
+namespace {
+std::atomic<std::size_t> heap_low{SIZE_MAX};
+}
+
+void heap_low_fold() {
+    const std::size_t now = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    std::size_t seen = heap_low.load();
+    while (now < seen && !heap_low.compare_exchange_weak(seen, now)) {
+    }
+}
+
+std::size_t heap_low_since_boot() {
+    heap_low_fold();
+    return heap_low.load();
+}
+
 void runtime_event(const char* event, const String& detail) {
     cJSON* record = cJSON_CreateObject();
     cJSON_AddNumberToObject(record, "millis", millis());
     cJSON_AddStringToObject(record, "event", event);
     cJSON_AddNumberToObject(record, "heap", ESP.getFreeHeap());
     cJSON_AddNumberToObject(record, "max_block", ESP.getMaxAllocHeap());
-    cJSON_AddNumberToObject(record, "min_heap", ESP.getMinFreeHeap());  // low-water mark since boot
+    cJSON_AddNumberToObject(record, "min_heap", heap_low_since_boot());
     if (!detail.isEmpty()) cJSON_AddStringToObject(record, "detail", utf8_head(detail, 600).c_str());
     const String line = json_print(record);
     Serial.println(line);  // USB console mirror for development

@@ -47,5 +47,8 @@ void set_result(uint32_t id, const String& reply, const String& error = String()
 String record_json(uint32_t id);
 uint8_t& terminal_detail();
 uint32_t stack_free_min();  // bytes never touched on the worker stack
+// A finer step inside the running job ("ssh-open", "ssh-fetch" …): job_done's
+// steps(KB) list shows the low water mark of each.  Does nothing off the worker task.
+void heap_step(const String& name);
 
 }  // namespace vat::worker

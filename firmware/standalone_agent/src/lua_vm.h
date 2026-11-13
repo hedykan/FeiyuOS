@@ -15,8 +15,10 @@
 // and the package registry like the model's tool calls.
 namespace vat::luavm {
 
-constexpr std::size_t kFirstArena = 24 * 1024;  // a typical script peaks at 11-20 KB
-constexpr std::size_t kGrowArena = 12 * 1024;
+// A typical script peaks at 11-20 KB.  16 + 8 KB blocks: a 12 KB script holds
+// 16 KB, not 24 (a program calling a program holds two VMs at once).
+constexpr std::size_t kFirstArena = 16 * 1024;
+constexpr std::size_t kGrowArena = 8 * 1024;
 constexpr std::size_t kMemoryLimit = 48 * 1024;
 constexpr uint32_t kMaxInstructions = 20000000;
 constexpr uint32_t kMaxMs = 150000;   // a job past 180 s restarts the device

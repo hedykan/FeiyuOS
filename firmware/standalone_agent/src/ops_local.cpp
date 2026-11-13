@@ -119,7 +119,7 @@ String status_json(bool for_model) {
     if (!for_model) cJSON_AddStringToObject(status, "wifi_bssid", net::bssid().c_str());
     cJSON_AddNumberToObject(status, "wifi_channel", net::channel());
     cJSON_AddNumberToObject(status, "free_heap", ESP.getFreeHeap());
-    cJSON_AddNumberToObject(status, "min_free_heap", ESP.getMinFreeHeap());
+    cJSON_AddNumberToObject(status, "min_free_heap", heap_low_since_boot());
     cJSON_AddNumberToObject(status, "max_block", ESP.getMaxAllocHeap());
     cJSON_AddNumberToObject(status, "open_sockets", open_sockets());
     cJSON_AddNumberToObject(status, "max_sockets", CONFIG_LWIP_MAX_SOCKETS);

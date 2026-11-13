@@ -148,6 +148,12 @@ String needs_secret(const String& tool, const cJSON* arguments);
 // Whether the package that owns this call declares it local and reversible.
 bool reversible(const String& tool, const cJSON* arguments);
 String execute(const String& tool, const cJSON* arguments, bool approved, const String& secret = String());
+// True when a call's result says the step did not happen as asked (an error, no
+// package for it, refused, the host unreachable, the remote command failed).
+// One rule for the agent (the result's first line, the hint, retry limits) and
+// for programs (nil and why, unless the package handed over data).
+bool failed(const String& result);
+
 // A package may hand over the data of the call it is running beside the text it
 // returns: the model reads the text, a Lua program gets the data (vat.read
 // returns a table).  `text` is what that table gives where a program uses it as

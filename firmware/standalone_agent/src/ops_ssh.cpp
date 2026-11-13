@@ -13,6 +13,7 @@
 #include "net.h"
 #include "registry.h"
 #include "storage.h"
+#include "worker.h"
 
 namespace vat::ssh {
 namespace {
@@ -161,8 +162,10 @@ ExecResult run_profile(const SshProfile* profile, const String& command, const S
         return result;
     }
     begin();
+    worker::heap_step("ssh-open");
     ssh_session session = open_session(*profile, result.error);
     if (!session) return result;
+    worker::heap_step("ssh-exec");
 
     ssh_channel channel = ssh_channel_new(session);
     if (!channel || ssh_channel_open_session(channel) != SSH_OK) {
@@ -197,6 +200,7 @@ ExecResult run_profile(const SshProfile* profile, const String& command, const S
         ssh_channel_write(channel, stdin_data->c_str(), stdin_data->length());
     }
     ssh_channel_send_eof(channel);
+    worker::heap_step("ssh-read");
 
     char buffer[512];
     const unsigned long deadline = millis() + timeout_ms;
@@ -231,6 +235,7 @@ ExecResult run_profile(const SshProfile* profile, const String& command, const S
         }
         if (ssh_channel_is_eof(channel)) break;
     }
+    worker::heap_step("ssh-close");
     if (result.error.isEmpty() && !timed_out) {
         // Drain any trailing stderr, then collect the exit status.
         int e;
@@ -320,9 +325,11 @@ void file_full_output(const String& profile, const ExecResult& result) {
     if (result.remote_file.isEmpty()) return;
     constexpr char kCache[] = "/vat/cache/full.txt";
     const unsigned long started = millis();
+    worker::heap_step("ssh-fetch");
     if (fetch_output(profile, result, kCache, kFullOutputMax)) {
         context::offer_full_output(kCache, storage::size(kCache));
     }
+    worker::heap_step("ssh-done");
     runtime_event("ssh_full_output", String(result.total_bytes) + " bytes " + String(millis() - started) + "ms");
 }
 }  // namespace
@@ -449,7 +456,7 @@ String tool_exec(const cJSON* arguments, bool approved, const String& secret) {
     const auto result = context::on_card() ? run_keeping(profile, command, stdin_data, 20000)
                                            : run(profile, command, stdin_data, 20000);
     password_line = String();
-    if (registry::data_wanted()) {  // for a program: what the command printed, what it complained about, and its exit code
+    if (registry::data_wanted() && result.error.isEmpty()) {  // the command ran: what it printed, its complaints, its exit code
         cJSON* data = cJSON_CreateObject();
         cJSON_AddStringToObject(data, "stdout", result.out.c_str());
         cJSON_AddStringToObject(data, "stderr", result.err.c_str());

@@ -392,11 +392,20 @@ def operations(record: dict) -> list[dict]:
     return [call for call in record.get("calls", []) if call.get("name") != "discover"]
 
 
+FAILURE_PREFIXES = ("ERROR", "没有能力包可处理", "已拒绝", "SSH 连接失败", "SSH 失败", "命令不在自动只读允许范围")
+
+
 def validate_expect(expect: dict, record: dict) -> list[str]:
     """Same rules as the reference intent evaluation: tool names must match in
     order; expected argument keys must be equal (subset match)."""
     failures = []
     calls = operations(record)
+    # After a step fails the agent may correct itself (another command, a check):
+    # the intent is judged up to that step.  Same prefixes as registry::failed().
+    for index, call in enumerate(calls):
+        if str(call.get("result", "")).startswith(FAILURE_PREFIXES):
+            calls = calls[: index + 1]
+            break
     if expect.get("no_tool"):
         if calls:
             failures.append(f"expected clarification, got {[c['name'] for c in calls]}")
@@ -885,14 +894,18 @@ def phase_s4(device: Device, report: Report) -> None:
         record = device.text(f"让 {provider} 在 voice-agent-terminal 项目里看看 cardputer/README.md 的第一行标题是什么，只读不要修改。",
                              timeout=180)
         started = tmux_has(session)
-        screen = ""
+        # The title is "肥鱼 OS（FeiyuOS）".  An agent that sums up the whole README
+        # scrolls the title off before the last poll: every screen seen counts.
+        titled = lambda text: any(word in text for word in ("FeiyuOS", "肥鱼", "Voice Agent Terminal"))
+        screen, seen = "", ""
         for _ in range(20 if started else 0):  # not started: nothing will answer, skip the ~100 s of polling
             time.sleep(4)
             screen = device.job("observe").get("reply", "")
-            if "FeiyuOS" in screen or "Voice Agent Terminal" in screen:
+            seen += screen
+            if titled(screen):
                 break
         report.add("S4", f"agent_{name}_start", started, record.get("reply", "")[:120])
-        report.add("S4", f"agent_{name}_answer", "FeiyuOS" in screen or "Voice Agent Terminal" in screen,
+        report.add("S4", f"agent_{name}_answer", titled(seen),
                    screen[-160:] if started else "skipped: the agent did not start")
         record = device.text("中断当前 Agent。")
         report.add("S4", f"agent_{name}_interrupt",
@@ -1778,6 +1791,15 @@ def interval_trigger_cases(device: Device, report: Report) -> None:
     if tid:
         tool_call(device, "write", f"trigger://{tid}/pause", "")
 
+    # Every failed background run emits prog://event/failed, which a trigger can listen to; three in a
+    # row show on the status bar.
+    tool_call(device, "write", "prog://测试-失败记录",
+              'vat.write("device://local/clipboard", "失败记录 " .. tostring(input.event.program) .. " "'
+              ' .. tostring(input.event.failures))\n')
+    made = reply_text(tool_call(device, "write", "trigger://new", {"when": "prog://event/failed", "run": "prog://测试-失败记录"}))
+    listener = trigger_id(made)
+    report.add("S10", "failed_event_trigger", bool(listener), made[:160])
+
     # A program that always fails: paused after 5 runs in a row.
     made = reply_text(tool_call(device, "write", "trigger://new", {"when": "time://every/10s", "run": "prog://测试-坏"}))
     bad = trigger_id(made)
@@ -1789,6 +1811,24 @@ def interval_trigger_cases(device: Device, report: Report) -> None:
             break
         time.sleep(3)
     report.add("S10", "trigger_every_auto_pause", "已自动停用" in line and "连续失败 5 次" in line, line[:200])
+    clip = ""
+    deadline = time.time() + 20
+    while time.time() < deadline:  # the listener runs after the failed run
+        clip = reply_text(tool_call(device, "read", "device://local/clipboard"))
+        if "失败记录 测试-坏 5" in clip:
+            break
+        time.sleep(2)
+    report.add("S10", "failed_event_runs_listener", "失败记录 测试-坏 5" in clip, clip[:120])
+    rows = reply_text(tool_call(device, "read", "settings://"))
+    before_bar = re.search(r"顶栏：(.*)", rows)
+    tool_call(device, "write", "settings://statusbar", "时间,后台失败")  # the item may not be in this device's choice
+    bar = device.status()["screen"].get("status", "")
+    report.add("S10", "failed_status_item", "失败" in bar, bar)
+    restore = before_bar.group(1).strip() if before_bar else "时间,电量,信号"
+    tool_call(device, "write", "settings://statusbar", "" if restore == "不显示" else restore.replace("·", ","))
+    if listener:
+        device.text(f"删除触发 #{listener}")
+        device.resolve_all(approve=True)
 
     text = reply_text(tool_call(device, "write", "trigger://clean", ""))
     report.add("S10", "trigger_clean_needs_confirm", "未执行" in text, text[:160])

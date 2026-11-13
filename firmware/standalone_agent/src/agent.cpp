@@ -252,6 +252,17 @@ struct Task {
 };
 Task task;
 
+// A task's strings, freed: `task = Task{}` alone keeps each one's buffer (an
+// Arduino String assigned empty keeps its capacity), so the longest request and
+// error of the day stayed allocated between tasks.
+void reset_task() {
+    release(task.transcript);
+    release(task.last_error);
+    release(task.last_error_call);
+    for (auto& queued : task.queue) release(queued.arguments);
+    task = Task{};
+}
+
 // Serialises one message of the task; a failed print (cJSON is silent about
 // allocation failures) marks the task so its turn is stored in short form.
 String piece(cJSON* item) {
@@ -367,7 +378,8 @@ void task_message(cJSON* item) {
         json = piece(small);
         cJSON_Delete(small);
     }
-    if (json.isEmpty() || !context::task_append("," + json)) task.broken = true;
+    // The separator on its own: "," + json would be one more copy of a long message.
+    if (json.isEmpty() || !context::task_append(",") || !context::task_append(json)) task.broken = true;
 }
 
 Outcome finish(const String& reply) {
@@ -397,6 +409,7 @@ Outcome finish(const String& reply) {
     runtime_event("agent_done", String(outcome.elapsed_ms) + "ms model=" + task.model_ms + "ms tools=" +
                                     task.tool_ms + "ms steps=" + outcome.steps + " calls=" + task.calls.size() + " " +
                                     utf8_head(outcome.reply, 120));
+    reset_task();  // over: nothing of it is needed until the next one
     return outcome;
 }
 
@@ -411,6 +424,7 @@ Outcome fail(const String& error) {
     task.active = false;
     runtime_event("agent_error", String(outcome.elapsed_ms) + "ms model=" + task.model_ms + "ms tools=" +
                                      task.tool_ms + "ms " + utf8_head(error, 160));
+    reset_task();  // over: nothing of it is needed until the next one
     return outcome;
 }
 
@@ -436,9 +450,7 @@ Outcome pause_for(const QueuedCall& call, const String& reason, const String& se
     return outcome;
 }
 
-bool failed_result(const String& result) {
-    return result.startsWith("ERROR") || result.startsWith("没有能力包可处理") || result.startsWith("已拒绝");
-}
+bool failed_result(const String& result) { return registry::failed(result); }
 
 // What to do about a failure: every error ends with the next step, so the
 // model does not repeat the call or give up where one more read would do.
@@ -467,6 +479,10 @@ String hint_for(const String& text) {
                    " 行附近，改好后保存并重新运行。";
         }
     }
+    if (text.startsWith("SSH 连接失败")) return "主机连不上：不要反复重试，告诉用户检查主机和网络。";
+    if (text.startsWith("SSH 失败")) {
+        return "命令在远端执行了但报告失败（退出码不是 0）：看上面的错误输出，路径或参数写错就改了再执行，不要原样重试。";
+    }
     if (text.indexOf("缺少参数") >= 0) return "运行时带上参数：exec prog://名字?参数=值。";
     if (text.indexOf("没有程序「") >= 0) return "read prog://list 看有哪些程序，名字要完全一致。";
     return "读懂上面的原因再决定：改参数重试一次，或换个方法；同样的错误不要重复两次。";
@@ -487,6 +503,34 @@ String presented(const String& result, const String& kept, long ms) {
 // What the task keeps of a call until it ends (the timeline, the job record):
 // not the whole source of a program it wrote, nor a long result.  Both are in
 // storage already; in memory they were several copies of several KB each.
+// The first `max` bytes of `text`, cut at a UTF-8 character boundary, without
+// copying the rest of it.
+String head_of(const char* text, std::size_t max) {
+    std::size_t n = strnlen(text, max + 1);
+    if (n > max) {
+        n = max;
+        while (n > 0 && (static_cast<uint8_t>(text[n]) & 0xC0) == 0x80) --n;
+    }
+    String out;
+    out.reserve(n);
+    out.concat(text, n);
+    return out;
+}
+
+// `arguments` printed with a long content cut to its head (the tree is left as it was).
+String slim_tree(cJSON* arguments) {
+    cJSON* content = cJSON_GetObjectItemCaseSensitive(arguments, "content");
+    const std::size_t bytes = cJSON_IsString(content) ? strlen(content->valuestring) : 0;
+    if (bytes <= 400) return json_print(arguments);
+    cJSON* full = cJSON_DetachItemViaPointer(arguments, content);
+    cJSON_AddStringToObject(arguments, "content",
+                            (head_of(full->valuestring, 300) + "…（共 " + String(static_cast<unsigned>(bytes)) + " 字节）").c_str());
+    const String out = json_print(arguments);
+    cJSON_DeleteItemFromObjectCaseSensitive(arguments, "content");
+    cJSON_AddItemToObject(arguments, "content", full);
+    return out;
+}
+
 String slim_arguments(const String& arguments) {
     if (arguments.length() <= 800) return arguments;
     cJSON* parsed = cJSON_Parse(arguments.c_str());
@@ -516,7 +560,7 @@ void record_result(const QueuedCall& call, const String& decision, const String&
     record.result = utf8_head(record.result, 1500);
     task.calls.push_back(std::move(record));
     task_message(tool_result(call.id, utf8_sanitize(in_context)));
-    if (result.startsWith("ERROR")) {
+    if (registry::failed(result)) {
         const String key = call.name + call.arguments;
         if (key == task.last_error_call && result == task.last_error) task.stuck = true;
         task.last_error = result;
@@ -580,6 +624,9 @@ bool drain_queue(Outcome& paused, const String* secret, const Progress& progress
                     return true;
                 }
                 if (progress) progress("RUN " + call.name);
+                // From here the parsed arguments do the work; the queue's copy of a
+                // program's source would only sit beside it while it compiles.
+                if (call.arguments.length() > 800) call.arguments = slim_tree(arguments);
                 const bool approved = call.approved || task.approve_all || verdict.decision == policy::Decision::Ask;
                 const unsigned long began = millis();
                 const String result = registry::execute(call.name, arguments, approved, secret ? *secret : String());
@@ -634,19 +681,34 @@ Outcome advance(const String* secret, const Progress& progress) {
         else cJSON_AddStringToObject(assistant, "content", content.c_str());
         cJSON* kept = cJSON_AddArrayToObject(assistant, "tool_calls");
         bool counts_as_step = false;
+        // A call that writes a program carries its whole source: it is parsed once to
+        // check it, kept once for the queue, and the reply's own item moves into
+        // the history (it used to be copied there, and the queue held a reprint).
         for (int i = 0; i < count && i < kMaxCallsPerRound; ++i) {
-            const cJSON* raw = cJSON_GetArrayItem(tool_calls, i);
-            const cJSON* function = json_obj(raw, "function");
+            cJSON* raw = cJSON_DetachItemFromArray(tool_calls, 0);
+            if (!raw) break;
+            cJSON* function = cJSON_GetObjectItemCaseSensitive(raw, "function");
+            if (!cJSON_IsObject(function)) {
+                cJSON_Delete(raw);
+                continue;
+            }
             QueuedCall call;
             call.id = json_str(raw, "id", "call-" + String(millis()) + "-" + String(i));
             call.name = json_str(function, "name", "unknown");
-            cJSON* arguments = cJSON_Parse(json_str(function, "arguments", "{}").c_str());
-            if (!cJSON_IsObject(arguments)) {
-                cJSON_Delete(arguments);
-                arguments = cJSON_CreateObject();
+            cJSON* text = cJSON_GetObjectItemCaseSensitive(function, "arguments");
+            cJSON* parsed = cJSON_IsString(text) ? cJSON_Parse(text->valuestring) : nullptr;
+            const bool valid = cJSON_IsObject(parsed);
+            cJSON_Delete(parsed);
+            if (valid) {
+                call.arguments = text->valuestring;
+            } else {  // what the model sent is not an object: both sides see {}
+                call.arguments = "{}";
+                cJSON_ReplaceItemInObjectCaseSensitive(function, "arguments", cJSON_CreateString("{}"));
             }
-            call.arguments = to_json(arguments);
-            cJSON_AddItemToArray(kept, tool_call(call.id, call.name, call.arguments));
+            cJSON_DeleteItemFromObjectCaseSensitive(raw, "index");  // the stream position, not part of a message
+            cJSON_ReplaceItemInObjectCaseSensitive(raw, "id", cJSON_CreateString(call.id.c_str()));
+            if (!cJSON_GetObjectItemCaseSensitive(raw, "type")) cJSON_AddStringToObject(raw, "type", "function");
+            cJSON_AddItemToArray(kept, raw);
             counts_as_step = counts_as_step || call.name != "discover";
             task.queue.push_back(std::move(call));
         }
@@ -660,7 +722,7 @@ Outcome advance(const String* secret, const Progress& progress) {
 }  // namespace
 
 Outcome run(const String& transcript, const Progress& progress, bool unattended) {
-    task = Task{};
+    reset_task();
     context::task_begin();
     task.active = true;
     task.transcript = transcript;
@@ -749,7 +811,7 @@ void maintain() {
 void abort_task() {
     if (!task.active) return;
     runtime_event("agent_abort", utf8_head(task.transcript, 80));
-    task = Task{};
+    reset_task();
     context::task_begin();
 }
 

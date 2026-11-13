@@ -52,6 +52,12 @@ String reset_reason();
 // Append one structured line to /vat/logs/runtime.jsonl.
 void runtime_event(const char* event, const String& detail = "");
 
+// The lowest free heap since boot.  ESP-IDF's own low-water mark is reset each
+// time the worker starts a per-step monitor, so whoever resets it calls
+// heap_low_fold() first, and readers use heap_low_since_boot().
+void heap_low_fold();
+std::size_t heap_low_since_boot();
+
 }  // namespace vat
 
 namespace vat::cancel {

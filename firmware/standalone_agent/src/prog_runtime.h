@@ -17,6 +17,8 @@ namespace vat::programs {
 // worker when nothing else is running.
 void on_event(const String& target, const String& data);
 void loop();
+// How many programs have failed three or more background runs in a row (since boot).
+int failing();
 
 // prog:// (programs)
 String list_text();

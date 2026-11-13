@@ -8,6 +8,7 @@
 #include "config.h"
 #include "net.h"
 #include "ops_ble.h"
+#include "prog_runtime.h"
 
 namespace vat::ui {
 
@@ -53,6 +54,10 @@ String text_of(const String& id) {
     if (id == "ssid") return net::ssid();
     if (id == "heap") return String(ESP.getFreeHeap() / 1024) + "K";
     if (id == "ble") return ble::running() ? "BT" : "";
+    if (id == "failed") {
+        const int n = programs::failing();
+        return n > 0 ? "失败" + String(n) : String();
+    }
     return "";
 }
 
@@ -74,7 +79,8 @@ String signature() {
 
 const std::vector<Item>& all() {
     static const std::vector<Item> items = {{"time", "时间"},    {"battery", "电量"}, {"signal", "Wi-Fi 信号"},
-                                            {"ssid", "Wi-Fi 名称"}, {"heap", "剩余内存"}, {"ble", "蓝牙"}};
+                                            {"ssid", "Wi-Fi 名称"}, {"heap", "剩余内存"}, {"ble", "蓝牙"},
+                                            {"failed", "后台失败"}};
     return items;
 }
 
@@ -131,10 +137,20 @@ void draw(Gfx& g, int top, int right, int left, uint16_t bg) {
         if (id == "time") color = kText;
         if (id == "battery" && battery() < 20) color = kWarn;
         if (id == "ble") color = kAccent;
+        if (id == "failed") color = kDanger;
         g.setTextColor(color, bg);
         g.drawString(text, right - w, top + 2);
         right -= w + kGap;
     }
+}
+
+String line() {
+    String out;
+    for (const auto& id : chosen()) {
+        const String text = id == "signal" ? String(signal_level()) + "格" : text_of(id);
+        if (!text.isEmpty()) out += String(out.isEmpty() ? "" : " ") + text;
+    }
+    return out;
 }
 
 bool changed() {

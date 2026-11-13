@@ -1540,6 +1540,7 @@ String screen_text() {
     String header = current_page == Page::Terminal ? "SSH " + model.terminal_title : String(page_name(current_page));
     if (current_page == Page::Program) header += " " + console::head().name;
     cJSON_AddStringToObject(root, "header", header.c_str());
+    cJSON_AddStringToObject(root, "status", status::line().c_str());  // the top bar's items
     cJSON_AddStringToObject(root, "notice", model.notice.c_str());  // the bottom line ("" when none)
     String body;
     if (current_page == Page::Terminal) {

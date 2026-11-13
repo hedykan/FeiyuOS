@@ -7,12 +7,14 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <vector>
 
 #include "agent.h"
 #include "common.h"
 #include "console.h"
+#include "events.h"
 #include "io_log.h"
 #include "lua_meta.h"
 #include "lua_vm.h"
@@ -29,7 +31,13 @@ constexpr char kDir[] = "/vat/things/lua";
 constexpr char kIndex[] = "/vat/things/lua/index.json";
 constexpr char kApproved[] = "/vat/things/lua/approved.json";
 constexpr char kTriggers[] = "/vat/things/lua/triggers.json";
-constexpr char kStats[] = "/vat/prog/stats.json";
+// When each program was made and last ran: one line per program, "名字\t创建\t最近运行"
+// (seconds), as plain text.  stats.json was parsed and printed whole on every run
+// (25-30 KB at once with 6.5 KB of stats); one file per program made the program
+// list read one file per program, 3 s each on a slow card (2026-11-12).
+constexpr char kUsed[] = "/vat/prog/used.tsv";
+constexpr char kOldStats[] = "/vat/prog/stats.json";  // before v0.7.3: converted once at load
+constexpr std::size_t kUsedMax = 16384;
 constexpr char kLegacyDir[] = "/vat/things/prog/programs";      // v0.6.2 JSON programs
 constexpr char kLegacyTriggers[] = "/vat/things/prog/triggers.json";
 constexpr std::size_t kMaxFiles = 64;
@@ -131,20 +139,79 @@ void note_recent(const String& line) {
     if (recent.size() > 6) recent.erase(recent.begin());
 }
 
-void record_stat(const String& name, bool created, bool ok, const String& result) {
-    cJSON* root = object_at(kStats);
-    cJSON* entry = json_obj(root, name.c_str());
-    if (!entry) entry = cJSON_AddObjectToObject(root, name.c_str());
-    const double now = static_cast<double>(time(nullptr));
-    if (created) {
-        put(entry, "created", cJSON_CreateNumber(now));
-    } else {
-        put(entry, "last", cJSON_CreateNumber(now));
-        put(entry, "ok", cJSON_CreateBool(ok));
-        put(entry, "result", cJSON_CreateString(utf8_head(result, 80).c_str()));
+std::mutex used_lock;
+
+struct Used {
+    long long created = 0;
+    long long last = 0;
+};
+
+// The file's text, starting with a newline: every line, the first too, is found as "\n名字\t".
+String used_text() {
+    String text = storage::read_text(kUsed, kUsedMax);
+    return text.startsWith("\n") ? text : "\n" + text;
+}
+
+int used_line(const String& text, const String& name) { return text.indexOf("\n" + name + "\t"); }
+
+Used used_of(const String& text, const String& name) {
+    Used u;
+    const int at = used_line(text, name);
+    if (at < 0) return u;
+    const int from = at + 1 + name.length() + 1;
+    const int tab = text.indexOf('\t', from);
+    int end = text.indexOf('\n', from);
+    if (end < 0) end = text.length();
+    if (tab < 0 || tab > end) return u;
+    u.created = atoll(text.substring(from, tab).c_str());
+    u.last = atoll(text.substring(tab + 1, end).c_str());
+    return u;
+}
+
+void put_used(String& text, const String& name, const Used& u) {
+    text += "\n" + name + "\t" + String(u.created) + "\t" + String(u.last);
+}
+
+enum class UsedChange { Created, Ran, Forget };
+
+void change_used(const String& name, UsedChange change) {
+    std::lock_guard<std::mutex> guard(used_lock);
+    String text = used_text();
+    Used u = used_of(text, name);
+    const int at = used_line(text, name);
+    if (at >= 0) {
+        const int end = text.indexOf('\n', at + 1);
+        text.remove(at, (end < 0 ? text.length() : end) - at);
     }
-    write_json(kStats, root);
+    if (change != UsedChange::Forget) {
+        (change == UsedChange::Created ? u.created : u.last) = static_cast<long long>(time(nullptr));
+        put_used(text, name, u);
+    }
+    if (storage::ensure_parent(kUsed)) storage::write_text(kUsed, text);
+}
+
+String used_snapshot() {
+    std::lock_guard<std::mutex> guard(used_lock);
+    return used_text();
+}
+
+void convert_old_stats() {
+    if (!storage::exists(kOldStats)) return;
+    std::lock_guard<std::mutex> guard(used_lock);
+    cJSON* root = read_json(kOldStats);
+    String text = used_text();
+    const cJSON* entry = nullptr;
+    cJSON_ArrayForEach(entry, root) {
+        if (!cJSON_IsObject(entry) || !entry->string || used_line(text, entry->string) >= 0) continue;
+        Used u;
+        const cJSON* t = cJSON_GetObjectItemCaseSensitive(entry, "created");
+        if (cJSON_IsNumber(t)) u.created = static_cast<long long>(t->valuedouble);
+        t = cJSON_GetObjectItemCaseSensitive(entry, "last");
+        if (cJSON_IsNumber(t)) u.last = static_cast<long long>(t->valuedouble);
+        put_used(text, entry->string, u);
+    }
     cJSON_Delete(root);
+    if (storage::ensure_parent(kUsed) && storage::write_text(kUsed, text)) storage::remove(kOldStats);
 }
 
 void forget(const char* path, const String& name) {
@@ -414,7 +481,7 @@ Outcome run_checked(const String& name, const String& query, const String& event
     }
     runtime_event("prog_run", name + (o.ok ? " done" : " failed") + " peak=" + String(static_cast<unsigned>(stats.peak)) +
                                   " arena=" + String(static_cast<unsigned>(stats.arena)) + " ms=" + String(stats.ms));
-    record_stat(name, false, o.ok, o.ok ? o.result : o.error);
+    change_used(name, UsedChange::Ran);
     note_recent(name + (o.ok ? " 完成" : " 失败：" + o.error));
     return o;
 }
@@ -425,6 +492,40 @@ Outcome run_checked(const String& name, const String& query, const String& event
 int run_level = 0;
 bool run_foreground = false;
 String next_origin;  // who starts the next outermost run, for the streams ("" = a tool call)
+
+// Background runs (triggers, vat.after, boot) that failed: how many times in a
+// row per program, since boot.  Every failure emits prog://event/failed, which
+// triggers can listen to; the status bar shows how many programs have failed
+// kFailingShown times or more in a row.  A run started by that event does not
+// emit it again (a handler that fails would loop).
+constexpr int kFailingShown = 3;
+std::map<String, int> fail_streak;  // worker task only
+std::atomic<int> failing_count{0};
+bool quiet_failure = false;
+
+void note_background(const String& name, const Outcome& o) {
+    int streak = 0;
+    if (o.ok) {
+        fail_streak.erase(name);
+    } else {
+        streak = ++fail_streak[name];
+    }
+    int failing = 0;
+    for (const auto& entry : fail_streak) failing += entry.second >= kFailingShown;
+    failing_count = failing;
+    if (o.ok || quiet_failure) return;
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "program", name.c_str());
+    cJSON_AddNumberToObject(data, "failures", streak);
+    cJSON_AddNumberToObject(data, "run", o.id);
+    String first = o.error;
+    const int nl = first.indexOf('\n');
+    if (nl >= 0) first = first.substring(0, nl);
+    cJSON_AddStringToObject(data, "error", utf8_head(first, 200).c_str());
+    const String json = json_print(data);
+    cJSON_Delete(data);
+    events::emit("prog://event/failed", json);
+}
 
 Outcome run_program(const String& name, const String& query, const String& event_json, bool foreground,
                     const String& stdin_text = String()) {
@@ -437,6 +538,7 @@ Outcome run_program(const String& name, const String& query, const String& event
     ++run_level;
     Outcome o = run_checked(name, query, event_json, fg, origin);
     --run_level;
+    if (top && !fg) note_background(name, o);
     if (top && fg) {
         const bool stopped = cancel::requested();
         if (!o.ok) console::write(o.error + "\n", true);
@@ -630,6 +732,11 @@ void job(uint32_t job_id, const String& text) {
     ui::set_busy("RUN 程序");
     ui::entry_begin("[程序] " + label);
     next_origin = (trigger ? "触发:" : "后台:") + label;
+    quiet_failure = false;
+    if (trigger) {
+        std::lock_guard<std::mutex> guard(lock);
+        for (const auto& t : triggers) quiet_failure = quiet_failure || (t.id == trigger && t.when.startsWith("prog://event/"));
+    }
     const Outcome r = run_program(program, query, data, false);
     const String summary = r.ok ? (r.result.isEmpty() ? String("完成") : r.result) : r.error;
     ui::entry_finish(r.ok ? ui::Status::Done : ui::Status::Failed, summary, r.output, "[]");
@@ -640,6 +747,12 @@ void job(uint32_t job_id, const String& text) {
 
 // A run as the model reads it: the result, the output, the error output, and
 // for a failure the source line and the frames of the program, each apart.
+}  // namespace
+
+int failing() { return failing_count.load(); }
+
+namespace {
+
 String run_text(const String& name, const Outcome& r) {
     if (!r.id && !r.ok) return "ERROR: 程序「" + name + "」失败：" + r.error;  // it never started
     const String stats = (r.stats.instructions ? "指令 " + String(r.stats.instructions) + " · " : String()) + "内存峰值 " +
@@ -701,6 +814,7 @@ void loop() {
     if (!loaded) {
         if (!storage::ready()) return;
         loaded = true;
+        convert_old_stats();
         if (!storage::exists(kIndex)) scan();
         load_triggers();
         last_arm = millis() - 20000;  // arm right away
@@ -955,7 +1069,7 @@ String save(const String& name, const String& source, bool approved) {
     if (must_confirm(h)) confirm(name, h);
     else forget(kApproved, name);
     index_add(name);
-    if (!existed) record_stat(name, true, true, "");
+    if (!existed) change_used(name, UsedChange::Created);
     String out = (existed ? "已修改程序「" : "已保存程序「") + signature(name, h) + "」";
     if (!h.uses.empty()) out += "，已确认 " + String(static_cast<int>(h.uses.size())) + " 项权限";
     return out + "。运行：exec prog://" + name + "；定时或开机运行：write trigger://new";
@@ -968,7 +1082,7 @@ String remove(const String& name) {
     storage::remove(path_of(name));
     storage::remove(old_path_of(name));
     forget(kApproved, name);
-    forget(kStats, name);
+    change_used(name, UsedChange::Forget);
     index_remove(name);
     return "已删除「" + name + "」";
 }
@@ -1001,7 +1115,7 @@ String run(const String& name, const String& query, const String& stdin_text) {
     // A program that calls this one gets the run as data (nil and the error when it
     // failed, as for any call); its text is what was returned.
     const String text = run_text(name, r);
-    if (registry::data_wanted()) {
+    if (registry::data_wanted() && r.ok) {  // a program that failed is a failed call: nil and why
         cJSON* data = cJSON_CreateObject();
         cJSON_AddBoolToObject(data, "ok", r.ok);
         cJSON_AddStringToObject(data, "result", r.result.c_str());
@@ -1032,7 +1146,7 @@ bool launch(const String& name) {
 // running, and the failed allocation took the device down).
 std::vector<ProgramInfo> runnable() {
     std::vector<ProgramInfo> out;
-    cJSON* stats = object_at(kStats);
+    const String used = used_snapshot();
     cJSON* files = cJSON_Parse(storage::list_dir(kDir).c_str());
     cJSON* index = read_json(kIndex);
     cJSON* approved = object_at(kApproved);
@@ -1044,11 +1158,8 @@ std::vector<ProgramInfo> runnable() {
         if (!load_entry(json_str(item, "name"), e)) continue;
         if (!e.header.package.isEmpty()) continue;
         ProgramInfo p{e.name, e.header.about, 0};
-        const cJSON* stat = json_obj(stats, e.name.c_str());
-        for (const char* key : {"last", "created"}) {
-            const cJSON* t = cJSON_GetObjectItemCaseSensitive(stat, key);
-            if (cJSON_IsNumber(t)) p.used = std::max<time_t>(p.used, static_cast<time_t>(t->valuedouble));
-        }
+        const Used u = used_of(used, e.name);
+        p.used = static_cast<time_t>(std::max(u.created, u.last));
         const cJSON* file = nullptr;
         cJSON_ArrayForEach(file, files) {
             if (json_str(file, "name") == e.name + ".lua") {
@@ -1062,7 +1173,6 @@ std::vector<ProgramInfo> runnable() {
     cJSON_Delete(approved);
     cJSON_Delete(index);
     cJSON_Delete(files);
-    cJSON_Delete(stats);
     return out;
 }
 

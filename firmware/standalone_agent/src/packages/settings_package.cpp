@@ -18,7 +18,7 @@ namespace {
 
 constexpr char kUsage[] =
     "设置（settings://）：read settings:// 看设置页各项当前值；write settings://animation content 为 开、减弱 或 关；"
-    "write settings://statusbar content 为顶栏要显示的项，按顺序用逗号分隔（时间、电量、信号、WiFi名、内存、蓝牙，空表示都不显示）；"
+    "write settings://statusbar content 为顶栏要显示的项，按顺序用逗号分隔（时间、电量、信号、WiFi名、内存、蓝牙、后台失败，空表示都不显示）；"
     "write settings://font content 为终端字号 10、12 或 14；"
     "要输入 Key 时 write settings://open/key/qwen（或 deepseek、openrouter、amap）在设备上弹出输入框，由用户在键盘上输入，不要向用户索要 Key；"
     "write settings://open/页名 打开设置页（wifi keys hosts lora ble statusbar animation font context storage portal webtoken）。";

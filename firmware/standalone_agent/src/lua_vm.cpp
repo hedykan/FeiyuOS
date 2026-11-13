@@ -31,6 +31,7 @@ struct Arena {
     uint8_t* block = nullptr;
     std::size_t size = 0;
     multi_heap_handle_t heap = nullptr;
+    int live = 0;  // allocations in it: a block left empty (moved out of) goes back to the heap
 };
 
 struct Context {
@@ -67,8 +68,10 @@ bool grow(Context& c, std::size_t need) {
     // (TLSF rounds requests up to a size class), so try and shrink by a
     // quarter until it fits, down to what this request needs.
     const std::size_t floor = std::max<std::size_t>(need + 512, 3072);
+    constexpr uint32_t kCaps = MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL;
+    size = std::max(floor, std::min(size, heap_caps_get_largest_free_block(kCaps)));  // no request bound to fail
     uint8_t* block = nullptr;
-    while (size >= floor && !(block = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)))) {
+    while (size >= floor && !(block = static_cast<uint8_t*>(heap_caps_malloc(size, kCaps)))) {
         size = size * 3 / 4;
     }
     if (!block) return false;
@@ -92,10 +95,28 @@ Arena* arena_of(Context& c, void* p) {
 
 void* arena_malloc(Context& c, std::size_t size) {
     for (int i = 0; i < c.count; ++i) {
-        if (void* p = multi_heap_malloc(c.arenas[i].heap, size)) return p;
+        if (void* p = multi_heap_malloc(c.arenas[i].heap, size)) {
+            ++c.arenas[i].live;
+            return p;
+        }
     }
     if (!grow(c, size)) return nullptr;
-    return multi_heap_malloc(c.arenas[c.count - 1].heap, size);
+    void* p = multi_heap_malloc(c.arenas[c.count - 1].heap, size);
+    if (p) ++c.arenas[c.count - 1].live;
+    return p;
+}
+
+// After a free: a block other than the first that holds nothing any more is
+// given back.  Without this, blocks emptied by a realloc that moved (the
+// compiler grows its arrays by doubling) kept counting against kMemoryLimit:
+// a 6 KB program failed to compile with 25 KB in use.
+void arena_free(Context& c, Arena* a, void* ptr) {
+    multi_heap_free(a->heap, ptr);
+    if (--a->live > 0 || a == &c.arenas[0]) return;
+    heap_caps_free(a->block);
+    c.taken -= a->size;
+    *a = c.arenas[c.count - 1];  // the last one takes its place (order does not matter)
+    c.arenas[--c.count] = Arena();
 }
 
 void* allocate(void* ud, void* ptr, size_t osize, size_t nsize) {
@@ -103,7 +124,7 @@ void* allocate(void* ud, void* ptr, size_t osize, size_t nsize) {
     const std::size_t old = ptr ? osize : 0;
     if (nsize == 0) {
         if (ptr) {
-            if (Arena* a = arena_of(c, ptr)) multi_heap_free(a->heap, ptr);
+            if (Arena* a = arena_of(c, ptr)) arena_free(c, a, ptr);
             c.used -= old;
         }
         return nullptr;
@@ -119,7 +140,7 @@ void* allocate(void* ud, void* ptr, size_t osize, size_t nsize) {
             p = arena_malloc(c, nsize);
             if (!p) return nullptr;
             std::memcpy(p, ptr, std::min(old, static_cast<std::size_t>(nsize)));
-            multi_heap_free(a->heap, ptr);
+            arena_free(c, arena_of(c, ptr), ptr);  // looked up again: arena_malloc may have added one
         }
     }
     if (!p) return nullptr;
@@ -571,6 +592,7 @@ int call_tool(lua_State* L, const char* tool, cJSON* args) {
     check_time(L);
     const String target = json_str(args, "target");
     if (target.startsWith("lua://")) return refuse(L, tool, target, "Lua 程序里不能运行 lua://");
+    worker::heap_step(String(tool) + ">policy");
     const auto verdict = policy::evaluate(tool, args);
     const auto* uses = context(L).options->uses;
     bool approved = false;
@@ -591,23 +613,26 @@ int call_tool(lua_State* L, const char* tool, cJSON* args) {
         error = String("联网要在程序开头声明 -- @uses ") + tool + " " + target +
                 "（可用 * 结尾，如 https://api.example.com/*），保存时由用户确认";
     }
+    worker::heap_step(String(tool) + ">secret");
     if (error.isEmpty() && !registry::needs_secret(tool, args).isEmpty()) error = "需要输入密钥，程序里不能输入：先让肥鱼调用一次";
     if (!error.isEmpty()) return refuse(L, tool, target, error);
     registry::want_data(true);
+    worker::heap_step(String(tool) + ">exec");
     const String out = registry::execute(tool, args, approved);
+    worker::heap_step(String(tool) + ">result");
     String text;
     Json data(registry::take_data(&text));
     registry::want_data(false);
     if (text.isEmpty()) text = out;
     const bool as_text = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(args, "text"));  // the option {text = true}
-    const bool failed = out.startsWith("ERROR") || out.startsWith("没有能力包可处理");
-    // Data comes back as a table.  A failure is nil and why, whatever failed: a
-    // program that was called and ended with an error is a failed call like any other.
-    if (data.p && !as_text && !failed) {
+    // Data comes back as a table: a package hands it over only when the call did
+    // what it was asked (a remote command that ran, whatever its exit code; a
+    // program that finished).  Otherwise a failure is nil and why.
+    if (data.p && !as_text) {
         push_data(L, data.p, text);
         return 1;
     }
-    if (failed) return refuse(L, tool, target, out);
+    if (registry::failed(out)) return refuse(L, tool, target, out);
     registry::Package::StreamSpec spec;
     if (!as_text && std::strcmp(tool, "read") == 0 && registry::stream_spec(target, spec)) {
         // A stream read once: its fields, as vat.stream gives them.
@@ -819,6 +844,7 @@ bool run(const String& source, const String& name, const Options& options, Strin
     c.started = millis();
     c.output = &output;
     c.options = &options;
+    worker::heap_step(name + ">open");
     lua_State* L = lua_newstate(allocate, &c);
     if (!L) {
         release(c);
@@ -835,7 +861,10 @@ bool run(const String& source, const String& name, const Options& options, Strin
         lua_sethook(L, hook, LUA_MASKCOUNT, 1000);
         lua_pushcfunction(L, traceback);
         const String chunk = "=" + name;
-        if (luaL_loadbufferx(L, source.c_str(), source.length(), chunk.c_str(), "t") != LUA_OK) {
+        worker::heap_step(name + ">load");
+        const int loaded = luaL_loadbufferx(L, source.c_str(), source.length(), chunk.c_str(), "t");
+        worker::heap_step(name + ">run");
+        if (loaded != LUA_OK) {
             const String problem = lua_tostring(L, -1);
             error = problem.indexOf("not enough memory") >= 0 ? String(kTooBig) : "语法错误：" + problem;
         } else if (lua_pcall(L, 0, 1, -2) != LUA_OK) {
@@ -864,6 +893,7 @@ bool run(const String& source, const String& name, const Options& options, Strin
     stats.ms = millis() - c.started;
     lua_close(L);
     release(c);
+    worker::heap_step(name + ">after");
     return ok;
 }
 

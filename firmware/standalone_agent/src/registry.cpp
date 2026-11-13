@@ -218,7 +218,7 @@ String discover_resources(const String& query, int limit) {
         if (cJSON_IsBool(connected)) text += cJSON_IsTrue(connected) ? "（已连接）" : "（未连接）";
         const String kind = json_str(item, "kind");
         if (kind.startsWith("事件：")) text += "（" + kind + "，可作触发）";
-        if (kind.startsWith("流：")) text += "（" + kind + "；程序里用 {\"stream\": 它, \"as\": 名字} 取最新值）";
+        if (kind.startsWith("流：")) text += "（" + kind + "；程序里用 vat.stream(它) 取最新值）";
         text += "\n";
     }
     cJSON_Delete(list);
@@ -487,6 +487,15 @@ bool read_stream(const String& target, String& out, uint32_t wait_ms) {
     }
 }
 
+bool failed(const String& result) {
+    static const char* const kFailures[] = {"ERROR", "没有能力包可处理", "已拒绝", "SSH 连接失败", "SSH 失败",
+                                            "命令不在自动只读允许范围"};
+    for (const char* prefix : kFailures) {
+        if (result.startsWith(prefix)) return true;
+    }
+    return false;
+}
+
 namespace {
 cJSON* offered = nullptr;
 String offered_text;
@@ -502,7 +511,7 @@ void offer_data(cJSON* data, const String& text) {
     if (wanted <= 0) {  // nobody will take it
         cJSON_Delete(data);
         offered = nullptr;
-        offered_text = String();
+        release(offered_text);
         return;
     }
     offered = data;
@@ -512,8 +521,8 @@ void offer_data(cJSON* data, const String& text) {
 cJSON* take_data(String* text) {
     cJSON* data = offered;
     offered = nullptr;
-    if (text) *text = offered_text;
-    offered_text = String();
+    if (text) *text = std::move(offered_text);
+    release(offered_text);
     return data;
 }
 

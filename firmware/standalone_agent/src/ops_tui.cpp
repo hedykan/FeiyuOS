@@ -20,7 +20,8 @@ String discovery_script(const String& provider) {
 bool resolve_session(const String& target, Session& session, String& error) {
     if (target.isEmpty() || target == "tui://current" || target == "agent://current") {
         if (!active_valid) {
-            error = "当前没有活动 TUI，请先启动 Codex、Pi 或连接 tmux 会话";
+            // A failure (registry::failed): repeating the call cannot help, and the agent stops after two.
+            error = "ERROR: 当前没有活动 TUI，请先启动 Codex、Pi 或连接 tmux 会话";
             return false;
         }
         session = active;
@@ -397,7 +398,7 @@ String tmux_attach(const String& target) {
     Session session;
     String error;
     if (!resolve_session(target, session, error)) return error;
-    if (!session_exists(session.profile, session.name)) return "tmux 会话不存在: " + session.name;
+    if (!session_exists(session.profile, session.name)) return "ERROR: tmux 会话不存在: " + session.name;
     active = session;
     active_valid = true;
     remember_active();

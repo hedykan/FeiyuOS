@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "worker.h"
 #include "registry.h"
 #include "policy.h"
@@ -24,6 +25,9 @@
 
 namespace vat::worker {
 namespace {
+
+void agent_stage(const String& stage);
+void heap_mark(const String& next);  // below: records each step's heap low, then shows the stage
 
 constexpr uint32_t kStackBytes = 24576;  // peak 15.4-16 KB (libssh + mbedTLS, full E2E); 1.5x headroom (was 32 KB)
 constexpr std::size_t kRecordCount = 16;  // text fields live on storage; slots are small
@@ -230,6 +234,7 @@ String steps_json(const std::vector<agent::Call>& calls) {
 }
 
 void finish_agent(uint32_t id, const agent::Outcome& outcome) {
+    heap_mark("finish");  // the end of a task, apart from its last model round
     if (outcome.ok && outcome.paused) {
         ui::set_pending(outcome.pending);
         const auto& pending = outcome.pending.front();
@@ -241,7 +246,9 @@ void finish_agent(uint32_t id, const agent::Outcome& outcome) {
         ui::entry_finish(outcome.error == "已取消" ? ui::Status::Cancelled : ui::Status::Failed, outcome.error,
                          outcome.detail, steps_json(outcome.calls));
     }
+    heap_mark("mirror");
     if (outcome.ok) mirror_to_terminal(outcome.calls);
+    heap_mark("record");
     const String calls = calls_json(outcome.calls);
     update(id, [&](Record& record) {
         record.reply = outcome.reply;
@@ -259,7 +266,7 @@ void run_agent(uint32_t id, const String& transcript) {
     task_transcript = transcript;
     ui::set_stage("THINK");
     update(id, [&](Record& record) { record.transcript = transcript; });
-    const auto outcome = agent::run(transcript, [](const String& stage) { ui::set_stage(stage); });
+    const auto outcome = agent::run(transcript, agent_stage);
     finish_agent(id, outcome);
     if (!outcome.paused) agent::maintain();  // the answer is already on screen
 }
@@ -286,9 +293,39 @@ bool transcribe(uint32_t id, const String& path, String& transcript) {
     return true;
 }
 
+// The low water mark of each step of a job (the stages the agent reports: THINK
+// n, RUN tool, STEP n, SUMMARY), so runtime.jsonl shows which step took the
+// memory: "THINK1:41 RUN write:18 …" in KB.  Worker task only.
+String heap_steps;
+String heap_stage;
+std::size_t heap_job_low = SIZE_MAX;
+
+void heap_mark(const String& next) {
+    const std::size_t low = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    heap_low_fold();
+    heap_caps_monitor_local_minimum_free_size_stop();  // stop and start: the next step's own low
+    heap_caps_monitor_local_minimum_free_size_start();
+    heap_job_low = std::min(heap_job_low, low);
+    if (!heap_stage.isEmpty() && heap_steps.length() < 360) {
+        String name = heap_stage;
+        name.replace(" ", "");
+        heap_steps += name + ":" + String(static_cast<unsigned>(low / 1024)) + " ";
+    }
+    heap_stage = next;
+}
+
+void agent_stage(const String& stage) {
+    heap_mark(stage);
+    ui::set_stage(stage);
+}
+
 void handle(uint32_t id, Job& job) {
     const unsigned long started = millis();
+    heap_low_fold();  // the idle stretch before this job
     heap_caps_monitor_local_minimum_free_size_start();  // this job's own low water mark
+    heap_steps = String();
+    heap_stage = "start";
+    heap_job_low = SIZE_MAX;
     update(id, [&](Record& record) {
         record.kind = job.kind;
         record.status = "running";
@@ -387,7 +424,7 @@ void handle(uint32_t id, Job& job) {
             ui::set_stage("RUN");
             update(id, [&](Record& record) { record.transcript = task_transcript; });
             const auto outcome =
-                agent::resume(answer, job.text, [](const String& stage) { ui::set_stage(stage); });
+                agent::resume(answer, job.text, agent_stage);
             wipe(job.text);  // the secret is gone once the step has run
             finish_agent(id, outcome);
             if (!outcome.paused) agent::maintain();
@@ -405,7 +442,10 @@ void handle(uint32_t id, Job& job) {
                 const auto verdict = policy::evaluate(tool, arguments);
                 if (verdict.decision != policy::Decision::Allow) error = "未执行（" + verdict.reason + "）";
                 else if (!registry::needs_secret(tool, arguments).isEmpty()) error = "未执行（需要密码）";
-                else reply = registry::execute(tool, arguments, false);
+                else {
+                    heap_mark(tool + ":" + utf8_head(json_str(arguments, "target"), 40));
+                    reply = registry::execute(tool, arguments, false);
+                }
             }
             cJSON_Delete(request);
             set_result(id, reply, error);
@@ -441,11 +481,16 @@ void handle(uint32_t id, Job& job) {
         if (record.status == "running") record.status = "done";
         persist_record(record);
     });
-    const std::size_t job_min = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    heap_mark("end");
+    const std::size_t job_min = heap_job_low;
+    heap_low_fold();
     heap_caps_monitor_local_minimum_free_size_stop();
     if (job.kind != Kind::TerminalObserve) {
         runtime_event("job_done", String(kind_name(job.kind)) + " id=" + id + " " + (millis() - started) + "ms min=" +
-                                      String(static_cast<unsigned>(job_min)));
+                                      String(static_cast<unsigned>(job_min)) +
+                                      (heap_steps.indexOf(' ') != static_cast<int>(heap_steps.length()) - 1
+                                           ? " steps(KB)=" + heap_steps
+                                           : String()));
     }
 }
 
@@ -557,5 +602,9 @@ String record_json(uint32_t id) {
 uint8_t& terminal_detail() { return detail_level; }
 
 uint32_t stack_free_min() { return worker_task ? uxTaskGetStackHighWaterMark(worker_task) : 0; }
+
+void heap_step(const String& name) {
+    if (worker_task && xTaskGetCurrentTaskHandle() == worker_task) heap_mark(name);
+}
 
 }  // namespace vat::worker

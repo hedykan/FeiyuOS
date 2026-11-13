@@ -88,7 +88,7 @@ vat.clear() 清空程序页；vat.interactive() 有人在看（用户让你运�
 【规则与上限】单次运行最长 150 秒（sleep 也算）；内存 48 KB，所以一个程序的源码大约 7 KB 是上限（每次调用另一个程序都是重新开始，不共用数据）；死循环会被停下。后台运行（触发）的程序不要长时间 sleep，分段用 vat.after。可用的 Lua 库：string table math utf8 coroutine；没有 io、os、文件和网络库，一切通过 vat。
 
 【触发】新建：write trigger://new，content 为 {"when": 事件, "run": "prog://名字?参数"}
-时间：time://at/18:30（或 2026-11-08 09:00）一次、time://in/10m 一次、time://every/07:00 每天、time://weekday/09:00 工作日、time://weekend/10:00 周末；开机：device://boot。一次性的触发执行后自动删除。可用事件见 discover(resources) 里标「可作触发」的项。事件的数据在程序里是 input.event。
+时间：time://at/18:30（或 2026-11-08 09:00）一次、time://in/10m 一次、time://every/07:00 每天、time://weekday/09:00 工作日、time://weekend/10:00 周末；开机：device://boot；后台运行的程序失败：prog://event/failed（input.event.program、failures、error）。一次性的触发执行后自动删除。可用事件见 discover(resources) 里标「可作触发」的项。事件的数据在程序里是 input.event。
 
 【管理】read prog://list；read prog://名字（源码）；write prog://名字/delete；read trigger://list；write trigger://3/pause | /resume | /delete。卡上全部程序和扩展包：read pkg://list。
 旧的 JSON 程序已不能运行：read prog://legacy/名字 看原文，翻译成 Lua 后 write prog://名字 保存。
@@ -263,6 +263,17 @@ public:
     }
 
     void loop() override { programs::loop(); }
+
+    void triggers(std::vector<TriggerSpec>& out) const override {
+        out.push_back({"prog://event/failed",
+                       "后台运行（触发、vat.after、开机）的程序失败时；input.event 里有 program、failures（连续失败次数）、run（运行编号）、error"});
+    }
+
+    bool watch(const String& target, String& normalized, String&) override {
+        if (target != "prog://event/failed") return false;
+        normalized = target;  // emitted by every failed background run
+        return true;
+    }
 
     void hints(std::vector<Hint>& out) override {
         out.push_back({"程序与定时", "", "每天早上 7 点叫我起床并说天气"});

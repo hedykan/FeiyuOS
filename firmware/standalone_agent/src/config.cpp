@@ -95,6 +95,8 @@ String load() {
             const long context_kb = json_int(ui, "context_kb", next.context_kb);
             next.context_kb = context_kb == 32 || context_kb == 96 ? context_kb : 64;
             next.status_items = json_str(ui, "status_items", next.status_items);
+            // The default up to 0.7.2, saved by every settings change: it gets the item added since.
+            if (next.status_items == "time,battery,signal") next.status_items = "time,battery,signal,failed";
             next.animation = constrain(json_int(ui, "animation", next.animation), 0, 2);
         }
         if (cJSON* gps = json_obj(config, "gps")) next.gps_enabled = json_bool(gps, "enabled", true);
