@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 
+#include "address_map.h"
 #include "common.h"
 #include "ops_ssh.h"
 #include "registry.h"
@@ -41,6 +42,8 @@ Result evaluate(const String& tool, const cJSON* arguments) {
     if (target.isEmpty()) target = json_str(arguments, "profile");
     const String mode = mode_for(target);
     if (tool == "discover") return {Decision::Allow, "能力查询只读"};
+    // A retired address is not run: registry::execute fails it with the current form.
+    if (!address::retired(json_str(arguments, "target")).isEmpty()) return {Decision::Allow, "旧地址"};
     if (mode == "deny") return {Decision::Deny, "该目标当前策略为 deny"};
     if (hard_denied(arguments)) return {Decision::Deny, "拒绝访问凭据或敏感认证文件"};
     if (tool == "session" && json_str(arguments, "action") == "set_policy") {

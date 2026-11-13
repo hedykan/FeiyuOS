@@ -6,7 +6,7 @@ FeiyuOS is an application layer on top of ESP-IDF and FreeRTOS, which remain the
 
 | OS idea | Here |
 |:--|:--|
-| File-system namespace | URI resources: `device://` `file://` `sensor://` `timer://` `ir://` `lora://` `wifi://` `place://` `ble://` `https://` `ssh://<host>` `memory://` `prog://` `pkg://` `trigger://` `ui://` |
+| File-system namespace | URI resources: `device://` `file://` `sensor://` `timer://` `device://local/ir/` `device://local/lora/` `device://local/wifi/` `place://` `device://local/ble/` `https://` `ssh://<host>` `memory://` `prog://` `pkg://` `trigger://` `ui://` |
 | Drivers / syscalls | Extension packages claim resources; seven generic tools (`discover` `read` `write` `exec` `observe` `input` `session`) reach them |
 | man pages | `discover` |
 | Programs | `prog://`: Lua 5.4 programs on the card (`.lua`) that the model writes and the device runs; `vat.*` reaches every capability |

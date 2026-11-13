@@ -9,9 +9,9 @@
   {"id": "timer_list", "input": "现在有哪些提醒", "expect": {"call_names": ["read"], "arguments": [{"target": "timer://list"}]}},
   {"id": "files_list", "input": "卡上 /vat/memory 里有什么文件", "expect": {"call_names": ["read"], "arguments": [{"target": "file:///vat/memory"}]}},
   {"id": "grove_scan", "input": "Grove 口接了什么", "expect": {"call_names": ["read"], "arguments": [{"target": "sensor://grove"}]}},
-  {"id": "ir_tv_power", "input": "用红外打开客厅电视", "expect": {"call_names": ["write"], "arguments": [{"target": "ir://客厅电视/power"}]}},
-  {"id": "ir_list", "input": "有哪些红外电器", "expect": {"call_names": ["read"], "arguments": [{"target": "ir://list"}]}},
-  {"id": "lora_frequency", "input": "把 LoRa 频点设成 915 MHz", "expect": {"call_names": ["write"], "arguments": [{"target": "lora://settings/frequency"}]}},
-  {"id": "lora_status", "input": "LoRa 现在什么状态", "expect": {"call_names": ["read"], "arguments": [{"target": "lora://status"}]}},
+  {"id": "ir_tv_power", "input": "用红外打开客厅电视", "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/ir/客厅电视/power"}]}},
+  {"id": "ir_list", "input": "有哪些红外电器", "expect": {"call_names": ["read"], "arguments": [{"target": "device://local/ir/list"}]}},
+  {"id": "lora_frequency", "input": "把 LoRa 频点设成 915 MHz", "expect": {"call_names": ["write"], "arguments": [{"target": "settings://lora/frequency"}]}},
+  {"id": "lora_status", "input": "LoRa 现在什么状态", "expect": {"call_names": ["read"], "arguments": [{"target": "device://local/lora/status"}]}},
   {"id": "gps_where", "input": "我现在在哪", "expect": {"call_names": ["read"], "arguments": [{"target": "place://here"}]}}
 ]

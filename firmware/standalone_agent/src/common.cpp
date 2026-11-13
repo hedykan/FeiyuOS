@@ -31,6 +31,19 @@ namespace {
 std::atomic<std::size_t> heap_low{SIZE_MAX};
 }
 
+namespace {
+String boot_list;
+unsigned long boot_last = 0;
+}
+
+void boot_step(const char* name) {
+    const unsigned long now = millis();
+    boot_list += String(boot_list.isEmpty() ? "" : " ") + name + "=" + String(now - boot_last);
+    boot_last = now;
+}
+
+String boot_steps() { return boot_list; }
+
 void heap_low_fold() {
     const std::size_t now = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
     std::size_t seen = heap_low.load();

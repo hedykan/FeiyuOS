@@ -1,0 +1,1 @@
+WiFi 规范：搜索、扫描附近 WiFi 用 read target=wifi://scan；查看当前网络用 read target=wifi://status；连接 WiFi（无论是否保存过）用 session(action=connect,target=wifi://网络名)，网络名逐字保留，包括用户说出的 WiFi 后缀，例如连接家里 WiFi 是 target=wifi://家里 WiFi。

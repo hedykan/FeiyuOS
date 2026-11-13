@@ -11,6 +11,7 @@
 #include <mutex>
 #include <vector>
 
+#include "address_map.h"
 #include "agent.h"
 #include "common.h"
 #include "console.h"
@@ -195,6 +196,41 @@ String used_snapshot() {
     return used_text();
 }
 
+// Programs (their previous versions and the v0.6.2 JSON ones kept for translating), confirmations, triggers and ui apps
+// written with retired addresses (docs/EXTENSION_PACKAGE_GUIDE.zh-CN.md §5.6):
+// rewritten once per address::kVersion.  A panel choice as a trigger's event
+// is ui://event/panel/… now (ui://panel/… stays the panel itself).
+constexpr char kAddressVersion[] = "/vat/things/.address";
+
+void migrate_addresses() {
+    if (storage::read_text(kAddressVersion, 16).toInt() >= address::kVersion) return;
+    int changed = 0;
+    const auto fix = [&changed](const String& path, bool triggers) {
+        const String old = storage::read_text(path, 32768);
+        if (old.isEmpty()) return;
+        String now = address::rewrite(old);
+        if (triggers) now.replace("\"ui://panel/", "\"ui://event/panel/");
+        if (now != old && storage::write_text(path, now)) ++changed;
+    };
+    const String dirs[] = {String(kDir), String(kDir) + "/old", String("/vat/things/apps"), String(kLegacyDir)};
+    for (const String& dir : dirs) {
+        cJSON* files = cJSON_Parse(storage::list_dir(dir).c_str());
+        const cJSON* item = nullptr;
+        cJSON_ArrayForEach(item, files) {
+            const String name = json_str(item, "name");
+            if (json_bool(item, "dir", false) || !(name.endsWith(".lua") || name.endsWith(".json"))) continue;
+            if (name == "index.json" || name == "approved.json" || name == "triggers.json") continue;
+            fix(dir + "/" + name, false);
+        }
+        cJSON_Delete(files);
+    }
+    fix(kApproved, false);
+    fix(kTriggers, true);
+    storage::ensure_parent(kAddressVersion);
+    storage::write_text(kAddressVersion, String(address::kVersion));
+    runtime_event("address_migrated", String(changed) + " files, version " + String(address::kVersion));
+}
+
 void convert_old_stats() {
     if (!storage::exists(kOldStats)) return;
     std::lock_guard<std::mutex> guard(used_lock);
@@ -230,7 +266,7 @@ String describe_when(const String& when) {
     if (kind == "weekday") return "工作日 " + value;
     if (kind == "weekend") return "周末 " + value;
     if (kind == "at") return value.substring(5, 16) + " 一次";
-    if (when == "device://boot") return "每次开机";
+    if (when == "device://local/event/boot") return "每次开机";
     return when;
 }
 
@@ -338,36 +374,80 @@ std::vector<Entry> entries() {
     return out;
 }
 
-void write_index(const std::vector<String>& names) {
-    cJSON* list = cJSON_CreateArray();
-    for (const auto& n : names) {
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "name", n.c_str());
-        cJSON_AddItemToArray(list, item);
+// The index: every .lua on the card and whether it is an extension package,
+// so the boot loads only the packages' headers (loading all ~70 took 2.6 s).
+struct Indexed {
+    String name;
+    int package = -1;  // 1 yes, 0 no, -1 not recorded (an index from before v0.7.4)
+};
+
+std::vector<Indexed> read_index() {
+    std::vector<Indexed> out;
+    cJSON* index = read_json(kIndex);
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, index) {
+        const cJSON* flag = cJSON_GetObjectItemCaseSensitive(item, "package");
+        out.push_back({json_str(item, "name"), cJSON_IsBool(flag) ? (cJSON_IsTrue(flag) ? 1 : 0) : -1});
     }
-    write_json(kIndex, list);
-    cJSON_Delete(list);
+    cJSON_Delete(index);
+    return out;
+}
+
+void write_index(const std::vector<Indexed>& list) {
+    cJSON* array = cJSON_CreateArray();
+    for (const auto& n : list) {
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", n.name.c_str());
+        if (n.package >= 0) cJSON_AddBoolToObject(item, "package", n.package == 1);
+        cJSON_AddItemToArray(array, item);
+    }
+    write_json(kIndex, array);
+    cJSON_Delete(array);
+}
+
+bool is_package(const String& name) {
+    Entry e;
+    return load_entry(name, e) && !e.header.package.isEmpty();
 }
 
 std::vector<String> index_names() {
     std::vector<String> names;
-    cJSON* index = read_json(kIndex);
-    const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, index) names.push_back(json_str(item, "name"));
-    cJSON_Delete(index);
+    for (const auto& n : read_index()) names.push_back(n.name);
     return names;
 }
 
 void index_add(const String& name) {
-    auto names = index_names();
-    if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
-    write_index(names);
+    auto list = read_index();
+    const int package = is_package(name) ? 1 : 0;
+    auto it = std::find_if(list.begin(), list.end(), [&](const Indexed& n) { return n.name == name; });
+    if (it == list.end()) list.push_back({name, package});
+    else it->package = package;
+    write_index(list);
 }
 
 void index_remove(const String& name) {
-    auto names = index_names();
-    names.erase(std::remove(names.begin(), names.end(), name), names.end());
-    write_index(names);
+    auto list = read_index();
+    list.erase(std::remove_if(list.begin(), list.end(), [&](const Indexed& n) { return n.name == name; }), list.end());
+    write_index(list);
+}
+
+// The index from the .lua files on the card (scan(), and an index from before v0.7.4).
+std::vector<String> rebuild_index() {
+    cJSON* files = cJSON_Parse(storage::list_dir(kDir).c_str());
+    std::vector<String> names;
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, files) {
+        const String file = json_str(item, "name");
+        if (json_bool(item, "dir", false) || !file.endsWith(".lua")) continue;
+        const String name = file.substring(0, file.length() - 4);
+        if (lua_meta::check_name(name).isEmpty() && names.size() < kMaxFiles) names.push_back(name);
+    }
+    cJSON_Delete(files);
+    std::sort(names.begin(), names.end(), [](const String& a, const String& b) { return std::strcmp(a.c_str(), b.c_str()) < 0; });
+    std::vector<Indexed> list;
+    for (const auto& name : names) list.push_back({name, is_package(name) ? 1 : 0});
+    write_index(list);
+    return names;
 }
 
 String signature(const String& name, const lua_meta::Header& h) {
@@ -753,7 +833,7 @@ int failing() { return failing_count.load(); }
 
 namespace {
 
-String run_text(const String& name, const Outcome& r) {
+String run_text(const String& name, const Outcome& r, const String* script = nullptr) {
     if (!r.id && !r.ok) return "ERROR: 程序「" + name + "」失败：" + r.error;  // it never started
     const String stats = (r.stats.instructions ? "指令 " + String(r.stats.instructions) + " · " : String()) + "内存峰值 " +
                          String(r.stats.peak / 1024.0, 1) + " KB · 运行 #" + String(r.id);
@@ -768,7 +848,7 @@ String run_text(const String& name, const Outcome& r) {
         const String prefix = name + ":";
         if (first.startsWith(prefix)) {
             const long line = first.substring(prefix.length()).toInt();
-            const String source = storage::read_text(path_of(name), lua_meta::kMaxSource);
+            const String source = script ? *script : storage::read_text(path_of(name), lua_meta::kMaxSource);
             int at = 0;
             for (long n = 1; n < line && at >= 0; ++n) at = source.indexOf('\n', at) < 0 ? -1 : source.indexOf('\n', at) + 1;
             if (line > 0 && at >= 0 && at < static_cast<int>(source.length())) {
@@ -815,6 +895,7 @@ void loop() {
         if (!storage::ready()) return;
         loaded = true;
         convert_old_stats();
+        migrate_addresses();
         if (!storage::exists(kIndex)) scan();
         load_triggers();
         last_arm = millis() - 20000;  // arm right away
@@ -949,6 +1030,8 @@ String show(const String& name) {
     for (std::size_t i = 0; i < source.length(); ++i) lines += source[i] == '\n';
     String out = signature(name, e.header) + String("（") + state_word(e.state) + "，" + String(static_cast<unsigned>(e.size)) +
                  " 字节，" + String(lines) + " 行）";
+    out += "\n看局部：prog://" + name + "?grep=关键词、?lines=开始-结束；只改一部分：write prog://" + name +
+           "/patch（写法见 prog://help）";
     if (!e.problem.isEmpty()) out += "\n声明有误：" + e.problem;
     for (const auto& u : e.header.uses) out += "\n权限：" + lua_meta::describe(u);
     return out + "\n源码：\n" + source;
@@ -1110,6 +1193,36 @@ String patch_summary(const String& name, const String& text) {
     return error.isEmpty() ? save_summary(name, source) : String();
 }
 
+// Code mode: a script run once, not saved.  Recorded in the three streams like
+// a program (as lua://run); a call that needs confirmation asks the user.
+String run_script(const String& source) {
+    constexpr char kName[] = "lua://run";
+    Outcome o;
+    luavm::Options options;
+    options.ask = true;
+    options.errors = &o.errors;
+    options.inputs = &o.inputs;
+    luavm::Stats stats;
+    ++run_level;
+    o.ok = luavm::run(source, kName, options, o.output, o.result, o.error, stats);
+    --run_level;
+    o.stats = stats;
+    iolog::Run record;
+    record.program = kName;
+    record.origin = "代码模式";
+    record.ok = o.ok;
+    record.ms = stats.ms;
+    record.peak = stats.peak;
+    record.in = o.inputs;
+    record.out = o.output;
+    record.err = o.errors;
+    if (!o.ok) record.err += o.error + "\n";
+    o.id = iolog::record(record);
+    runtime_event("prog_run", String(kName) + (o.ok ? " done" : " failed") + " peak=" + String(static_cast<unsigned>(stats.peak)) +
+                                  " ms=" + String(stats.ms));
+    return run_text(kName, o, &source);
+}
+
 String run(const String& name, const String& query, const String& stdin_text) {
     const Outcome r = run_program(name, query, "", true, stdin_text);
     // A program that calls this one gets the run as data (nil and the error when it
@@ -1265,7 +1378,7 @@ String add_trigger(const String& content) {
     if (run.isEmpty()) run = json_str(json_obj(t, "run"), "exec");  // the old {"exec": "prog://…"} form
     cJSON_Delete(t);
     String err;
-    if (when.isEmpty()) err = "缺少 when（如 time://every/07:00、time://in/10m、device://boot）";
+    if (when.isEmpty()) err = "缺少 when（如 time://every/07:00、time://in/10m、device://local/event/boot）";
     else if (!run.startsWith("prog://")) err = "run 要写成 prog://程序名?参数（触发只能运行程序）";
     String name, query;
     if (err.isEmpty()) {
@@ -1401,18 +1514,8 @@ String trigger_clean(bool approved) {
 // ---------------------------------------------------------------- pkg://
 
 String scan() {
-    cJSON* list = cJSON_Parse(storage::list_dir(kDir).c_str());
-    std::vector<String> names;
+    const std::vector<String> names = rebuild_index();
     const cJSON* item = nullptr;
-    cJSON_ArrayForEach(item, list) {
-        const String file = json_str(item, "name");
-        if (json_bool(item, "dir", false) || !file.endsWith(".lua")) continue;
-        const String name = file.substring(0, file.length() - 4);
-        if (lua_meta::check_name(name).isEmpty() && names.size() < kMaxFiles) names.push_back(name);
-    }
-    cJSON_Delete(list);
-    std::sort(names.begin(), names.end(), [](const String& a, const String& b) { return std::strcmp(a.c_str(), b.c_str()) < 0; });
-    write_index(names);
     // A confirmation outlives its file otherwise: a new file of the same name
     // (and the same uses) would come back enabled without the user seeing it.
     cJSON* approved = object_at(kApproved);
@@ -1469,7 +1572,14 @@ String pkg_summary(const String& name, const String& action) {
 
 std::vector<PackageInfo> card_packages() {
     std::vector<PackageInfo> out;
-    for (const auto& e : entries()) {
+    auto list = read_index();
+    if (std::any_of(list.begin(), list.end(), [](const Indexed& n) { return n.package < 0; })) {
+        rebuild_index();
+        list = read_index();
+    }
+    for (const auto& n : list) {
+        Entry e;
+        if (n.package != 1 || !load_entry(n.name, e)) continue;
         if (e.header.package.isEmpty() || e.state != State::Enabled) continue;
         out.push_back({e.name, e.header.target, e.header.usage, e.header.keywords, e.header.about});
     }

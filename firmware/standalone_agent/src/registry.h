@@ -50,6 +50,18 @@ public:
     // backslash or control characters); an unsafe text is dropped at add().
     virtual const char* usage() const { return nullptr; }
 
+    // One line for the package index in the system prompt: the main addresses
+    // and verbs ("扫描 read device://local/wifi/scan，连接 session(connect, device://local/wifi/网络名)").
+    // A package with one is listed there and its usage() comes from discover
+    // (capabilities, query naming the package); one without has its usage() in
+    // every system prompt.  JSON-safe text only, like usage().
+    virtual const char* index() const { return nullptr; }
+
+    // Optional hardware or a service that needs a key: false while it is not
+    // there.  Then neither usage() nor index() is in the system prompt,
+    // discover lists the package as not connected, and execute() says so.
+    virtual bool present() const { return true; }
+
     // True when this owned write is local and undoable (screen, sound, LED,
     // notes, timers, TV remote): Policy runs it without asking.  Never for
     // remote hosts, networks, radios, files or anything physical beyond these.

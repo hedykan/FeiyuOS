@@ -102,7 +102,7 @@ void set_number(cJSON* profile, const char* key, double value) {
 
 String ask_text(const String& name) {
     return "。请看空调有没有响应（滴一声或开始运转），告诉我生效了或没反应（没反应会换下一套；也可以说上一套、下一套或第几套）\n"
-           "（给模型：用户回答后 write ir://" + name + "/confirm，content 为 yes 或 no；要换到指定的码用 write ir://" + name +
+           "（给模型：用户回答后 write device://local/ir/" + name + "/confirm，content 为 yes 或 no；要换到指定的码用 write device://local/ir/" + name +
            "/try，content 为 上一套、下一套、重发 或编号数字）";
 }
 
@@ -141,7 +141,7 @@ String brands_text() {
 
 String send(const String& name_in, const String& words) {
     const String name = ir::safe_name(name_in);
-    if (name.isEmpty()) return "ERROR: 缺少电器名称，例如 ir://客厅空调/ac";
+    if (name.isEmpty()) return "ERROR: 缺少电器名称，例如 device://local/ir/客厅空调/ac";
     cJSON* profile = ir::load_profile(name);
     if (json_str(profile, "kind") != "ac" && cJSON_GetObjectItemCaseSensitive(profile, "code_set")) {
         cJSON_Delete(profile);
@@ -265,7 +265,7 @@ String choose(const String& name_in, const String& words_in) {
     cJSON* profile = ir::load_profile(name);
     if (json_str(profile, "kind") != "ac" || !json_obj(profile, "state")) {
         cJSON_Delete(profile);
-        return "ERROR: 「" + name + "」还没控制过，先 write ir://" + name + "/ac 带上品牌发一次";
+        return "ERROR: 「" + name + "」还没控制过，先 write device://local/ir/" + name + "/ac 带上品牌发一次";
     }
     Brand brand;
     String error;

@@ -1,0 +1,1 @@
+调试（debug://）：程序每次运行（前台、定时、触发）的输入、输出、错误都记在三条全局的流里，按运行编号对应。流用来查之前的运行；你刚运行的结果已经在工具结果里，不用再读一遍。read debug://stdout（每次运行的记录和输出）、debug://stderr（错误输出）、debug://stdin（输入），可带 ?n=最近几次&prog=程序名&failed=1（只看失败的）；read debug://run/编号 看一次运行的全部。内存在 read device://local/status 里。

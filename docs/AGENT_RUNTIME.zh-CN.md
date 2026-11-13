@@ -10,11 +10,11 @@
 |:--|:--|:--|
 | `discover` | 渐进发现资源、能力包、命令、命令帮助 | `scope=resources/capabilities/commands/help` |
 | `read` | 读资源 | `ssh://开发机/etc/hostname`、`device://local/status`、`memory://recent-tasks` |
-| `write` | 写资源（`mode=create/overwrite/append`） | `ssh://开发机/tmp/note.txt`、`device://local/display/brightness` |
+| `write` | 写资源（`mode=create/overwrite/append`） | `ssh://开发机/tmp/note.txt`、`settings://brightness` |
 | `exec` | 执行一个程序，`program` + `args`，可带 `cwd`，不经 shell 拼接 | `ssh://开发机` |
 | `observe` | 观察终端 / TUI | `tui://current` |
 | `input` | 向终端输入文字或按键（`keys=[CTRL_C]`、`submit`） | `tui://current` |
-| `session` | 连接、tmux 会话、远程 Agent、审批、策略 | `ssh://开发机`、`tmux://开发机/work`、`agent://current`、`wifi://家里 WiFi` |
+| `session` | 连接、tmux 会话、远程 Agent、审批、策略 | `ssh://开发机`、`tmux://开发机/work`、`agent://current`、`device://local/wifi/家里 WiFi` |
 
 ## 一个任务
 
@@ -74,7 +74,7 @@ ask 的操作不会执行。时间线上这一行变成橙色，显示主机、�
 | 包 | 认领范围 |
 |:--|:--|
 | `local` | 本机状态、设置、剪贴板、记忆（`device://local/*`、`memory://*`） |
-| `wifi` | Wi-Fi 扫描、状态、切换、语音设置新网络（`wifi://`） |
+| `wifi` | Wi-Fi 扫描、状态、切换、语音设置新网络（`device://local/wifi/`） |
 | `ssh` | 远端文件与命令、连接状态（`ssh://`） |
 | `tmux` | 终端观察与输入、会话管理（`tui://` `agent://` `tmux://`） |
 | `agents` | Codex / Pi / Claude 的只读启动、恢复、中断、审批键 |

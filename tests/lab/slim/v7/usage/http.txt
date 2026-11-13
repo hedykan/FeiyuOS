@@ -1,0 +1,1 @@
+HTTP 规范：调网络接口用 read target=https://网址 发 GET；write target=https://网址 content=请求体 发 POST（另给 method=PUT、PATCH 或 DELETE），写需要用户确认。可加 headers={名: 值}；要密钥时在值里写 {secret:名字}（如 Authorization: Bearer {secret:github}），设备会弹出输入框让用户输入一次，不要向用户索要密钥。响应大时加 save=file:///vat/路径 存到卡上。搜索、读网页仍用 web://。

@@ -39,7 +39,11 @@ String bssid();
 int channel();
 // Every access point with the station's SSID (a blocking scan, ~2 s):
 // "aa:bb:cc:dd:ee:ff ch=2 rssi=-40*" (* = the one in use), space separated.
-String same_ssid_nodes();
+// The access points carrying this SSID (mesh nodes, a second router):
+// scan_nodes() starts an asynchronous scan, nodes_scanned() is true once it is
+// done and fills `out` ("<bssid> ch=7 rssi=-21*", * = the one in use).
+void scan_nodes();
+bool nodes_scanned(String& out);
 // Main loop: logs the station's link changes (wifi_link / wifi_lost) noted by
 // the Wi-Fi event handler, which runs on a small task and must not write the card.
 void report_link_changes();

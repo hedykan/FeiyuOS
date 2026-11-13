@@ -1,10 +1,10 @@
-// lora: the Cap LoRa-1262 radio.  Targets:
-//   read  lora://status                 state, settings, last packet
-//   read  lora://messages               received and sent messages (numbered)
-//   write lora://send                   send content (confirmation; needs frequency + confirmed antenna)
-//   write lora://settings/<key>         enabled|frequency|power|sf|bandwidth|cr|antenna (confirmation)
-//   session connect|attach lora://      turn receiving on
-//   session disconnect lora://          off: the SX1262 is held in reset, off the shared SPI bus
+// lora: the Cap LoRa-1262 radio.  Addresses (docs/EXTENSION_PACKAGE_GUIDE.zh-CN.md §5):
+//   read  device://local/lora/status        state, settings, last packet
+//   read  device://local/lora/messages      received and sent messages (numbered)
+//   write device://local/lora/send          send content (confirmation; needs frequency + confirmed antenna)
+//   write settings://lora/<key>             enabled|frequency|power|sf|bandwidth|cr|antenna (confirmation)
+//   session connect|attach device://local/lora   turn receiving on
+//   session disconnect device://local/lora       off: the SX1262 is held in reset, off the shared SPI bus
 #include "../common.h"
 #include "../ops_lora.h"
 #include "../registry.h"
@@ -12,35 +12,28 @@
 namespace vat::registry {
 namespace {
 
-// lora://… as is; device://lora/… and device://local/lora/… (what models guess
-// when they skip discover) mapped onto it.  "" = not a LoRa target.
-String canonical(const String& target, const String& content) {
-    String path = target_path(target);
-    if (path.startsWith("lora://")) return path;
-    String rest;
-    if (path.startsWith("device://lora")) rest = path.substring(13);
-    else if (path.startsWith("device://local/lora")) rest = path.substring(19);
-    else return "";
-    if (rest.startsWith("/")) rest = rest.substring(1);
-    if (rest.isEmpty() || rest == "status") return "lora://status";
-    if (rest == "messages" || rest == "inbox") return "lora://messages";
-    if (rest == "send" || rest == "transmit" || rest == "message" || rest == "tx") return "lora://send";
-    // "power" is on/off when the content says so, dBm when it is a number.
-    if (rest == "power" || rest == "state" || rest == "enabled" || rest == "receive") {
-        const bool number = content.length() && (isdigit(static_cast<unsigned char>(content[0])) || content[0] == '-');
-        return number && rest == "power" ? "lora://settings/power" : "lora://settings/enabled";
-    }
-    if (rest == "freq") rest = "frequency";
-    if (rest == "spreading_factor") rest = "sf";
-    return "lora://settings/" + rest;
+constexpr char kRadio[] = "device://local/lora";
+constexpr char kSettings[] = "settings://lora/";
+
+// What the target names: "status", "messages", "send", "settings/<key>", or "" when not LoRa.
+String what(const String& target) {
+    const String path = target_path(target);
+    if (path.startsWith(kSettings)) return "settings/" + path.substring(strlen(kSettings));
+    if (path == kRadio || path == String(kRadio) + "/") return "status";
+    if (path.startsWith(String(kRadio) + "/")) return path.substring(strlen(kRadio) + 1);
+    return "";
 }
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "LoRa 用 lora:// 而不是 device://：开关 write lora://settings/enabled（content on 或 off），频点、功率写 lora://settings/frequency、lora://settings/power，发消息 write lora://send，状态 read lora://status，收到的消息 read lora://messages。";
+constexpr char kUsage[] = "LoRa：开关接收 write settings://lora/enabled（content on 或 off），频点、功率 write settings://lora/frequency、settings://lora/power，发消息 write device://local/lora/send，状态 read device://local/lora/status，收到的消息 read device://local/lora/messages。";
 
 class LoraPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override {
+        return "read device://local/lora/status、device://local/lora/messages，write device://local/lora/send；开关、频点、功率 write settings://lora/enabled|frequency|power";
+    }
+    bool present() const override { return lora::cap_present(); }
 
     const Manifest& manifest() const override {
         static const Manifest m{"lora", "Cap LoRa-1262：LoRa 收发、频点与天线设置",
@@ -49,12 +42,13 @@ public:
     }
 
     bool supports(const String& tool, const cJSON* arguments) const override {
-        if (canonical(json_str(arguments, "target"), json_str(arguments, "content")).isEmpty()) return false;
+        if (what(json_str(arguments, "target")).isEmpty()) return false;
         return tool == "read" || tool == "write" || tool == "session";
     }
 
     String execute(const String& tool, const cJSON* arguments, bool) override {
-        const String path = canonical(json_str(arguments, "target"), json_str(arguments, "content"));
+        if (!present()) return "ERROR: 未接上 Cap LoRa-1262";
+        const String path = what(json_str(arguments, "target"));
         if (tool == "session") {
             const String action = json_str(arguments, "action");
             if (action == "connect" || action == "attach" || action == "create") return lora::enable(true);
@@ -63,12 +57,13 @@ public:
         }
         if (tool == "write") {
             const String content = json_str(arguments, "content");
-            if (path == "lora://send") return lora::send(content);
-            if (path.startsWith("lora://settings/")) return lora::set(path.substring(16), content);
-            return "LoRa 只能写 lora://send 或 lora://settings/<项>";
+            if (path == "send") return lora::send(content);
+            if (path.startsWith("settings/")) return lora::set(path.substring(9), content);
+            return "ERROR: LoRa 只能写 device://local/lora/send 或 settings://lora/<项>";
         }
-        if (path == "lora://messages") return lora::messages_text();
-        return lora::status_text();
+        if (path == "messages") return lora::messages_text();
+        if (path == "status") return lora::status_text();
+        return "ERROR: LoRa 能读的是 device://local/lora/status 和 device://local/lora/messages";
     }
 
     void hints(std::vector<Hint>& out) override {
@@ -80,8 +75,8 @@ public:
 
     void resources(cJSON* list, int& remaining) override {
         if (!lora::cap_present()) return;
-        for (const char* target : {"lora://status", "lora://messages", "lora://settings/enabled", "lora://send",
-                                   "lora://settings/frequency"}) {
+        for (const char* target : {"device://local/lora/status", "device://local/lora/messages", "settings://lora/enabled",
+                                   "device://local/lora/send", "settings://lora/frequency"}) {
             add_resource(list, remaining, target, "lora");
         }
     }

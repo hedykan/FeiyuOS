@@ -29,7 +29,7 @@ constexpr char kUsage[] =
     "-- @uses 声明，保存时由用户确认一次），并 read prog://list 看已有的，能复用就调用。用户问有哪些程序、哪些可以清理或删掉时，"
     "先 read prog://list（每个程序的说明、最近运行、被哪些触发使用），据此建议，删除仍要用户确认。新建触发 write "
     "target=trigger://new，content 为 JSON，含 when 与 run：when 是事件，如 time://every/07:00（每天）、time://every/30s（每隔多久，至少 10 秒，设备忙时跳过这一轮）、"
-    "time://weekday/09:00、time://at/18:30（一次）、time://in/10m（一次）、device://boot（开机），不要用 cron；run 是 "
+    "time://weekday/09:00、time://at/18:30（一次）、time://in/10m（一次）、device://local/event/boot（开机），不要用 cron；run 是 "
     "prog://程序名?参数。只做一件事也写成一两行的程序再建触发。查看 read trigger://list；停用 write trigger://编号/pause；清理失效的触发 write trigger://clean；"
     "删除 write prog://名字/delete 或 trigger://编号/delete（用户要删时直接调用，设备会弹出确认，不要先用文字反问）。"
     "写程序：保存后必须 exec 运行一次，看结果和输出；有错就改，改完再运行，直到成功。测试覆盖主要路径即可，一般用 1 到 2 组输入跑一遍，"
@@ -52,6 +52,8 @@ constexpr char kUsage[] =
 constexpr char kHelp[] = R"HELP(程序（prog://，Lua 5.4）与触发（trigger://）说明
 
 【保存与运行】write prog://名字，content 是 Lua 源码；exec prog://名字?参数=值 运行。程序的结果是它 return 的值（转成文字）；print 的内容记进运行输出，用户让你运行时还会实时显示在设备的程序页上。
+
+【写程序的做法】保存后一定 exec 运行一次，看结果和输出；有错就改，改完再运行，直到成功，用 1 到 2 组输入覆盖主要路径即可。程序的输入有两种，不要混用：运行前定好的参数用 -- @input 声明，运行时写在地址里（prog://名字?n=10）；运行中要用户在键盘上输入的（用户说让我输入、问我、等我回答）用 io.read 或 vat.readline 读，测试时把输入放进 exec 的 args，每一项是一行，不给的话程序会一直等用户在设备上输入。有数据的调用用变量接住再取字段（见【返回值】），不解析文字；任何调用都可能返回 nil 和原因，先判断再用。只做一件事也写成一两行的程序再建触发。用户问哪些程序可以删时先 read prog://list（说明、最近运行、被哪些触发使用）再建议；删除直接调用，设备会弹确认。
 
 【开头声明】文件开头的注释行，代码之前：
 -- @about 一句话说明（列表里显示）
@@ -88,7 +90,7 @@ vat.clear() 清空程序页；vat.interactive() 有人在看（用户让你运�
 【规则与上限】单次运行最长 150 秒（sleep 也算）；内存 48 KB，所以一个程序的源码大约 7 KB 是上限（每次调用另一个程序都是重新开始，不共用数据）；死循环会被停下。后台运行（触发）的程序不要长时间 sleep，分段用 vat.after。可用的 Lua 库：string table math utf8 coroutine；没有 io、os、文件和网络库，一切通过 vat。
 
 【触发】新建：write trigger://new，content 为 {"when": 事件, "run": "prog://名字?参数"}
-时间：time://at/18:30（或 2026-11-08 09:00）一次、time://in/10m 一次、time://every/07:00 每天、time://weekday/09:00 工作日、time://weekend/10:00 周末；开机：device://boot；后台运行的程序失败：prog://event/failed（input.event.program、failures、error）。一次性的触发执行后自动删除。可用事件见 discover(resources) 里标「可作触发」的项。事件的数据在程序里是 input.event。
+时间：time://at/18:30（或 2026-11-08 09:00）一次、time://in/10m 一次、time://every/07:00 每天、time://weekday/09:00 工作日、time://weekend/10:00 周末；开机：device://local/event/boot；后台运行的程序失败：prog://event/failed（input.event.program、failures、error）。一次性的触发执行后自动删除。可用事件见 discover(resources) 里标「可作触发」的项。事件的数据在程序里是 input.event。
 
 【管理】read prog://list；read prog://名字（源码）；write prog://名字/delete；read trigger://list；write trigger://3/pause | /resume | /delete。卡上全部程序和扩展包：read pkg://list。
 旧的 JSON 程序已不能运行：read prog://legacy/名字 看原文，翻译成 Lua 后 write prog://名字 保存。
@@ -166,6 +168,7 @@ public:
     ProgramPackage() { events::subscribe(programs::on_event); }
 
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "写或改程序前先 read prog://help；prog://list、运行用 exec target=prog://名字、program=run、定时或开机运行 write trigger://new（content 为 {when, run}），read trigger://list，write trigger://编号/delete 或 /pause，清理失效的 write trigger://clean"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"program", "程序与触发：用 Lua 把动作组合成可反复运行的程序（prog://），按时间或开机自动运行（trigger://）",

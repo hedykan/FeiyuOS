@@ -107,7 +107,12 @@ String kind_text(const pkg_catalog::Entry& e) {
 }  // namespace
 
 String catalog(const String& url_in) {
-    const String url = url_in.isEmpty() ? String(kDefaultCatalog) : url_in;
+    // No address: the catalog last used (install and update read that one), so
+    // looking at the catalog never switches it; the default before any.
+    String url = url_in;
+    if (url.isEmpty()) url = storage::read_text(kSourceFile, 512);
+    url.trim();
+    if (url.isEmpty()) url = kDefaultCatalog;
     if (!url.startsWith("https://") && !url.startsWith("http://")) return "ERROR: 目录地址要是 http(s)://";
     const String fresh = String(kCatalogFile) + ".new";
     String error = fetch(url, fresh, pkg_catalog::kMaxCatalog);
@@ -125,9 +130,9 @@ String catalog(const String& url_in) {
         if (!e.about.isEmpty()) out += "：" + e.about;
         if (!e.uses.empty()) out += "；权限：" + uses_text(e.uses);
         lua_meta::Header have;
-        if (!programs::installed(e.name, have)) out += "；未安装（write pkg://install/" + e.name + "）";
+        if (!programs::installed(e.name, have)) out += "；未安装（write pkg://" + e.name + "/install）";
         else if (pkg_catalog::compare_versions(e.version, have.version) > 0)
-            out += "；已安装 v" + have.version + "，可更新（write pkg://update/" + e.name + "）";
+            out += "；已安装 v" + have.version + "，可更新（write pkg://" + e.name + "/update）";
         else out += "；已安装";
         out += "\n";
     }
@@ -175,8 +180,8 @@ String install(const String& name, bool update) {
     if (!e) return "ERROR: 目录里没有「" + name + "」（read pkg://catalog 看全部）";
     lua_meta::Header have;
     const bool present = programs::installed(name, have);
-    if (!update && present) return "ERROR: 「" + name + "」已经装了，更新用 write pkg://update/" + name;
-    if (update && !present) return "ERROR: 还没装「" + name + "」，用 write pkg://install/" + name;
+    if (!update && present) return "ERROR: 「" + name + "」已经装了，更新用 write pkg://" + name + "/update";
+    if (update && !present) return "ERROR: 还没装「" + name + "」，用 write pkg://" + name + "/install";
     if (update && pkg_catalog::compare_versions(e->version, have.version) <= 0) {
         return "「" + name + "」已是最新（v" + have.version + "）";
     }
@@ -194,7 +199,7 @@ String install(const String& name, bool update) {
         return "ERROR: " + error;
     }
     return String(update ? "已更新「" : "已安装「") + name + "」v" + header.version + "，SHA-256 校验通过，已启用" +
-           (update ? "；上一版留着，write pkg://rollback/" + name + " 可退回" : String());
+           (update ? "；上一版留着，write pkg://" + name + "/rollback 可退回" : String());
 }
 
 String install_url(const String& url, const String& sha256_in) {

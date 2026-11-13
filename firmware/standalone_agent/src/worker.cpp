@@ -296,6 +296,9 @@ bool transcribe(uint32_t id, const String& path, String& transcript) {
 // The low water mark of each step of a job (the stages the agent reports: THINK
 // n, RUN tool, STEP n, SUMMARY), so runtime.jsonl shows which step took the
 // memory: "THINK1:41 RUN write:18 …" in KB.  Worker task only.
+std::atomic<uint32_t> current_job{0};  // the job handle() is running
+std::atomic<uint32_t> asking_job{0};   // the job waiting in ask()
+std::atomic<int> given{-1};            // ask()'s answer: 0 yes, 1 no, 2 all
 String heap_steps;
 String heap_stage;
 std::size_t heap_job_low = SIZE_MAX;
@@ -326,6 +329,7 @@ void handle(uint32_t id, Job& job) {
     heap_steps = String();
     heap_stage = "start";
     heap_job_low = SIZE_MAX;
+    current_job = id;
     update(id, [&](Record& record) {
         record.kind = job.kind;
         record.status = "running";
@@ -482,6 +486,7 @@ void handle(uint32_t id, Job& job) {
         persist_record(record);
     });
     heap_mark("end");
+    current_job = 0;
     const std::size_t job_min = heap_job_low;
     heap_low_fold();
     heap_caps_monitor_local_minimum_free_size_stop();
@@ -602,6 +607,44 @@ String record_json(uint32_t id) {
 uint8_t& terminal_detail() { return detail_level; }
 
 uint32_t stack_free_min() { return worker_task ? uxTaskGetStackHighWaterMark(worker_task) : 0; }
+
+Answer ask(const String& summary, const String& reason) {
+    const uint32_t id = current_job.load();
+    agent::Pending question;
+    question.tool = "lua";
+    question.summary = summary;
+    question.reason = reason;
+    given = -1;
+    asking_job = id;
+    ui::set_pending({question});  // before the status: whoever sees "asking" sees the question
+    update(id, [](Record& record) { record.status = "asking"; });
+    const unsigned long started = millis();
+    while (given.load() < 0 && millis() - started < kAskMs && !cancel::requested()) {
+        keep_alive();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    asking_job = 0;
+    ui::set_pending({});
+    update(id, [](Record& record) {
+        if (record.status == "asking") record.status = "running";
+    });
+    const int answer = given.load();
+    return answer == 0 ? Answer::Yes : answer == 2 ? Answer::All : Answer::No;
+}
+
+bool asking() { return asking_job.load() != 0; }
+
+uint32_t answer(const String& action) {
+    const uint32_t id = asking_job.load();
+    if (!id) return 0;
+    given = action == "approve" ? 0 : action == "approve_all" ? 2 : 1;
+    // Running again from here: whoever gave the answer and then reads the job
+    // does not see it still asking (ask() wakes up within 50 ms).
+    update(id, [](Record& record) {
+        if (record.status == "asking") record.status = "running";
+    });
+    return id;
+}
 
 void heap_step(const String& name) {
     if (worker_task && xTaskGetCurrentTaskHandle() == worker_task) heap_mark(name);

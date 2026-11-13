@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One tool call on the device, for trying packages by hand.
 
-    python3 tools/ble_call.py read ble://status
-    python3 tools/ble_call.py --approve write ble://power on
+    python3 tools/ble_call.py read device://local/ble/status
+    python3 tools/ble_call.py --approve write settings://ble/power on
 
 --approve answers the confirmation as the device's 'approve' key would;
 without it a gated call is left waiting and the prompt is printed.

@@ -12,7 +12,7 @@
 
 | 操作系统里的概念 | 在这里 |
 |:--|:--|
-| 文件系统命名空间 | URI 资源：`device://` `file://` `sensor://` `timer://` `ir://` `ble://` `lora://` `wifi://` `place://` `https://` `ssh://<主机>` `memory://` `prog://` `ui://`… |
+| 文件系统命名空间 | URI 资源：`device://` `file://` `sensor://` `timer://` `device://local/ir/` `device://local/ble/` `device://local/lora/` `device://local/wifi/` `place://` `https://` `ssh://<主机>` `memory://` `prog://` `ui://`… |
 | 驱动 / 系统调用 | 扩展包认领资源，七个通用工具（`discover` `read` `write` `exec` `observe` `input` `session`）调用它们 |
 | man 手册 | `discover` |
 | 程序 | `prog://`：卡上的 Lua 5.4 程序（`.lua`），由大肥鱼写、设备运行，通过 `vat.*` 调用各项能力 |

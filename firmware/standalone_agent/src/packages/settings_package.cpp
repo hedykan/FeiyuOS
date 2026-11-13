@@ -1,13 +1,15 @@
 // settings: the settings page for the agent.  settings:// reads every row;
 // a few plain choices can be written; everything typed (Keys, Wi-Fi
 // passwords) only opens the page on the device, so no secret passes the
-// model.  Work runs on the UI task (settings::on_ui).  WiFi, LoRa, SSH hosts
-// and the context length stay with wifi://, lora://, ssh profiles and
-// device://local/context/length.
+// model.  Work runs on the UI task (settings::on_ui).  brightness, timeout,
+// volume and context are the device's own (local::tool_read / tool_write);
+// settings://lora/… and settings://ble/power belong to those packages
+// (registered before this one).
 #include <algorithm>
 
 #include "../common.h"
 #include "../config.h"
+#include "../ops_local.h"
 #include "../registry.h"
 #include "../settings_page.h"
 #include "../settings_store.h"
@@ -17,11 +19,12 @@ namespace vat::registry {
 namespace {
 
 constexpr char kUsage[] =
-    "设置（settings://）：read settings:// 看设置页各项当前值；write settings://animation content 为 开、减弱 或 关；"
+    "设置（settings://）：read settings:// 看设置页各项当前值；write settings://brightness（8–255）、settings://timeout（秒，0 为永不）、"
+    "settings://volume（0–100）、settings://context（短、中、长）；write settings://animation content 为 开、减弱 或 关；"
     "write settings://statusbar content 为顶栏要显示的项，按顺序用逗号分隔（时间、电量、信号、WiFi名、内存、蓝牙、后台失败，空表示都不显示）；"
     "write settings://font content 为终端字号 10、12 或 14；"
-    "要输入 Key 时 write settings://open/key/qwen（或 deepseek、openrouter、amap）在设备上弹出输入框，由用户在键盘上输入，不要向用户索要 Key；"
-    "write settings://open/页名 打开设置页（wifi keys hosts lora ble statusbar animation font context storage portal webtoken）。";
+    "要输入 Key 时 write settings://key/qwen/open（或 deepseek、openrouter、amap）在设备上弹出输入框，由用户在键盘上输入，不要向用户索要 Key；"
+    "write settings://页名/open 打开设置页（wifi keys hosts lora ble statusbar animation font context storage portal webtoken）。";
 
 String trimmed(String text) {
     text.trim();
@@ -74,6 +77,9 @@ String set_statusbar(String value) {
 class SettingsPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override {
+        return "read settings:// 看各项；write settings://brightness|timeout|volume|context|animation|statusbar|font；打开设置页 write settings://页名/open，Key 输入框 settings://key/提供方/open";
+    }
 
     const Manifest& manifest() const override {
         static const Manifest m{"settings", "设置页：查看各项、调动画、顶栏、字号，在设备上打开 Key 输入",
@@ -89,14 +95,18 @@ public:
     // only changes how the device looks, or opens a page for the user.
     bool reversible(const String& tool, const cJSON* arguments) const override {
         const String target = json_str(arguments, "target");
-        return tool == "write" && target != "settings://open/portal" && target != "settings://open/webtoken";
+        return tool == "write" && target != "settings://portal/open" && target != "settings://webtoken/open" &&
+               target != "settings://context";
     }
 
     String execute(const String& tool, const cJSON* arguments, bool) override {
         const String target = json_str(arguments, "target");
         const String path = target.substring(String("settings://").length());
+        if (path == "brightness" || path == "timeout" || path == "volume" || path == "context") {
+            return tool == "read" ? local::tool_read(arguments) : local::tool_write(arguments);
+        }
         if (tool == "read") {
-            if (!path.isEmpty()) return "ERROR: 只能 read settings://";
+            if (!path.isEmpty()) return "ERROR: 能 read 的是 settings:// 和 settings://brightness、timeout、volume、context";
             return ui::settings::on_ui([] { return ui::settings::rows(); });
         }
         const String value = trimmed(json_str(arguments, "content"));
@@ -108,11 +118,11 @@ public:
                 return error.isEmpty() ? "终端字号已设为 " + value : "ERROR: " + error;
             });
         }
-        if (path == "open" || path.startsWith("open/")) {
-            const String page = path == "open" ? String() : path.substring(5);
+        if (path == "open" || path.endsWith("/open")) {
+            const String page = path == "open" ? String() : path.substring(0, path.length() - 5);
             return ui::settings::on_ui([page] { return ui::settings::show_page(page); });
         }
-        return "ERROR: 不认识 " + target + "（read settings://；write settings://animation、statusbar、font、open/页名）";
+        return "ERROR: 不认识 " + target + "（read settings://；write settings://brightness、timeout、volume、context、animation、statusbar、font，打开设置页 settings://页名/open）";
     }
 };
 

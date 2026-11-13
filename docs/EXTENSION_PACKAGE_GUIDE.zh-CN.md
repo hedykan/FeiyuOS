@@ -13,12 +13,12 @@ discover  read  write  exec  observe  input  session
 新增能力**不允许**增加第八个工具，也不允许改动工具 schema（`src/agent_prompt.h` 里的 `kToolsJson`）。能力通过 **target 资源地址** 区分，由扩展包认领：
 
 ```text
-ssh://开发机/etc/hostname      tui://current        tmux://开发机/work
-device://local/display/brightness   memory://notes   wifi://scan
-sensor://desk/temperature      gpio://esp-kitchen/2  ir://living-room/tv
+ssh://开发机/etc/hostname      tui://current            tmux://开发机/work
+device://local/display/text   device://local/wifi/scan settings://brightness
+sensor://书桌/temperature     device://厨房ESP/gpio/2   device://local/ir/客厅电视/power
 ```
 
-只有七个动作确实表达不了的新语义，才考虑协议大版本升级。这需要单独提议，不能夹带在功能 PR 里。
+地址怎么写见第 5 节「资源地址」。只有七个动作确实表达不了的新语义，才考虑协议大版本升级。这需要单独提议，不能夹带在功能 PR 里。
 
 ## 2. 一次调用怎样到达扩展包
 
@@ -64,6 +64,9 @@ class Package {
     virtual void unwatch(const String& target);
     virtual String confirm_summary(const String& tool, const cJSON* arguments) const;  // 自定义确认文字
     virtual void loop();                                     // UI 任务上的周期工作，要轻
+    virtual const char* usage() const;    // 用法；没有 index() 时每次都进系统提示
+    virtual const char* index() const;    // 系统提示里的一行索引（地址和主要动作），用法改由 discover 给出
+    virtual bool present() const;         // 可选硬件或服务在不在；不在时不进系统提示
 };
 ```
 
@@ -77,41 +80,39 @@ class Package {
 
 ## 4. 新增一个包：最小例子
 
-`src/packages/battery_package.cpp`：
+`src/packages/sht30_package.cpp`（Grove 口接的温湿度模块；读数按第 5 节放在 `sensor://`，模块没插时 `present()` 为 false）：
 
 ```cpp
-#include <M5Cardputer.h>
-
 #include "../common.h"
 #include "../registry.h"
+#include "../ops_grove.h"  // 示意：grove::found、grove::sht30_read 按实际的驱动来写
 
 namespace vat::registry {
 namespace {
 
-class BatteryPackage : public Package {
+constexpr char kUsage[] = "温湿度模块：read sensor://sht30/temperature 或 sensor://sht30/humidity。";
+
+class Sht30Package : public Package {
 public:
     const Manifest& manifest() const override {
-        static const Manifest m{"battery", "电池电量与充电状态", "电池 电量 充电 battery", {}};
+        static const Manifest m{"sht30", "Grove 温湿度模块 SHT30", "温度 湿度 温湿度 sht30", {}};
         return m;
     }
+    const char* usage() const override { return kUsage; }
+    const char* index() const override { return "read sensor://sht30/temperature|humidity"; }
+    bool present() const override { return grove::found(0x44); }
     bool supports(const String& tool, const cJSON* arguments) const override {
-        return tool == "read" && json_str(arguments, "target").startsWith("battery://");
+        return tool == "read" && json_str(arguments, "target").startsWith("sensor://sht30/");
     }
-    String execute(const String&, const cJSON*, bool) override {
-        return "电量 " + String(M5Cardputer.Power.getBatteryLevel()) + "%";
-    }
-    void resources(cJSON* list, int& remaining) override {
-        if (remaining-- <= 0) return;
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "target", "battery://local");
-        cJSON_AddStringToObject(item, "kind", "battery");
-        cJSON_AddItemToArray(list, item);
+    String execute(const String&, const cJSON* arguments, bool) override {
+        if (!present()) return "ERROR: 未接上 SHT30（Grove 口没有检测到 0x44）";
+        return grove::sht30_read(json_str(arguments, "target").substring(strlen("sensor://sht30/")));
     }
 };
 
 }  // namespace
 
-Package* make_battery_package() { return new BatteryPackage(); }
+Package* make_sht30_package() { return new Sht30Package(); }
 
 }  // namespace vat::registry
 ```
@@ -119,29 +120,37 @@ Package* make_battery_package() { return new BatteryPackage(); }
 然后在 `src/packages/builtin.cpp` 里声明并注册一行：
 
 ```cpp
-Package* make_battery_package();
+Package* make_sht30_package();
 ...
-add(make_battery_package());
+add(make_sht30_package());
 ```
 
 注册是**显式**的：不做目录扫描、不动态加载，所有能力在 `builtin.cpp` 里一目了然，可审计。重复的包 ID 会被拒绝（运行日志记 `package_duplicate`）。
 
-### 模型怎么知道用法 `usage()`
+### 模型怎么知道用法 `usage()` `index()` `present()`
 
-包在自己的文件里声明一段 `kUsage`，由 `usage()` 返回；系统提示 = `agent_prompt.h` 的核心规则 + 所有包的 `usage()`（按 `builtin.cpp` 注册顺序），请求时逐段从 Flash 发出，不在内存里拼接：
+系统提示 = `agent_prompt.h` 的核心规矩 + 每个包的一段 + 收尾规矩，请求时逐段从 Flash 发出。每个包三选一：
+
+| 包的声明 | 进系统提示的是 | 用法从哪来 | 适合 |
+|:--|:--|:--|:--|
+| 只有 `usage()` | 完整用法（常驻） | 系统提示 | 跨包都会用到、会改变做法的约定（SSH、终端、本机、调试、代码模式） |
+| `usage()` + `index()` | 一行索引：包名、简介、地址和主要动作 | `discover`（capabilities，query 写包名） | 只在相关任务里用到的包（蓝牙、红外、程序、界面……） |
+| `present()` 返回 false | 什么都不进 | `discover` 标明「未接上」 | 可选硬件没接、服务没配 Key |
 
 ```cpp
-// Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "WiFi 规范：搜索、扫描附近 WiFi 用 read target=wifi://scan；……";
+constexpr char kUsage[] = "……完整用法……";
 
 class WifiPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "扫描 read device://local/wifi/scan，连接 session(connect, device://local/wifi/网络名)……"; }
 ```
 
-- 只写模型从 discover 学不到、又必须在第一次调用前就知道的东西：target 写法、内容格式、容易猜错的地方。能等 discover 再说的细节放进 `resources()` 或能力说明。
-- 文本必须 JSON 安全：不含英文双引号、反斜杠和控制字符（引号用“”）；不合格的 `usage()` 在注册时被丢弃，运行日志记 `package_usage_unsafe`。
-- 改完先用[提示词实验台](E2E.zh-CN.md#提示词实验台)跑意图用例（实验台按同样规则从源码拼出提示词，不用刷机），不退步再上实机。
+- 索引行要写全这个包的**主要动作**和内容格式：只写一半，模型会去猜（0.7.4 上机撞到过：只写了 install，模型去「安装」一个已在卡上的包）。
+- 只放索引时模型很少主动去查：会改变做法的能力（如代码模式）必须常驻。
+- 文本必须 JSON 安全：不含英文双引号、反斜杠和控制字符（引号用“”）；`tools/check_usage.py` 检查，不合格的在注册时被丢弃（运行日志 `package_usage_unsafe`）。
+- 地址必须符合第 5 节，`tools/check_addresses.py` 检查。
+- 改完先用[提示词实验台](E2E.zh-CN.md#提示词实验台)和 `tools/agent_lab.py` 跑（按同样规则从源码拼提示词，不用刷机），不退步再上实机。
 
 ### 帮助页条目 `hints()`
 
@@ -182,7 +191,154 @@ public:
 
 设备随后暂停任务，弹出掩码输入框。用户输入后，值只通过 `execute_secret()` 的 `secret` 参数传进来，不会出现在参数 JSON、日志、任务记录或模型上下文中。取消输入时，这一步记为未执行，任务继续。
 
-## 5. 必须遵守的规则
+## 5. 资源地址
+
+> 硬约束，和 `CLAUDE.md` 同级。`tools/check_addresses.py`（`make host-test` 运行）从本章的「协议头登记表」「动作词表」「已废弃的写法」三张表读规则，检查各包的 `kUsage`、`index()`、`supports()` 和 `prog://help` 里的地址；改规则就改这三张表。
+> 来源：2026-11-13 盘点出 22 种协议头，动作的位置、列表、设置、事件、本机硬件的写法各不相同（同一个包里 `pkg://install/名字` 和 `pkg://名字/enable` 并存；LoRa 包专门接受模型猜的 `device://local/lora`）。
+
+模型只有七个工具，能做的事全靠地址区分；程序里的 `vat.read(地址)` 也用同一套地址。地址就是 FeiyuOS 对模型和程序的接口，要像函数名一样有规则。
+
+### 5.1 结构
+
+```
+协议头://资源路径[/动作][?参数]
+```
+
+| 部分 | 规则 | 例 |
+|:--|:--|:--|
+| 协议头 | 小写英文一个词，必须在 5.5 的登记表里 | `device` `prog` `ssh` |
+| 资源路径 | 从大到小用 `/` 分层；名字照用户的叫法（可以是中文），编号用阿拉伯数字；不翻译、不改写 | `device://local/display/text`、`prog://工具箱`、`trigger://3` |
+| 动作 | 只能是**最后一段**，必须在 5.2 的动作词表里；对整个集合的动作接在集合后，对某一个对象的动作接在对象后 | `trigger://new`、`trigger://3/delete`、`pkg://天气/install` |
+| 参数 | `?键=值&…`，只用于读的筛选或不改变对象身份的选项；`url=` 放最后 | `memory://history?q=日志`、`prog://工具箱?lines=40-80` |
+
+- 要写的值放在 `content`，不放进地址（反例：`device://local/ir/电视/on`，开关是动作 `power`）。
+- 读用 `read`、改用 `write`、运行用 `exec`，地址里不出现 `get`、`set` 这类段。
+- `read` 永远不改变任何状态（反例：`read pkg://catalog` 曾经会把当前目录换掉）。
+
+### 5.2 动作词表
+
+| 动作 | 工具 | 含义 |
+|:--|:--|:--|
+| `list` | read | 列出一个集合 |
+| `status` | read | 当前状态 |
+| `help` | read | 用法说明 |
+| `new` | write | 新建（content 是新对象） |
+| `delete` | write | 删除 |
+| `clean` | write | 清理集合里失效的 |
+| `enable` | write | 启用 |
+| `disable` | write | 停用 |
+| `pause` | write | 暂停 |
+| `resume` | write | 继续 |
+| `open` | write | 打开（界面、面板） |
+| `close` | write | 关闭 |
+| `install` | write | 安装 |
+| `update` | write | 更新 |
+| `rollback` | write | 退回上一版 |
+| `scan` | read 或 write | 扫描：附近的网络和设备用 read；重新扫描卡用 write |
+| `send` | write | 发出（content 是要发的） |
+| `confirm` | write | 确认是否生效 |
+| `try` | write | 换下一种试 |
+| `patch` | write | 局部修改 |
+| `clear` | write | 清空（屏幕） |
+| `run` | write | 运行一段代码（代码模式） |
+
+新增动作：先在本表加一行，写明配哪个工具。`help` 和 `run` 也是名词，可以在中间：`prog://help/examples` 是帮助的分页，`debug://run/编号` 是一次运行。
+
+### 5.3 公用的名字
+
+| 名字 | 含义 |
+|:--|:--|
+| `list` `status` `help` | 见动作词表，在任何协议头下都是同一个意思 |
+| `event/名称` | 事件，只用作触发条件：`<来源>/event/<名称>`，事件的数据字段写在该包的用法里 |
+| `local` | `device://local/` 下其余的（状态、电量、剪贴板）、其余 `memory://*` | 事件：`device://local/event/boot`（核心在启动就绪时发出）；注册在 lora、ble、wifi、ir、display、hardware 之后 |
+
+### 5.4 按类别归属
+
+| 类别 | 地址 | 例 |
+|:--|:--|:--|
+| **测量出来的读数**（本机模块、外接模块、别处的传感器都一样） | `sensor://名称/指标` | `sensor://imu/acceleration`、`sensor://gps/location`、`sensor://grove`、`sensor://书桌/temperature` |
+| **本机自身的状态、部件和通道** | `device://local/…` | `device://local/battery`、`device://local/led`、`device://local/display/text`、`device://local/lora/send`、`device://local/ble/scan`、`device://local/wifi/scan`、`device://local/ir/电视/power` |
+| **别处能控制的设备** | `device://位置/属性` | `device://客厅/light-1/power` |
+| **设置页里能改的偏好** | `settings://…` | `settings://brightness`、`settings://volume`、`settings://lora/frequency`、`settings://ble/power` |
+| **事件** | `<来源>/event/<名称>` | `device://local/event/boot`、`prog://event/failed`、`device://local/ble/event/connected`、`ui://event/panel/名字` |
+
+时间计划（`time://every/07:00`）是触发条件，不是事件，用 `time://`。
+
+**可选硬件**（Cap 扩展板上的 LoRa、GPS，要 Key 的高德……）由包实现 `present()` 说明在不在：不在时，提示词里不出现它的索引行和用法；`discover` 仍能查到并标明「未接上」；调用时返回明确的错误。提示词每次请求现拼，接上以后下一句话就生效。
+
+### 5.5 协议头登记表
+
+| 协议头 | 归属的包 | 管什么 |
+|:--|:--|:--|
+| `device` | local、display、hardware、lora、ble、wifi、ir | `device://local/…` 本机的状态、部件和通道；`device://位置/…` 别处的设备 |
+| `sensor` | hardware、gps、grove | 读数：本机模块 `imu` `gps` `grove`，别处的 `sensor://位置/指标` |
+| `settings` | `settings://`（read）；`settings://brightness`、`timeout`、`volume`、`context`、`animation`、`statusbar`、`font`、`lora/…`、`ble/power`、`open/<页>`（write） | 设置页里能改的偏好；`open/key/<提供方>` 弹出掩码输入框，Key 不经过模型；`open/portal`、`open/webtoken` 每次确认。全部在 UI 任务里执行 |
+| `memory` | memory、local | 长上下文、历史、案卷、笔记、最近任务 |
+| `file` | files | 卡上的文件 `file:///vat/…` |
+| `prog` | program | 程序 |
+| `trigger` | program | 触发 |
+| `pkg` | pkg | 卡上程序和扩展包的管理、在线目录 |
+| `ui` | ui | 面板、画布、本地应用 |
+| `debug` | debug | 三条全局流 |
+| `lua` | lua | 代码模式 `lua://run` |
+| `timer` | `timer://in/…` `timer://at/…` 的 write；`timer://list` 读；`timer://编号/delete`、`timer://all/delete` | 存 `/vat/things/timers/`；到点全屏提醒 + 提示音，不做别的事；关机期间错过的开机补发。触发的时间条件：`time://at/…` `in/…` `every/…` `weekday/…` `weekend/…` |
+| `time` | timer | 触发的时间条件 |
+| `ssh` | ssh | 远端主机、文件、命令 |
+| `tmux` | tmux | 远端 tmux 会话 |
+| `tui` | tmux | 当前终端 `tui://current` |
+| `agent` | agents、tmux | 远程 Agent `agent://current` |
+| `web` | web | 联网搜索、网页 |
+| `http` | http | 接口 |
+| `https` | http | 接口 |
+| `place` | `place://` 的 here、nearby、search、weather、route（read） | 高德，`present()` 看有没有 Key；路线用 v5（步行、驾车、骑行、电动车、公交）；没有 GPS 时按 IP 估算并注明 |
+| `ble` | `device://local/ble/…` 的 read/write；事件 `device://local/ble/event/…`；开关在 `settings://ble/power` | 扫描、广播、连接读写、订阅通知、当蓝牙键盘；注册在 `local` 之前 |
+| `pkg` | `pkg://list` `pkg://catalog` 的 read；`pkg://scan`、`pkg://名字/enable|disable|delete|install|update|rollback`、`pkg://new?url=…` 的 write | 卡上程序与扩展包的管理、在线目录 |
+| `lua` | `lua://run` 的 write | 代码模式：一段 Lua 一次跑完；要确认的调用在设备上逐个问用户 |
+| `ask` | ask | 程序里问一句 |
+
+新增协议头：先在本表登记，写明归属的包和管什么。
+
+### 5.6 已废弃的写法
+
+改地址时不留旧写法（不做「新旧都认」的兼容层）：旧写法直接报「没有能力包可处理」，卡上已保存的程序、`@uses`、已确认的权限、触发、面板应用在开机时按本表一次性改写（记一条 `address_migrated` 事件，只做一次）。
+
+| 旧写法 | 新写法 |
+|:--|:--|
+| `pkg://install/` | `pkg://名字/install` |
+| `pkg://update/` | `pkg://名字/update` |
+| `pkg://rollback/` | `pkg://名字/rollback` |
+| `pkg://install?` | `pkg://new?` |
+| `timer://cancel` | `timer://编号/delete`，全部 `timer://all/delete` |
+| `ui://apps` | 列出用 `ui://apps/list` |
+| `memory://cases` | 列出用 `memory://cases/list` |
+| `memory://out` | 列出用 `memory://out/list` |
+| `device://local/settings` | `settings://` |
+| `device://local/display/brightness` | `settings://brightness` |
+| `device://local/display/timeout` | `settings://timeout` |
+| `device://local/audio/volume` | `settings://volume` |
+| `device://local/context/length` | `settings://context` |
+| `lora://settings/` | `settings://lora/` |
+| `lora://` | `device://local/lora/` |
+| `ble://power` | `settings://ble/power` |
+| `ble://devices` | `device://local/ble/devices/list` |
+| `ble://` | `device://local/ble/` |
+| `wifi://` | `device://local/wifi/` |
+| `ir://` | `device://local/ir/` |
+| `device://boot` | `device://local/event/boot` |
+| `device://lora` | `device://local/lora/` |
+| `settings://open/` | `settings://页名/open`，Key 输入框 `settings://key/提供方/open` |
+
+第一列以 `/` 或 `?` 结尾的是前缀，其余的是整个地址（`ui://apps` 不拦 `ui://apps/名字`）。另有两条不在表里检查：面板选择的事件由 `ui://panel/名字` 改为 `ui://event/panel/名字`（`ui://panel/名字` 本身仍是面板）；LoRa 包原来额外接受的猜测写法（`device://lora/…`）去掉。
+
+### 5.7 新增或修改地址的流程
+
+1. 先改本章（登记表、动作词表、废弃表），说明理由；
+2. 改包的 `supports()`、`kUsage`、`index()`；
+3. `make host-test`（含 `check_addresses.py`）通过；
+4. 提示词实验（`tools/prompt_lab.py --device`）和实验台（`tools/agent_lab.py`）不退步；
+5. 改了已有地址：在废弃表里加一行，开机迁移照表改写卡上数据。
+
+## 6. 必须遵守的规则
 
 **认领**
 - `supports()` 只按 target scheme 和 session action 精确认领，不能接管不属于自己的 target。不同包的认领范围不得重叠。
@@ -208,12 +364,12 @@ public:
 
 **结果**
 - `execute()` 返回给人看的文本或紧凑 JSON；失败也返回文本，不要抛出，也不要假装成功。
-- **target 先找已有约定再新造 scheme**：传感器一律 `sensor://名称/指标`（GPS 是 `sensor://gps/location`，曾新造 `gps://` 而模型按约定写了 `sensor://GPS/location`）；设备状态 `device://`；本机资源 `device://local/`。
+- **地址按第 5 节写**：先找已有的协议头和约定，再考虑新造（曾新造 `gps://`，模型按约定写成了 `sensor://GPS/location`，后来统一为 `sensor://gps/…`：模型按「是什么」而不是「在哪」猜地址）。
 - **持久数据放 `/vat/things/<包名>/`**：设备档案、昵称、上次状态、验证记录等，一个对象一个 JSON 文件（或一个小的汇总文件），用 `storage::write_text` 原子写入；需要模型认得的名字（别名）通过上下文带入，不让模型猜。临时数据放 `/vat/cache/`。
 - **返回清单时必须编号**：`1. 名称  关键属性`，一项一行，最多 12 项，整体控制在 600 字节以内（对话记忆中每条工具结果的上限）。用户之后说“第 N 个”时，模型就按这个编号找。参考 `wifi://scan`、tmux 会话列表、`discover`。
 - Agent 页显示的是模型的一句话总结，原始结果进 RAW 详情层，所以结果要“机器可读、关键信息在前”。
 
-## 6. 测试要求
+## 7. 测试要求
 
 每个新包至少在 `tools/vat_e2e.py` 中补充对应用例（现有包的用例在 S2–S6）：
 
@@ -229,32 +385,32 @@ public:
 
 只有编译通过不算完成，必须在实物上跑通对应的 E2E 阶段。涉及按键、录音、屏幕或物理设备的，还要按 [人工验收](MANUAL_ACCEPTANCE.zh-CN.md) 补人工结果。
 
-## 7. 现有包一览
+## 8. 现有包一览
 
 | ID | 认领范围 | 说明 |
 |:--|:--|:--|
 | `memory` | `memory://out` `memory://history` `memory://cases` 的 read；`memory://cases/…` 的 write；session attach/disconnect `memory://cases/…` | 完整输出分页与 grep、历史检索、案卷；需要 TF 卡（注册在 `local` 之前） |
-| `settings` | `settings://`（read）；`settings://animation`、`statusbar`、`font`、`open/<页>`（write） | 0.7：读设置页各行；改动画、顶栏、终端字号；在设备上打开设置页，`open/key/<提供方>` 弹出掩码输入框，Key 不经过模型；`open/portal`、`open/webtoken` 每次确认。全部在 UI 任务里执行 |
-| `local` | `device://local/*`、其余 `memory://*` | 状态、亮度、息屏、音量、剪贴板、记忆笔记、最近任务。事件：`device://boot`（核心在启动就绪时发出） |
+| `settings` | `settings://`（read）；`settings://brightness`、`timeout`、`volume`、`context`、`animation`、`statusbar`、`font`、`lora/…`、`ble/power`、`open/<页>`（write） | 设置页里能改的偏好；`open/key/<提供方>` 弹出掩码输入框，Key 不经过模型；`open/portal`、`open/webtoken` 每次确认。全部在 UI 任务里执行 |
+| `local` | `device://local/` 下其余的（状态、电量、剪贴板）、其余 `memory://*` | 事件：`device://local/event/boot`（核心在启动就绪时发出）；注册在 lora、ble、wifi、ir、display、hardware 之后 |
 | `ssh` | `ssh://…` 的 read/write/exec；session connect/disconnect/list（`ssh://` 或空） | libssh；输出在远端限长；connect 接入该主机的 `vat-shell` 终端；私钥未被接受时请求一次登录密码并装好设备公钥；需要密码的 sudo 请求 sudo 密码，经 stdin 传入 |
 | `tmux` | observe/input；read `tui://` `agent://`；session create/attach、`tmux://` list/connect | 远端 tmux 观察与输入 |
 | `agents` | session start_agent/resume_agent/interrupt/approve/reject | Codex / Claude / Pi 只读启动 |
 | `policy` | session set_policy | 修改目标策略（本身需要确认） |
-| `wifi` | `wifi://scan` `wifi://status` 读；`wifi://SSID` 写或 session connect `wifi://名称`（保存并切换） | 未保存的加密网络请求密码，模型给的密码一律忽略 |
+| `wifi` | `device://local/wifi/scan` `device://local/wifi/status` 读；session connect `device://local/wifi/网络名`（保存并切换） | 未保存的加密网络请求密码，模型给的密码一律忽略；注册在 `local` 之前 |
 | `web` | `web://search?q=` `web://page?url=` 的 read | DeepSeek Search / Fetch；网页整页存成 out#N |
-| `lora` | `lora://` 的 read/write；session connect/disconnect `lora://` | Cap LoRa-1262；默认关闭（芯片保持复位）；发射需频点 + 天线确认 + 每次确认 |
-| `gps` | `sensor://gps/…` 的 read；session connect/disconnect `sensor://gps` | Cap 上的 GNSS，只收不发，默认开启 |
+| `lora` | `device://local/lora/…` 的 read/write；设置在 `settings://lora/…` | Cap LoRa-1262，`present()` 看 Cap 在不在；默认关闭（芯片保持复位）；发射需频点 + 天线确认 + 每次确认；注册在 `local` 之前 |
+| `gps` | `sensor://gps/…` 的 read | Cap 上的 GNSS，`present()` 看 Cap 在不在；只收不发，默认开启 |
 | `display` | `device://local/display/{text,qr,image,banner,clear}` 的 write | 全屏浮层：大字、二维码、/vat 下的小图片、通知横幅；接受常见别名（注册在 `local` 之前） |
 | `hardware` | `device://local/led`、`device://local/audio/beep` 的 write；`sensor://imu/…` 的 read | RGB 灯、提示音（录音中不响）、IMU 姿态；LED 与提示音免确认（注册在 `local` 之前） |
 | `files` | `file:///vat/…` 的 read/write | 读目录即列出；写需确认；`secrets.json`、`/vat/ssh`、隐藏文件一律拒绝 |
-| `timer` | `timer://in/…` `timer://at/…` 的 write；`timer://list` 读；`timer://cancel/…` | 存 `/vat/things/timers/`；到点全屏提醒 + 提示音；关机期间错过的开机补发。事件：`time://at/…` `in/…` `every/…` `weekday/…` `weekend/…` |
+| `timer` | `timer://in/…` `timer://at/…` 的 write；`timer://list` 读；`timer://编号/delete`、`timer://all/delete` | 存 `/vat/things/timers/`；到点全屏提醒 + 提示音，不做别的事；关机期间错过的开机补发。触发的时间条件：`time://at/…` `in/…` `every/…` `weekday/…` `weekend/…` |
 | `grove` | `sensor://grove/…` 的 read | 扫描 Ex_I2C，按地址推测型号 |
-| `ir` | `ir://<电器名>/<动作>` 的 write | 内置电视码组；发码后由用户确认是否生效，没反应换下一组；档案存 `/vat/things/ir/` |
-| `place` | `place://` 的 here、nearby、search、weather、route（read） | 高德；路线用 v5（步行、驾车、骑行、电动车、公交）；没有 GPS 时按 IP 估算并注明 |
-| `program` | `prog://…` 的 read/write/exec；`trigger://…` 的 read/write | 程序（JSON 步骤，可互相调用）与触发表；保存时一次确认，运行在 worker 回调任务里；见 [程序与触发](PROGRAMS.zh-CN.md) |
+| `ir` | `device://local/ir/<电器名>/<动作>` 的 write；`device://local/ir/list`、`device://local/ir/send` | 内置电视码组；发码后由用户确认是否生效（`confirm`），没反应换下一组（`try`）；档案存 `/vat/things/ir/`；注册在 `local` 之前 |
+| `place` | `place://` 的 here、nearby、search、weather、route（read） | 高德，`present()` 看有没有 Key；路线用 v5（步行、驾车、骑行、电动车、公交）；没有 GPS 时按 IP 估算并注明 |
+| `program` | `prog://…` 的 read/write/exec；`trigger://…` 的 read/write | Lua 程序与触发表；保存时一次确认；见 [程序与触发](PROGRAMS.zh-CN.md) |
 | `ask` | `ask://` 的 write/read | 问大肥鱼一句，回复为结果；无人值守（需确认的操作自动拒绝）；已有对话时拒绝 |
 | `linux` `git` `docker` `systemd` | 只参与 discover | 命令目录、风险等级、远端可用性、`--help` |
 
-## 8. 方向
+## 9. 方向
 
 可以按本手册接入的能力和推荐顺序，见 [扩展方向](EXTENSIONS.zh-CN.md)。

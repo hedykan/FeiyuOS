@@ -1,4 +1,4 @@
-// local: the device itself — status, display/audio settings, clipboard,
+// local: the device itself — status, battery, screen power, clipboard,
 // memory notes.  Targets: device://local/*, memory://* except what the
 // memory package owns (context::owns_target).
 #include "../common.h"
@@ -11,15 +11,15 @@ namespace vat::registry {
 namespace {
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "本机资源规范：电量 device://local/battery，屏幕电源 device://local/display/power，音量 device://local/audio/volume，剪贴板 device://local/clipboard：把一段文字复制到本机剪贴板用 write target=device://local/clipboard，mode=overwrite，content 就是那段文字本身（例如“把部署完成复制到本机剪贴板”的 content 是 部署完成），不是复制文件。最近任务为 memory://recent-tasks，记忆笔记为 memory://notes，用 write mode=append，content 只写要记住的事本身，去掉“记住”和句末标点，例如“记住明天检查服务器证书。”的 content 是 明天检查服务器证书。本机资源规范补充：查看本机状态用 read target=device://local/status；查看本机设置用 device://local/settings；设置屏幕亮度用 write target=device://local/display/brightness，content 为 8 到 255 的整数；设置自动息屏时间用 write target=device://local/display/timeout，content 为秒数。对话记忆长度用 device://local/context/length，content 为 短、中、长 或 32、64、96（KB）。";
+constexpr char kUsage[] = "本机：状态 device://local/status，电量 device://local/battery，屏幕电源 device://local/display/power；设置里的项：亮度 settings://brightness（8–255），自动息屏 settings://timeout（秒），音量 settings://volume，对话记忆长度 settings://context（短、中、长）。剪贴板 device://local/clipboard（write overwrite，内容是那段文字本身）。记忆笔记 memory://notes（write append），最近任务 memory://recent-tasks。";
 
 class LocalPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
     bool reversible(const String&, const cJSON* arguments) const override {
         const String target = json_str(arguments, "target");
-        return target.startsWith("device://local/display/") || target.startsWith("device://local/audio/") ||
-               target == "device://local/clipboard" || target == "memory://notes";
+        return target.startsWith("device://local/display/") || target == "device://local/clipboard" ||
+               target == "memory://notes";
     }
 
     const Manifest& manifest() const override {
@@ -43,11 +43,11 @@ public:
     }
 
     void triggers(std::vector<TriggerSpec>& out) const override {
-        out.push_back({"device://boot", "每次开机就绪后"});
+        out.push_back({"device://local/event/boot", "每次开机就绪后"});
     }
 
     bool watch(const String& target, String& normalized, String& error) override {
-        if (target != "device://boot") return false;
+        if (target != "device://local/event/boot") return false;
         normalized = target;  // emitted at every boot anyway
         return true;
     }

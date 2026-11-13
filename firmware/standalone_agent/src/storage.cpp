@@ -1,5 +1,6 @@
 #include "storage.h"
 
+#include "common.h"
 #include "ops_lora.h"
 
 #include <LittleFS.h>
@@ -211,11 +212,18 @@ const char* const kMirroredFiles[] = {"/vat/config.json", "/vat/secrets.json", "
 bool flash_mounted = false;
 bool degraded_mode = false;
 
+// A file under things/ (path from /vat or /mirror on) that the mirror keeps:
+// not logs (program logs change on every run and are not needed to recover),
+// not .jsonl, not a .tmp being written.
+bool kept_in_mirror(const String& path) {
+    return path.indexOf("/logs/") < 0 && !path.endsWith(".jsonl") && !path.endsWith(".tmp");
+}
+
 bool is_mirrored(const String& path) {
     for (const char* file : kMirroredFiles) {
         if (path == file) return true;
     }
-    return path.startsWith("/vat/things/") && !path.endsWith(".jsonl");
+    return path.startsWith("/vat/things/") && kept_in_mirror(path);
 }
 
 String mirror_of(const String& path) { return "/mirror" + path.substring(4); }  // "/vat/x" -> "/mirror/x"
@@ -232,10 +240,31 @@ bool make_dirs(fs::FS& fs, const String& path) {
 }
 
 // Copies one file (its last `tail` bytes when non-zero) across filesystems.
-bool copy_file(fs::FS& from, const String& source, fs::FS& to, const String& target, std::size_t tail = 0) {
+// True when `target` already holds what copy_file would write (the whole
+// source, or its last `tail` bytes).  Reading flash is fast; writing a file
+// there erases blocks: the boot rewrote ~140 unchanged mirrored files every
+// time (32-35 s, 2026-11-13).
+bool same_file(File& in, fs::FS& to, const String& target) {
+    File have = to.open(target, FILE_READ);
+    if (!have || have.isDirectory()) return false;
+    const std::size_t start = in.position();
+    if (have.size() != in.size() - start) return false;
+    uint8_t a[256], b[256];
+    bool same = true;
+    int n;
+    while (same && (n = in.read(a, sizeof(a))) > 0) same = have.read(b, n) == n && memcmp(a, b, n) == 0;
+    have.close();
+    in.seek(start);
+    return same;
+}
+
+bool copy_file(fs::FS& from, const String& source, fs::FS& to, const String& target, std::size_t tail = 0,
+               bool* copied = nullptr) {
     File in = from.open(source, FILE_READ);
     if (!in || in.isDirectory()) return false;
     if (tail && in.size() > tail) in.seek(in.size() - tail);
+    if (same_file(in, to, target)) return true;
+    if (copied) *copied = true;
     if (!make_dirs(to, target)) return false;
     const String temp = target + ".tmp";
     to.remove(temp);
@@ -284,21 +313,17 @@ std::vector<String> mirrored_present(fs::FS& fs, const String& root) {
         pending.pop_back();
         File dir = fs.open(directory);
         if (!dir || !dir.isDirectory()) continue;
-        std::vector<String> children;
+        // The entry knows whether it is a directory: opening each path again to
+        // ask was a directory search per file on the card.
         File entry = dir.openNextFile();
         while (entry) {
-            children.push_back(entry.path());
+            const String child = entry.path();
+            if (entry.isDirectory()) pending.push_back(child);
+            else if (kept_in_mirror(child)) found.push_back(child);
             entry.close();
             entry = dir.openNextFile();
         }
         dir.close();
-        for (const auto& child : children) {
-            File node = fs.open(child);
-            const bool is_dir = node && node.isDirectory();
-            if (node) node.close();
-            if (is_dir) pending.push_back(child);
-            else if (!child.endsWith(".jsonl") && !child.endsWith(".tmp")) found.push_back(child);
-        }
     }
     return found;
 }
@@ -319,6 +344,58 @@ void mirror_file(const String& path) {
 }
 
 // Card mounted: the newer side of card and mirror wins.
+constexpr unsigned long kMirrorCheckDelayMs = 20000;
+unsigned long mirror_check_from = 0;  // 0: nothing to check
+std::vector<String> mirror_dirs;      // still to list
+std::vector<String> mirror_files;     // still to compare (and copy when changed)
+bool mirror_started = false;
+int mirror_checked = 0, mirror_copied = 0;
+unsigned long mirror_started_at = 0;
+
+// One step of the card-to-flash check: list one directory or compare one file.
+void mirror_tick() {
+    if (!mirror_check_from || millis() < mirror_check_from || !flash_mounted || active_kind != "tf") return;
+    if (!mirror_started) {
+        mirror_started = true;
+        mirror_checked = mirror_copied = 0;
+        mirror_started_at = millis();
+        for (const char* file : kMirroredFiles) mirror_files.push_back(file);
+        mirror_dirs.push_back("/vat/things");
+        return;
+    }
+    if (!mirror_dirs.empty()) {
+        const String directory = mirror_dirs.back();
+        mirror_dirs.pop_back();
+        File dir = SD.open(directory);
+        if (!dir || !dir.isDirectory()) return;
+        File entry = dir.openNextFile();
+        while (entry) {
+            const String child = entry.path();
+            if (entry.isDirectory()) mirror_dirs.push_back(child);
+            else if (kept_in_mirror(child)) mirror_files.push_back(child);
+            entry.close();
+            entry = dir.openNextFile();
+        }
+        return;
+    }
+    if (!mirror_files.empty()) {
+        const String path = mirror_files.back();
+        mirror_files.pop_back();
+        if (!SD.exists(path)) return;
+        ++mirror_checked;
+        bool copied = false;
+        copy_file(SD, path, LittleFS, mirror_of(path), path.endsWith("notes.txt") ? kMirroredNotesBytes : 0, &copied);
+        mirror_copied += copied;
+        return;
+    }
+    runtime_event("mirror_check", String(mirror_checked) + " files, " + String(mirror_copied) + " copied, " +
+                                      String((millis() - mirror_started_at) / 1000) + " s");
+    mirror_check_from = 0;
+    mirror_started = false;
+    std::vector<String>().swap(mirror_files);
+    std::vector<String>().swap(mirror_dirs);
+}
+
 void sync_mirror_with_card() {
     const long card = read_rev(SD, kCardRev);
     const long flash = read_rev(LittleFS, kMirrorRev);
@@ -327,9 +404,11 @@ void sync_mirror_with_card() {
         write_rev(SD, kCardRev, flash);
         return;
     }
-    for (const auto& path : mirrored_present(SD, "/vat")) {
-        copy_file(SD, path, LittleFS, mirror_of(path), path.endsWith("notes.txt") ? kMirroredNotesBytes : 0);
-    }
+    // Card to flash: what the device changed is already mirrored as it was
+    // written (mirror_file); this catches files changed on a computer.  It only
+    // matters if the card fails later, so it runs after the boot, a little per
+    // loop (mirror_tick): checking ~100 files here took 8-9 s of every boot.
+    mirror_check_from = millis() + kMirrorCheckDelayMs;
     const long rev = std::max(card, 1L);
     write_rev(LittleFS, kMirrorRev, rev);
     write_rev(SD, kCardRev, rev);
@@ -369,6 +448,7 @@ bool begin() {
     // Wi-Fi settings and open the setup access point).
     const bool cold = esp_reset_reason() == ESP_RST_POWERON;
     const int rounds = cold ? 1 : 5;
+    boot_step("storage-pre");
     for (int round = 0; round < rounds && !active; ++round) {
         if (round) delay(600);
         if (mount_card()) {
@@ -376,6 +456,7 @@ bool begin() {
             active_kind = "tf";
         }
     }
+    boot_step("sd-mount");
     if (!active && LittleFS.begin(true)) {
         active = &LittleFS;
         active_kind = "flash";
@@ -384,6 +465,7 @@ bool begin() {
     }
     if (!active) return false;
     if (active_kind == "tf" && LittleFS.begin(true)) {
+        boot_step("flash-mount");
         flash_mounted = true;  // stays mounted for the mirror
         // Data lives in exactly one place.  A flash session that carried a
         // full configuration was real use without a card: it is newer, so it
@@ -399,12 +481,15 @@ bool begin() {
             const bool moved = configured ? copy_tree(LittleFS, SD, "/vat") : merge_tree(LittleFS, SD, "/vat");
             if (moved) remove_tree_on(LittleFS, "/vat");
         }
+        boot_step("flash-vat");
         sync_mirror_with_card();
+        boot_step("mirror");
     }
     for (const char* dir : {"/vat", "/vat/logs", "/vat/memory", "/vat/cache",
                             "/vat/cache/jobs", "/vat/ssh", "/vat/tests"}) {
         if (!active->exists(dir)) active->mkdir(dir);
     }
+    boot_step("dirs");
     return true;
 }
 
@@ -625,6 +710,7 @@ bool append_buffered(const String& path, const String& text, bool rotate) {
 void flush() { flush_where([](const String&, const Buffered&) { return true; }); }
 
 void tick() {
+    mirror_tick();
     const unsigned long now = millis();
     flush_where([now](const String&, const Buffered& b) { return now - b.since >= kBufferMs; });
 }

@@ -1,0 +1,1 @@
+远程 Agent（Codex、Claude、Pi）：让它在某项目做事用 session(start_agent, provider, project, prompt=用户的任务原话)；没有具体项目名（“这个项目”“代码”不算）就澄清。当前 Agent 是 agent://current：恢复 resume_agent、中断 interrupt、批准 approve、拒绝 reject。项目名用小写和连字符。

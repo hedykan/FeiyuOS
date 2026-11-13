@@ -1,4 +1,5 @@
 #include <new>
+#include "address_map.h"
 #include "registry.h"
 
 #include <algorithm>
@@ -35,7 +36,7 @@ String stream_base(const String& target) {
 }
 
 // A declared target ending in '*' stands for every target with that prefix
-// (ble://rssi/* covers ble://rssi/aa:bb:…); otherwise the target itself.
+// (device://local/ble/rssi/* covers device://local/ble/rssi/aa:bb:…); otherwise the target itself.
 bool stream_matches(const String& base, const char* declared) {
     const size_t n = strlen(declared);
     if (n > 0 && declared[n - 1] == '*') return base.length() >= n && strncmp(base.c_str(), declared, n - 1) == 0;
@@ -182,7 +183,7 @@ bool matches(const Package& package, const std::vector<String>& query_terms) {
 
 // Packages list their resources best match first, so a package registered
 // late is not crowded out by the limit ("LoRa 设备" once returned eight local
-// targets — "设备" is a local keyword — and no lora://).
+// targets — "设备" is a local keyword — and no device://local/lora/).
 String discover_resources(const String& query, int limit) {
     cJSON* list = cJSON_CreateArray();
     int remaining = limit;
@@ -234,7 +235,7 @@ String discover_capabilities(const String& query, const String& target, int limi
         const auto& manifest = package->manifest();
         if (filter && !query.isEmpty() && !matches(*package, query_terms)) continue;
         if (count >= limit) break;
-        text += String(++count) + ". " + manifest.id + "：" + manifest.summary;
+        text += String(++count) + ". " + manifest.id + "：" + manifest.summary + (package->present() ? "" : "（未接上，现在用不了）");
         if (!profile.isEmpty() && manifest.availability_program) {
             text += package->available(profile) ? "（" + profile + " 上可用）" : "（" + profile + " 上不可用）";
         }
@@ -331,17 +332,41 @@ bool add_resource(cJSON* list, int& remaining, const char* target, const char* k
     --remaining;
     return true;
 }
+namespace {
+bool json_safe(const char* text) {
+    for (const char* c = text; *c; ++c) {
+        if (*c == '"' || *c == '\\' || static_cast<unsigned char>(*c) < 0x20) return false;
+    }
+    return true;
+}
+
+// Every system prompt carries this head and one line per on-demand package.
+constexpr char kIndexHead[] =
+    "能力包（要用某个包而不清楚它的地址或参数时，先 discover scope=capabilities query=包名 取它的用法；已经清楚的直接调用）：";
+}  // namespace
+
 const std::vector<const char*>& usages() {
     static std::vector<const char*> out;  // worker task only; rebuilt per request
+    static String index;                  // the on-demand packages, one line each
     out.clear();
+    index = kIndexHead;
     for (auto* package : installed) {
         const char* text = package->usage();
-        if (!text || !*text) continue;
-        bool safe = true;
-        for (const char* c = text; *c && safe; ++c) safe = *c != '"' && *c != '\\' && static_cast<unsigned char>(*c) >= 0x20;
-        if (safe) out.push_back(text);
-        else runtime_event("package_usage_unsafe", package->manifest().id);
+        if (!text || !*text || !package->present()) continue;
+        const char* line = package->index();
+        const auto& manifest = package->manifest();
+        if (!json_safe(text) || (line && (!json_safe(line) || !json_safe(manifest.summary)))) {
+            runtime_event("package_usage_unsafe", manifest.id);
+            continue;
+        }
+        if (!line) {
+            out.push_back(text);
+            continue;
+        }
+        index += String("\\n") + manifest.id + "：" + manifest.summary + "（" + line + "）";
     }
+    index += "\\n";
+    out.push_back(index.c_str());
     return out;
 }
 
@@ -363,6 +388,19 @@ String discover(const cJSON* arguments) {
         // No query: all packages, names only (never cut).  A query lists the
         // matching ones with what they do, up to `limit`.
         if (query.isEmpty()) return package_names();
+        // A query naming on-demand packages (their usage is not in the system
+        // prompt): their summary and usage, at most two.
+        String named;
+        int count = 0;
+        const auto words = terms(query);
+        for (auto* package : installed) {
+            if (!package->index() || count == 2) continue;
+            const String id = package->manifest().id;
+            if (std::find(words.begin(), words.end(), id) == words.end()) continue;
+            named += String(count++ ? "\n\n" : "") + id + "：" +
+                     (package->present() ? package_help(id) : String(package->manifest().summary) + "（未接上，现在用不了）");
+        }
+        if (!named.isEmpty()) return named;
         const String matched = discover_capabilities(query, target, limit);
         if (!matched.isEmpty()) return matched;
         return "没有精确匹配。" + package_names();
@@ -528,6 +566,9 @@ cJSON* take_data(String* text) {
 
 String execute(const String& tool, const cJSON* arguments, bool approved, const String& secret) {
     cJSON_Delete(take_data());  // an offer nobody took belongs to an earlier call
+    const String target = json_str(arguments, "target");
+    const String now = address::retired(target);
+    if (!now.isEmpty()) return "ERROR: 地址已改为 " + now + "（" + target + " 是旧写法，不再使用）";
     for (auto* package : installed) {
         if (!package->supports(tool, arguments)) continue;
         // A package that runs out of memory (a container that cannot grow) must not

@@ -1,0 +1,1 @@
+LoRa 用 lora:// 而不是 device://：开关 write lora://settings/enabled（content on 或 off），频点、功率写 lora://settings/frequency、lora://settings/power，发消息 write lora://send，状态 read lora://status，收到的消息 read lora://messages。

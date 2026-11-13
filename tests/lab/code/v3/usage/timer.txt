@@ -1,0 +1,1 @@
+定时提醒用 write target=timer://in/时长（如 10m、1h30m）或 timer://at/时刻（如 18:30），content 只写提醒内容，查看用 read timer://list，取消用 write timer://cancel。到点要执行动作（开空调、发消息、跑命令）不要用 timer，用 trigger://（见程序包）。

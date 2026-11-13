@@ -1,13 +1,13 @@
 // memory: the long context on the TF card — complete tool outputs (out#N),
 // the searchable archive of past tasks, and cases for investigations that
 // span many tasks.  Targets:
-//   read  memory://out                     recent complete outputs (numbered)
+//   read  memory://out/list                recent complete outputs (numbered)
 //   read  memory://out/N[?page=P][&grep=W] one page (4 KB) or matching lines
 //   read  memory://history?q=W             past steps and answers matching W
-//   read  memory://cases[/NAME]            case list, or one case
+//   read  memory://cases/list | memory://cases/NAME   case list, or one case
 //   write memory://cases/NAME              mode=append: a finding; overwrite: the notes
 //   session attach|create memory://cases/NAME   make it the current case
-//   session disconnect memory://cases[/NAME]    close the current case
+//   session disconnect memory://cases/[NAME]    close the current case
 #include "../common.h"
 #include "../context.h"
 #include "../registry.h"
@@ -15,14 +15,14 @@
 namespace vat::registry {
 namespace {
 
-// "memory://cases/x" after "memory://cases" -> "x"
+// "memory://cases/x" after "memory://cases/" -> "x"
 String after(const String& path, const char* prefix) {
     const String rest = path.substring(strlen(prefix));
     return rest.startsWith("/") ? rest.substring(1) : rest;
 }
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "长上下文规范：工具结果末尾的“完整输出 out#N”说明全文存在卡上，按其中提示用 memory://out/N 翻页或搜索。用户问以前做过什么、上次的结果时，先看对话和摘要，没有再用 read target=memory://history?q=关键词 检索。持续多次的排查、渗透测试等调查用案卷：用户要开始或继续某项调查时 session(action=attach,target=memory://cases/名称)，结束时 session(action=disconnect,target=memory://cases/名称)；有案卷时，把确认的发现用 write target=memory://cases/名称 mode=append 记录，引用相关的 out#N；列出案卷用 read target=memory://cases。";
+constexpr char kUsage[] = "长上下文：结果末尾的“完整输出 out#N”在卡上，用 memory://out/N 翻页或搜索。问以前做过什么时先看对话和摘要，没有再 read memory://history?q=关键词。持续的调查用案卷：开始或继续 session(attach, memory://cases/名称)，结束 session(disconnect, 同一地址)，确认的发现 write memory://cases/名称 mode=append，列出 read memory://cases/list。";
 
 class MemoryPackage : public Package {
 public:
@@ -43,7 +43,7 @@ public:
         if (!context::owns_target(target)) return false;
         if (tool == "read") return true;
         if (tool == "write") return target.startsWith("memory://cases/");
-        if (tool == "session") return target.startsWith("memory://cases");
+        if (tool == "session") return target.startsWith("memory://cases/");
         return false;
     }
 
@@ -52,7 +52,7 @@ public:
         const String path = target_path(raw);
         if (tool == "session") {
             const String action = json_str(arguments, "action");
-            const String name = after(path, "memory://cases");
+            const String name = after(path, "memory://cases/");
             if (action == "attach" || action == "create" || action == "connect") return context::attach_case(name);
             if (action == "disconnect") return context::detach_case(name);
             if (action == "list") return context::list_cases();
@@ -60,11 +60,11 @@ public:
         }
         if (tool == "write") {
             const bool append = json_str(arguments, "mode", "append") != "overwrite";
-            return context::write_case(after(path, "memory://cases"), json_str(arguments, "content"), append);
+            return context::write_case(after(path, "memory://cases/"), json_str(arguments, "content"), append);
         }
-        if (path == "memory://out") return context::list_outputs();
-        if (path.startsWith("memory://out/")) {
-            const long id = after(path, "memory://out").toInt();
+        if (path == "memory://out/list") return context::list_outputs();
+        if (path.startsWith("memory://out/") && path != "memory://out/list") {
+            const long id = after(path, "memory://out/").toInt();
             if (id <= 0) return "out 编号无效：" + path;
             const String page = target_param(raw, "page");
             return context::read_output(id, page.isEmpty() ? 1 : page.toInt(), target_param(raw, "grep"));
@@ -74,8 +74,8 @@ public:
             if (query.isEmpty()) query = json_str(arguments, "query");
             return context::search_history(query);
         }
-        if (path == "memory://cases") return context::list_cases();
-        return context::read_case(after(path, "memory://cases"));
+        if (path == "memory://cases/list") return context::list_cases();
+        return context::read_case(after(path, "memory://cases/"));
     }
 
     void hints(std::vector<Hint>& out) override {
@@ -88,7 +88,7 @@ public:
 
     void resources(cJSON* list, int& remaining) override {
         if (!context::on_card()) return;
-        for (const char* target : {"memory://out", "memory://history", "memory://cases"}) {
+        for (const char* target : {"memory://out/list", "memory://history", "memory://cases/list"}) {
             add_resource(list, remaining, target, "memory");
         }
     }

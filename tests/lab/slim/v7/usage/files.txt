@@ -1,0 +1,1 @@
+本机 TF 卡文件用 file:///vat/路径（read 目录即列出，read 文件即读取，write 写入），不是 SSH 主机。

@@ -109,7 +109,7 @@ return w
 `write trigger://new`，content：`{"when": "time://every/07:00", "run": "prog://名字?参数"}`。
 
 - 只能运行程序；单个动作也写成一两行的程序。触发本身不需要确认（它只能运行已确认的程序），删除需要确认。
-- `when`：`time://at/18:30`（一次）、`time://in/10m`（一次）、`time://every/07:00`、`time://weekday/09:00`、`time://weekend/10:00`、`device://boot`，以及扩展包声明的事件（如 `ui://panel/名字`）。事件数据在程序里是 `input.event`。
+- `when`：`time://at/18:30`（一次）、`time://in/10m`（一次）、`time://every/07:00`、`time://weekday/09:00`、`time://weekend/10:00`、`device://local/event/boot`，以及扩展包声明的事件（如 `ui://panel/名字`）。事件数据在程序里是 `input.event`。
 - 一次性触发执行后删除；关机期间错过的不补跑，记一条「错过」。
 - 触发的运行排队，只在 worker 空闲且没有对话时执行，结果写进时间线。
 - 存在 `/vat/things/lua/triggers.json`；v0.7 之前的触发首次启动时迁移（运行程序的转成新格式，其余记一条「未迁移」，原文件改名为 `.old`）。
@@ -128,9 +128,9 @@ return w
 | `write pkg://名字/enable` | 启用；声明了权限的程序、以及所有扩展包，需要用户确认 |
 | `write pkg://名字/disable` · `/delete` | 停用；删除（需确认，被触发使用时拒绝） |
 | `read pkg://catalog` | 在线目录：可安装的程序和扩展包、版本、权限、已装 / 可更新（`?url=` 换目录地址） |
-| `write pkg://install/名字` · `pkg://update/名字` | 从目录安装 / 更新（需确认，确认框显示版本、来源、权限；更新显示新增的权限） |
-| `write pkg://rollback/名字` | 退回更新前保留的上一版（需确认） |
-| `write pkg://install?sha256=…&url=https://…/名字.lua` | 从任意地址下载一个 .lua（`url` 放最后；需确认），装好后是「待确认」，看过权限再 enable |
+| `write pkg://名字/install` · `pkg://名字/update` | 从目录安装 / 更新（需确认，确认框显示版本、来源、权限；更新显示新增的权限） |
+| `write pkg://名字/rollback` | 退回更新前保留的上一版（需确认） |
+| `write pkg://new?sha256=…&url=https://…/名字.lua` | 从任意地址下载一个 .lua（`url` 放最后；需确认），装好后是「待确认」，看过权限再 enable |
 
 `pkg` 是内置扩展包：它负责确认卡上的代码，所以自己不能是卡上的文件。
 
@@ -138,7 +138,7 @@ return w
 
 - 目录是一个 JSON（默认 FeiyuOS 仓库的 `packages/index.json`，用 `tools/pkg_index.py` 生成，见 `packages/README.md`），每项记着名字、版本、说明、声明的权限、文件地址、**SHA-256 和大小**。
 - 安装 / 更新时：确认框里的内容来自上一次 `read pkg://catalog` 存在卡上的目录（`/vat/cache/pkg/`）；下载先放到 `/vat/cache/pkg/download.lua`，大小、SHA-256 都对、声明能解析、代码能编译，并且声明的权限、scheme、说明**和目录写的完全一样**，才放进 `/vat/things/lua/`，并直接按确认过的权限启用。任何一项不对：不装，卡上原来的版本不动。
-- 更新时旧版本留在 `/vat/things/lua/old/名字.lua`，`write pkg://rollback/名字` 换回来（再执行一次就又换回新版）；退回后权限和当前确认的不同时，状态变「待确认」。
+- 更新时旧版本留在 `/vat/things/lua/old/名字.lua`，`write pkg://名字/rollback` 换回来（再执行一次就又换回新版）；退回后权限和当前确认的不同时，状态变「待确认」。
 - 目录和下载都走 http 包的网络通道，不需要在 `@uses` 里声明；`http://` 地址会在确认框里标出「未加密」，靠 SHA-256 保证文件没被改。
 
 ### 4.2 卡上的扩展包

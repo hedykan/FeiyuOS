@@ -22,7 +22,7 @@ String confirm(const String& name, bool worked);
 // Picks the remote to try by hand and resends the current state with it:
 // "上一套" / "下一套" / "重发" or its number ("5", "第5套").  Waits for confirm.
 String choose(const String& name, const String& words);
-String summary(const cJSON* profile);  // one line for ir://list
+String summary(const cJSON* profile);  // one line for device://local/ir/list
 String brands_text();                  // brands in the database, most common first
 
 }  // namespace vat::ac

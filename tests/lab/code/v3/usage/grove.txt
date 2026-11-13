@@ -1,0 +1,1 @@
+Grove 口接了什么用 read sensor://grove。

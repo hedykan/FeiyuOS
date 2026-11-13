@@ -1,0 +1,1 @@
+定位规范：用户问我在哪、当前位置、经纬度、海拔时用 read target=sensor://gps/location；卫星数用 sensor://gps/satellites，卫星时间用 sensor://gps/time。

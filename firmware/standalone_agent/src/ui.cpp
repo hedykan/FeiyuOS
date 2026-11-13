@@ -47,7 +47,7 @@ View view = View::List;
 struct ProgramItem {
     String name;
     String about;
-    bool app = false;  // a local app (ui://apps): opens on the graphics page
+    bool app = false;  // a local app (ui://apps/名字): opens on the graphics page
     time_t used = 0;   // last run / saved / changed: the list is newest first
 };
 int delete_pending = -1;   // the item Del asked about (Y deletes it), -1: none
@@ -1327,7 +1327,7 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
             drawn_version = UINT32_MAX;
             return;
         }
-        if (!model.pending.empty() && !busy) {
+        if (!model.pending.empty() && (!busy || worker::asking())) {
             if (has_char(state, 'y')) { action("approve"); return; }
             if (has_char(state, 'n')) { action("reject"); return; }
             if (has_char(state, 'a')) { action("approve_all"); return; }
@@ -1450,6 +1450,7 @@ Page page() { return current_page; }
 
 String action(const String& name) {
     if (name == "approve" || name == "reject" || name == "approve_all") {
+        if (const uint32_t asking = worker::answer(name)) return String(asking);  // a job waiting for it
         if (!has_pending()) return "no pending";
         const worker::Kind kind = name == "approve" ? worker::Kind::Approve
                                   : name == "reject" ? worker::Kind::Reject

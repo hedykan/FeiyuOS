@@ -145,9 +145,7 @@ String settings_json() {
 }
 
 String resources_json() {
-    return "[\"device://local/status\",\"device://local/settings\",\"device://local/battery\","
-           "\"device://local/display/brightness\",\"device://local/display/timeout\","
-           "\"device://local/display/power\",\"device://local/audio/volume\",\"device://local/context/length\","
+    return "[\"device://local/status\",\"device://local/battery\",\"device://local/display/power\","
            "\"device://local/clipboard\",\"memory://recent-tasks\",\"memory://notes\"]";
 }
 
@@ -156,7 +154,6 @@ String clipboard() { return storage::read_text("/vat/memory/clipboard.txt", 2000
 String tool_read(const cJSON* arguments) {
     const String target = json_str(arguments, "target");
     if (target == "device://local/status") return status_json(true);
-    if (target == "device://local/settings") return settings_json();
     if (target == "device://local/battery") {
         cJSON* data = cJSON_CreateObject();
         cJSON_AddNumberToObject(data, "percent", M5Cardputer.Power.getBatteryLevel());
@@ -165,12 +162,12 @@ String tool_read(const cJSON* arguments) {
         registry::offer_data(data);
         return hw::battery_text();
     }
-    if (target == "device://local/display/brightness") return "亮度 " + String(config::get().brightness);
-    if (target == "device://local/display/timeout") {
+    if (target == "settings://brightness") return "亮度 " + String(config::get().brightness);
+    if (target == "settings://timeout") {
         return "息屏时间 " + String(config::get().screen_timeout_seconds) + " 秒";
     }
-    if (target == "device://local/audio/volume") return "音量 " + String(config::get().volume) + "%";
-    if (target == "device://local/context/length") {
+    if (target == "settings://volume") return "音量 " + String(config::get().volume) + "%";
+    if (target == "settings://context") {
         return "对话记忆 " + String(config::get().context_kb) + " KB（短 32 / 中 64 / 长 96；越长越慢、越费 token）";
     }
     if (target == "device://local/clipboard") {
@@ -192,14 +189,14 @@ String tool_write(const cJSON* arguments) {
     const String target = json_str(arguments, "target");
     const String content = json_str(arguments, "content");
     auto& cfg = config::get();
-    if (target == "device://local/display/brightness") {
+    if (target == "settings://brightness") {
         const int value = constrain(content.toInt(), 8, 255);
         cfg.brightness = value;
         ui::post_brightness(value);
         return config::save_ui_number("brightness", value) ? "屏幕亮度已设置为 " + String(value)
                                                             : String("亮度生效但保存失败");
     }
-    if (target == "device://local/context/length") {
+    if (target == "settings://context") {
         String v = content;
         v.trim();
         const int asked = v == "短" ? 32 : v == "中" ? 64 : v == "长" ? 96 : static_cast<int>(v.toInt());
@@ -209,7 +206,7 @@ String tool_write(const cJSON* arguments) {
                    ? "对话记忆已设为 " + String(value) + " KB" + (value == 96 ? "（每轮会慢一些、更费 token）" : "")
                    : String("设置生效但保存失败");
     }
-    if (target == "device://local/display/timeout") {
+    if (target == "settings://timeout") {
         const int value = constrain(content.toInt(), 0, 1800);
         cfg.screen_timeout_seconds = value;
         return config::save_ui_number("screen_timeout_seconds", value)
@@ -223,7 +220,7 @@ String tool_write(const cJSON* arguments) {
         ui::post_screen_power(on);
         return on ? String("屏幕已打开") : String("屏幕已关闭，按任意键唤醒");
     }
-    if (target == "device://local/audio/volume") {
+    if (target == "settings://volume") {
         const int value = constrain(content.toInt(), 0, 100);
         cfg.volume = value;
         ui::post_beep();

@@ -4,7 +4,7 @@
 
 ```text
 device://room/light-1/power     sensor://desk/temperature     gpio://esp-kitchen/2
-ir://living-room/tv             serial://port-1                capture://session-1
+device://local/ir/living-room/tv             serial://port-1                capture://session-1
 ui://panel/main                 security://lab/network
 ```
 
@@ -17,7 +17,7 @@ ui://panel/main                 security://lab/network
 | 上下文窗口 | 每轮对话以 API 原生消息片段追加到 `context/window.jsonl`，请求时作为“文件片段”从卡上流式发送，不进内存。预算 48 KB（无卡 8 KB） |
 | 压缩 | 任务结束、回复已上屏后，窗口超预算时把较旧部分（保留最新的半个预算）连同旧摘要交给模型合并成新摘要（≤1200 字，保留主机、路径、数字、发现、out#），再从窗口删掉。窗口只追加，DeepSeek 前缀缓存可命中 |
 | 完整输出 | 工具结果超过 4 KB 时整份存成 `out#N`，对话里留前 2 KB 和引用（4 KB 以内完整放在对话里：曾把 1.3 KB 的目录列表存档，模型反而去翻页、重跑）。SSH 输出超过 4 KB 时远端保留临时文件，设备每次取 12 KB（SSH 包始终很小），最多 256 KB；超出时文件末尾写明 |
-| 按需取回 | `read memory://out/N?page=P`（每页 4 KB）、`?grep=词`（匹配行带行号）；`read memory://out` 列出最近的输出 |
+| 按需取回 | `read memory://out/N?page=P`（每页 4 KB）、`?grep=词`（匹配行带行号）；`read memory://out/list` 列出最近的输出 |
 | 归档与检索 | 每一步操作和每次回答按天追加到 `archive/<日期>.jsonl`；`read memory://history?q=词 词`（空格分隔的词都要出现）返回编号清单 |
 | 案卷 | `session(attach, memory://cases/名称)` 设为当前案卷，其要点和最近发现每次自动带入对话；`write memory://cases/名称 mode=append` 记录发现（免确认，与笔记相同），被案卷引用的 out# 不会被清理 |
 | 清理 | `out/` 超过 2 GB 从最旧的删（案卷引用的保留）；`cache/` 开机清理 |
@@ -53,14 +53,14 @@ v0.5 的目标：把 Cardputer Adv 本身和已装的 Cap LoRa-1262 都做成扩
 
 | 能力 | 状态 | target |
 |:--|:--|:--|
-| Wi-Fi 扫描、状态、切换、设置新网络 | ✅ `wifi` 包 | `wifi://scan` `wifi://status` `wifi://SSID` |
+| Wi-Fi 扫描、状态、切换、设置新网络 | ✅ `wifi` 包 | `device://local/wifi/scan` `device://local/wifi/status` `device://local/wifi/SSID` |
 | 亮度、息屏、音量、剪贴板、电量、笔记 | ✅ `local` 包 | `device://local/*` `memory://*` |
 | 屏幕：大字、二维码、卡上的小图片、通知横幅 | ✅ `display` 包：全屏浮层盖在当前页上，任意键返回；大字用已链接的中文字体放大；图片限 32 KB | `device://local/display/{text,qr,image,banner,clear}` |
 | 充电状态 | ✅ 并入 `/api/status` 与本机状态：Adv 只有电池 ADC，按 USB 主机在线 + 电压 5 分钟走势推断，注明“推断”；只接充电头时无法判断 | `device://local/status` |
 | RGB 指示灯（G21 WS2812） | ✅ `hardware` 包：颜色名、`#RRGGBB` 或 off，免确认 | `device://local/led` |
 | IMU（BMI270） | ✅ `hardware` 包：姿态、俯仰 / 横滚、是否在动 | `sensor://imu/...` |
 | 提示音 | ✅ `hardware` 包：1–5 声，免确认；扬声器只在两次录音之间临时开启，录音中不响 | `device://local/audio/beep` |
-| 红外发送 | ✅ `ir` 包（IRremote 4.5.0，G44）：只做电视（三星 / LG / 索尼 / 飞利浦的电源、音量、静音）；发码后由用户确认是否生效，没反应换下一组。空调需要整套状态码，IRremote 不支持，未做 | `ir://电器名/动作` |
+| 红外发送 | ✅ `ir` 包（IRremote 4.5.0，G44）：只做电视（三星 / LG / 索尼 / 飞利浦的电源、音量、静音）；发码后由用户确认是否生效，没反应换下一组。空调需要整套状态码，IRremote 不支持，未做 | `device://local/ir/电器名/动作` |
 | TF 卡文件 | ✅ `files` 包：列目录、读、写（需确认），拒绝密钥与系统目录 | `file:///vat/...` |
 | 定时与提醒 | ✅ `timer` 包：到点全屏提醒 + 提示音，关机期间错过的开机补发 | `timer://in/10m` `timer://at/18:30` `timer://list` |
 | BLE 扫描 | ❌ 暂不做：Bluedroid 使 Flash 80%→96%、静态内存 +22 KB，会压垮 TLS 握手余量；以后可评估 NimBLE | — |
@@ -74,8 +74,8 @@ Cap LoRa-1262（GPS 与 LoRa 在同一个 Cap 上，可以同时工作）：
 | 能力 | 状态 | target |
 |:--|:--|:--|
 | GPS（ATGM336H） | ✅ `gps` 包（TinyGPSPlus 1.0.3）：位置、海拔、在用/可见卫星、HDOP、UTC 时间、NMEA 计数；UART1 115200（G15 收/G13 发），2 KB 接收缓冲，主循环每次最多解析 512 字节；默认开启，“关闭”只停止读取（Cap 不给软件断 GNSS 电源）。遵循提示词已有的传感器约定 | `sensor://gps/location` `sensor://gps/satellites` `sensor://gps/time` |
-| LoRa（SX1262） | 驱动与 `lora` 包已写，**待实测**（RadioLib 7.8.1）：默认关闭、芯片保持复位不占总线；`session connect lora://` 或 `write lora://settings/enabled on` 开始接收；收到的消息是编号清单（`read lora://messages`），存 `/vat/things/lora/inbox.jsonl`；`write lora://send` 需确认，且频点已设、天线已确认才会发射；`write lora://settings/frequency|power|sf|bandwidth|cr|antenna` | `lora://status` `lora://messages` `lora://send` |
-| 蓝牙 BLE（ESP32-S3 内置） | `ble` 包（NimBLE-Arduino 2.5.2，四个角色）：默认关闭，设置 → 蓝牙打开后**重启生效**，开机时先占好内存（约 50 KB，待实测），关闭也要重启；扫描附近设备（固定 40 条的设备表，信号、名字、厂商、服务；`write ble://scan/log 秒数` 把每条广播写进 `/vat/ble/scan-*.jsonl`）；广播名字、厂商数据或 iBeacon；连接设备（最多 2 个）读写特征、订阅通知；当蓝牙键盘往电脑打字（只能打英文、数字和符号，中文靠电脑的输入法），只在配对窗口（默认 60 秒）里接受新电脑，窗口外配对的会被删掉并断开，按键只发给已配对且加密的连接。写入、打字、按键、配对、开关都要确认，确认框里显示要打的内容。流：`ble://nearby`（设备数、最强信号）、`ble://rssi/地址`、`ble://notify/地址/服务/特征`（长度 + 前 7 个字节） | `ble://scan` `ble://device/地址[/services]` `ble://gatt/地址/服务/特征` `ble://notify/…` `ble://advertise` `ble://hid/pair|type|key|forget` `ble://status` `ble://power` |
+| LoRa（SX1262） | 驱动与 `lora` 包已写，**待实测**（RadioLib 7.8.1）：默认关闭、芯片保持复位不占总线；`session connect device://local/lora/` 或 `write settings://lora/enabled on` 开始接收；收到的消息是编号清单（`read device://local/lora/messages`），存 `/vat/things/lora/inbox.jsonl`；`write device://local/lora/send` 需确认，且频点已设、天线已确认才会发射；`write settings://lora/frequency|power|sf|bandwidth|cr|antenna` | `device://local/lora/status` `device://local/lora/messages` `device://local/lora/send` |
+| 蓝牙 BLE（ESP32-S3 内置） | `ble` 包（NimBLE-Arduino 2.5.2，四个角色）：默认关闭，设置 → 蓝牙打开后**重启生效**，开机时先占好内存（约 50 KB，待实测），关闭也要重启；扫描附近设备（固定 40 条的设备表，信号、名字、厂商、服务；`write device://local/ble/log 秒数` 把每条广播写进 `/vat/ble/scan-*.jsonl`）；广播名字、厂商数据或 iBeacon；连接设备（最多 2 个）读写特征、订阅通知；当蓝牙键盘往电脑打字（只能打英文、数字和符号，中文靠电脑的输入法），只在配对窗口（默认 60 秒）里接受新电脑，窗口外配对的会被删掉并断开，按键只发给已配对且加密的连接。写入、打字、按键、配对、开关都要确认，确认框里显示要打的内容。流：`device://local/ble/nearby`（设备数、最强信号）、`device://local/ble/rssi/地址`、`device://local/ble/notify/地址/服务/特征`（长度 + 前 7 个字节） | `device://local/ble/scan` `device://local/ble/device/地址[/services]` `device://local/ble/gatt/地址/服务/特征` `device://local/ble/notify/…` `device://local/ble/advertise` `device://local/ble/hid/pair|type|key|forget` `device://local/ble/status` `settings://ble/power` |
 | Grove 口（G1/G2） | ✅ `grove` 包：扫描 Ex_I2C，按地址推测型号 | `sensor://grove` |
 
 设备档案（`/vat/things/`）——有持久数据的包都存这里，一个设备一个文件（目前已用：`ir/`、`timers/`；下面其余为设计）：
@@ -88,9 +88,9 @@ Cap LoRa-1262（GPS 与 LoRa 在同一个 Cap 上，可以同时工作）：
 └── gps/places.json    命名地点：家、公司……
 ```
 
-- **添加红外电器**：`session(action=create,target=ir://客厅空调)`，品牌从内置的常见电器目录里查候选协议，逐个发“开机”，每发一个问“空调有反应吗？Y/N”，按 Y 的那个协议记入档案并标为已验证。红外是单向的，设备不知道电器是否响应，所以确认只能由人来做。
-- **状态**：空调遥控码每次都带完整状态，档案记住上一次的状态，`write ir://客厅空调/temp 26` 只改温度，其余沿用。
-- **读写**：`read ir://` 编号列出所有电器，`read ir://客厅空调` 看状态；蓝牙“第 3 个是我的耳机”写进 `ble/known.json`。
+- **添加红外电器**：`session(action=create,target=device://local/ir/客厅空调)`，品牌从内置的常见电器目录里查候选协议，逐个发“开机”，每发一个问“空调有反应吗？Y/N”，按 Y 的那个协议记入档案并标为已验证。红外是单向的，设备不知道电器是否响应，所以确认只能由人来做。
+- **状态**：空调遥控码每次都带完整状态，档案记住上一次的状态，`write device://local/ir/客厅空调/temp 26` 只改温度，其余沿用。
+- **读写**：`read device://local/ir/` 编号列出所有电器，`read device://local/ir/客厅空调` 看状态；蓝牙“第 3 个是我的耳机”写进 `ble/known.json`。
 - **带入对话**：像 SSH 主机名一样，每次请求带上设备名单和别名（“可见设备：客厅空调(ir，别名大厅空调)…”），模型按别名对上，不猜。
 - **记忆**：状态变化写进归档，可以问“昨晚空调开了多久”；设备 Web 页可以查看和修改档案。
 - 后续：红外的协议覆盖和确认流程在真实电器上测试后再优化。
@@ -107,8 +107,8 @@ LoRa 要先定的事：
 
 - 界面描述：很小的 JSON（标题、编号行、选项、数值、刷新来源和周期），有大小上限和字段白名单，渲染器只画声明过的元素。
 - `ui` 包：`write ui://panel/<名字>` 创建或更新界面，`read ui://panel/<名字>` 读取用户的选择；新增一个渲染页，键盘选择和确认。
-- 本地应用：把界面描述连同用到的 target 和刷新周期保存下来，可以列出、打开、删除（`ui://apps`）。
-- 例子：“做一个看开发机负载的小面板，每 30 秒刷新”= `exec ssh://开发机 uptime` + `write ui://panel/load`；“WiFi 选择器”= `read wifi://scan` + `write ui://panel/wifi`，选中后 `write wifi://SSID`（仍走确认与密钥输入）；“GPS 面板”= `read gps://local` + `write ui://panel/gps`。
+- 本地应用：把界面描述连同用到的 target 和刷新周期保存下来，可以列出、打开、删除（`ui://apps/list`）。
+- 例子：“做一个看开发机负载的小面板，每 30 秒刷新”= `exec ssh://开发机 uptime` + `write ui://panel/load`；“WiFi 选择器”= `read device://local/wifi/scan` + `write ui://panel/wifi`，选中后 `write device://local/wifi/SSID`（仍走确认与密钥输入）；“GPS 面板”= `read gps://local` + `write ui://panel/gps`。
 
 前置条件：v0.5 的基础扩展包（面板要有数据来源）。
 ## 远程更新固件（OTA）：不做

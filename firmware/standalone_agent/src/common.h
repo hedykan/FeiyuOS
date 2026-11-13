@@ -40,7 +40,7 @@ String json_print(const cJSON* value);
 String target_path(const String& target);
 String target_param(const String& target, const char* key, bool rest_of_query = false);
 
-// %XX escapes in a target path ("ir://%E5%AE%A2%E5%8E%85/power").
+// %XX escapes in a target path ("device://local/ir/%E5%AE%A2%E5%8E%85/power").
 String url_decode(const String& text);
 
 String shell_quote(const String& value);
@@ -56,6 +56,12 @@ void runtime_event(const char* event, const String& detail = "");
 // time the worker starts a per-step monitor, so whoever resets it calls
 // heap_low_fold() first, and readers use heap_low_since_boot().
 void heap_low_fold();
+
+// Where the boot's time goes: boot_step("card") records the milliseconds since
+// the previous step (the first since power on); boot_steps() is the list,
+// logged as boot_ms at ready ("rom=310 m5=420 probe=… card=…").
+void boot_step(const char* name);
+String boot_steps();
 std::size_t heap_low_since_boot();
 
 }  // namespace vat

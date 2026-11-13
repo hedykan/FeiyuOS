@@ -18,6 +18,8 @@ constexpr char kUsage[] = "定位规范：用户问我在哪、当前位置、�
 class GpsPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    bool present() const override { return lora::cap_present(); }
+    const char* index() const override { return "sensor://gps/location|satellites|time"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"gps", "Cap LoRa-1262 上的 GPS/北斗定位：位置、卫星、时间",

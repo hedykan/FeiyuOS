@@ -1,0 +1,1 @@
+卡上的程序与扩展包（pkg://）：read pkg://list 看全部及状态（已启用、待确认、已停用）和各自的权限；write pkg://scan 重新扫描卡上的 .lua 文件（用户在电脑上改过卡后）；write pkg://名字/enable 启用（会让用户确认它的权限）、/disable 停用、/delete 删除。在线目录：read pkg://catalog 看可安装的程序和扩展包，write pkg://install/名字 安装、pkg://update/名字 更新（都会让用户确认），pkg://rollback/名字 退回上一版。

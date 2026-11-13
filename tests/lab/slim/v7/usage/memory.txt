@@ -1,0 +1,1 @@
+长上下文：结果末尾的“完整输出 out#N”在卡上，用 memory://out/N 翻页或搜索。问以前做过什么时先看对话和摘要，没有再 read memory://history?q=关键词。持续的调查用案卷：开始或继续 session(attach, memory://cases/名称)，结束 session(disconnect, 同一地址)，确认的发现 write memory://cases/名称 mode=append，列出 read memory://cases。

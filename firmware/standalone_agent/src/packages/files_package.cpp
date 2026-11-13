@@ -44,6 +44,7 @@ constexpr char kUsage[] = "本机 TF 卡文件用 file:///vat/路径（read 目�
 class FilesPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "read file:///vat/路径（目录即列出），write 写入"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"files", "本机 TF 卡文件：查看目录、读取、写入（限 /vat 下）",

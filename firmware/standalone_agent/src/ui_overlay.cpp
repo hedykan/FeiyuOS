@@ -457,7 +457,7 @@ bool panel_key(const Keyboard_Class::KeysState& state) {
         cJSON_AddNumberToObject(data, "index", cursor + 1);
         const String json = json_print(data);
         cJSON_Delete(data);
-        events::emit("ui://panel/" + current.panel, json);
+        events::emit("ui://event/panel/" + current.panel, json);
         return true;
     } else {
         return false;

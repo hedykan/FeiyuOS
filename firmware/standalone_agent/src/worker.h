@@ -51,4 +51,16 @@ uint32_t stack_free_min();  // bytes never touched on the worker stack
 // steps(KB) list shows the low water mark of each.  Does nothing off the worker task.
 void heap_step(const String& name);
 
+// A running job asks the user on the device and waits (worker task only): the
+// question shows as the pending step (Agent page Y/N/A, "pending" in the
+// status), the job's status is "asking" meanwhile, and Y/N/A or the web
+// actions approve, reject and approve_all answer it.  Esc, or no answer
+// within kAskMs: No.
+enum class Answer : uint8_t { Yes, No, All };
+constexpr uint32_t kAskMs = 60000;
+Answer ask(const String& summary, const String& reason);
+bool asking();
+// approve / reject / approve_all for a job that is asking: its id; 0 when none is.
+uint32_t answer(const String& action);
+
 }  // namespace vat::worker

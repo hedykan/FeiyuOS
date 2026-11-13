@@ -86,7 +86,7 @@
 ```
 
 - `wifi.ssid/password` 是开机连接的网络；设备上的 Setup 页（`Fn+W`）会改写它。
-- `wifi.networks` 供语音“连接家里 WiFi”使用（`session connect wifi://家里 WiFi`），连接失败会自动回到主网络。
+- `wifi.networks` 供语音“连接家里 WiFi”使用（`session connect device://local/wifi/家里 WiFi`），连接失败会自动回到主网络。
 - 启动时缺少语音识别 Key 或 Agent Key 会进入 Setup 页并提示缺什么。
 - `http` 是 http 包的接口令牌（请求头里的 `{secret:名字}`），第一次用时在设备上输入，`host` 是它唯一能发往的网站；要换网站就删掉这一项重新输入。
 

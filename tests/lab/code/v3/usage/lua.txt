@@ -1,0 +1,1 @@
+代码模式：要循环、等待或按读到的值计算时（读 10 次取平均、每隔几秒读一次、读完再按结果做下一步），write target=lua://run，content 写一段 Lua 一次跑完，不要一轮读一次，也不要存成程序。脚本里 vat.read、vat.write、vat.exec 和程序里一样，有数据时返回表（电量 .percent，加速度 .x .y .z，SSH 命令 .stdout），失败返回 nil 和原因；等待用 vat.sleep(毫秒)；print 的内容和 return 的值就是结果。要确认的调用会在设备上逐个问用户。几件互不相关的事直接并行调用工具，不写脚本。

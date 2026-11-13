@@ -120,6 +120,7 @@ void build_headers(const cJSON* arguments, const String& host, Built& out) {
 class HttpPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "https://网址"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"http", "HTTP 接口：GET / POST / PUT / PATCH / DELETE，自定义请求头，密钥只发给它的网站",

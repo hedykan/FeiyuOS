@@ -4,8 +4,8 @@
 //   write ui://panel/<名字>/close
 //   write ui://apps/<名字>           content: panel JSON; saves it as an app
 //   write ui://apps/<名字>/open | /delete
-//   read  ui://apps                  list
-// Choosing on a panel emits ui://panel/<名字> ({event.choice}, {event.index}),
+//   read  ui://apps/list             list
+// Choosing on a panel emits ui://event/panel/<名字> ({event.choice}, {event.index}),
 // usable as a trigger.  A panel's source is re-run while it stays open, only
 // when Policy allows the call without asking.  Fn+A (an event from the core)
 // opens the app list.
@@ -149,7 +149,7 @@ std::vector<String> app_names() {
 String open_app(const String& name) {
     ui_panel::Spec spec;
     String error;
-    if (!storage::exists(app_path(name))) return "ERROR: 没有应用「" + name + "」（read ui://apps 查看）";
+    if (!storage::exists(app_path(name))) return "ERROR: 没有应用「" + name + "」（read ui://apps/list 查看）";
     const String json = storage::read_text(app_path(name), ui_canvas::kMaxJson + 64);
     if (json.indexOf("\"ops\"") >= 0) {
         ui_canvas::Spec canvas;
@@ -168,8 +168,8 @@ constexpr char kUsage[] =
     "即时界面（ui://）：要给用户看一个小面板、或让用户在几个选项里选一个时用。write target=ui://panel/名字，content 为 JSON 对象："
     "title 标题；lines 文字行数组（最多 12 行）；choices 选项数组（最多 8 个）；source 可选，打开期间定时刷新 lines，"
     "写成 read 或 exec 加目标，或 tool 加 arguments（与工具调用同形），再加 every（如 30s，至少 10 秒）。"
-    "用户选定后 read ui://panel/名字 取结果，或建触发监听 ui://panel/名字（{event.choice}）。"
-    "存成可反复打开的本地应用：write ui://apps/名字（content 同上）；打开 write ui://apps/名字/open；列出 read ui://apps；"
+    "用户选定后 read ui://panel/名字 取结果，或建触发监听 ui://event/panel/名字（{event.choice}）。"
+    "存成可反复打开的本地应用：write ui://apps/名字（content 同上）；打开 write ui://apps/名字/open；列出 read ui://apps/list；"
     "删除 write ui://apps/名字/delete。设备上 Fn+A 打开程序页，程序和本地应用都列在那里。"
     "自由绘图用 write target=ui://canvas/名字，content 为 JSON 对象，ops 为绘制指令数组，每条写成 [指令名, 参数…]，"
     "指令与 M5GFX 同名同参：fillScreen、drawPixel、drawLine、drawFastHLine、drawFastVLine、drawRect、fillRect、"
@@ -191,6 +191,7 @@ public:
     }
 
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "write ui://panel/名字、ui://canvas/名字，本地应用 write ui://apps/名字，read ui://apps/list，选择事件 ui://event/panel/名字"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"ui", "即时界面：在屏幕上画面板（文字、选项、定时刷新）和自由绘图画布（线、形状、文字、图表、图片），保存为可反复打开的本地应用",
@@ -218,7 +219,7 @@ public:
     String execute(const String& tool, const cJSON* arguments, bool) override {
         const String rest = url_decode(json_str(arguments, "target").substring(strlen("ui://")));
         const String content = json_str(arguments, "content");
-        if (rest == "apps" || rest == "apps/") {
+        if (rest == "apps/list") {
             const auto names = app_names();
             if (names.empty()) return "还没有本地应用";
             String out = String(static_cast<int>(names.size())) + " 个本地应用：";
@@ -276,6 +277,7 @@ public:
         }
         if (!action.isEmpty()) return "ERROR: 应用用 ui://apps/名字（保存）、/open 或 /delete";
         String error, saved;
+        if (name == "list") return "ERROR: 应用不能叫 list（ui://apps/list 是列出全部应用）";
         if (content.indexOf("\"ops\"") >= 0) {  // a canvas, kept as written once it checks out
             ui_canvas::Spec canvas;
             if (!ui_canvas::parse(content, canvas, error)) return "ERROR: " + error;
@@ -291,11 +293,11 @@ public:
     }
 
     void triggers(std::vector<TriggerSpec>& out) const override {
-        out.push_back({"ui://panel/面板名", "用户在这个面板上选定一项时（{event.choice} 选项、{event.index} 第几个）"});
+        out.push_back({"ui://event/panel/面板名", "用户在这个面板上选定一项时（{event.choice} 选项、{event.index} 第几个）"});
     }
 
     bool watch(const String& target, String& normalized, String&) override {
-        if (!target.startsWith("ui://panel/")) return false;
+        if (!target.startsWith("ui://event/panel/")) return false;
         normalized = target;  // emitted on every choice anyway
         return true;
     }
@@ -335,7 +337,7 @@ public:
             {"ui://panel/名字", "ui：write 显示面板（content 为 JSON：title、lines、choices、source），read 取用户的选择"},
             {"ui://panel/名字/close", "ui：write 关闭面板"},
             {"ui://canvas/名字", "ui：write 自由绘图（content 为 JSON：ops 绘制指令数组，与 M5GFX 同名同参；可加 source）"},
-            {"ui://apps", "ui：read 列出本地应用"},
+            {"ui://apps/list", "ui：read 列出本地应用"},
             {"ui://apps/名字", "ui：write 保存为本地应用（content 同面板）；/open 打开；/delete 删除"},
         };
         for (const auto& item : items) add_resource(list, remaining, item[0], item[1]);

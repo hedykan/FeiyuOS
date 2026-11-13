@@ -8,7 +8,7 @@ Cardputer 接上电源、连上 Wi-Fi 就能完整工作。没有电脑端进程
 
 | 操作系统概念 | 本项目 |
 |:--|:--|
-| 文件系统命名空间 | URI 资源：`device://` `file://` `sensor://` `timer://` `ir://` `lora://` `wifi://` `ssh://<主机>` `memory://` |
+| 文件系统命名空间 | URI 资源：`device://` `file://` `sensor://` `timer://` `device://local/ir/` `device://local/lora/` `device://local/wifi/` `ssh://<主机>` `memory://` |
 | 驱动 / 系统调用 | 扩展包（`src/packages/`）认领资源；底层适配器 `src/ops_*` |
 | man 手册 | `discover`：列出资源、能力与用法 |
 | 权限 | Policy：本机可逆操作直接执行，其余挂起等待设备上按 `Y` |

@@ -91,7 +91,7 @@ volatile bool pair_accepted = false;
 volatile int hid_peers = 0;
 uint32_t heap_taken = 0;
 // What runs on after the reply (pairing window, card log, beacon): its end is
-// reported on the screen and as a ble://event/... for triggers.
+// reported on the screen and as a device://local/ble/event/... for triggers.
 bool logging = false;
 uint32_t logged_lines = 0;
 int shown_hosts = 0;
@@ -399,16 +399,16 @@ void update_advertising() {
         shown_hosts = 1;  // "paired" says it: no separate "connected"
         runtime_event("ble", "keyboard paired");
         ui::set_notice("蓝牙键盘：电脑已配对，可以打字了");
-        events::emit("ble://event/paired");
+        events::emit("device://local/ble/event/paired");
     }
     if ((adv == Adv::Beacon || adv == Adv::Pair) && adv_until != 0 && !before(adv_until)) {
         a->stop();
         if (adv == Adv::Pair) {
             ui::set_notice("蓝牙键盘配对已超时：没有电脑连上", true);
-            events::emit("ble://event/pair_timeout");
+            events::emit("device://local/ble/event/pair_timeout");
         } else {
             ui::set_notice("蓝牙广播已结束");
-            events::emit("ble://event/advertise_done");
+            events::emit("device://local/ble/event/advertise_done");
         }
         adv = Adv::None;
         adv_until = 0;
@@ -479,7 +479,7 @@ ClientWatch client_watch;
 NimBLEClient* client_for(const String& address, String& error) {
     uint8_t mac[6];
     if (!parse_mac(address.c_str(), mac)) {
-        error = "地址格式应为 aa:bb:cc:dd:ee:ff（先 read ble://scan 找设备）";
+        error = "地址格式应为 aa:bb:cc:dd:ee:ff（先 read device://local/ble/scan 找设备）";
         return nullptr;
     }
     int known_type = -1;
@@ -494,7 +494,7 @@ NimBLEClient* client_for(const String& address, String& error) {
         if (c && c->isConnected()) return c;
     }
     if (NimBLEDevice::getConnectedClients().size() >= kMaxClients) {
-        error = "已经连着 " + String(kMaxClients) + " 个设备，先断开一个（session disconnect ble://device/地址）";
+        error = "已经连着 " + String(kMaxClients) + " 个设备，先断开一个（session disconnect device://local/ble/device/地址）";
         return nullptr;
     }
     connecting = true;
@@ -526,7 +526,7 @@ NimBLERemoteCharacteristic* characteristic_for(const String& address, const Stri
     if (!c) return nullptr;
     NimBLERemoteService* s = c->getService(NimBLEUUID(std::string(service.c_str())));
     if (!s) {
-        error = "设备 " + address + " 上没有服务 " + service + "（read ble://device/" + address + "/services 看有哪些）";
+        error = "设备 " + address + " 上没有服务 " + service + "（read device://local/ble/device/" + address + "/services 看有哪些）";
         return nullptr;
     }
     NimBLERemoteCharacteristic* ch = s->getCharacteristic(NimBLEUUID(std::string(characteristic.c_str())));
@@ -765,13 +765,13 @@ void loop() {
         logging = false;
         flush_log(true);
         ui::set_notice("蓝牙记录完成：" + String(logged_lines) + " 条，存在 " + log_path);
-        events::emit("ble://event/log_done", "{\"lines\":" + String(logged_lines) + "}");
+        events::emit("device://local/ble/event/log_done", "{\"lines\":" + String(logged_lines) + "}");
     }
     const int hosts = hid_peers;
     if (hosts != shown_hosts) {
         if (hosts > shown_hosts) ui::set_notice("电脑已连上蓝牙键盘");
         else if (hosts == 0) ui::set_notice("电脑断开了蓝牙键盘");
-        events::emit(hosts > shown_hosts ? "ble://event/connected" : "ble://event/disconnected");
+        events::emit(hosts > shown_hosts ? "device://local/ble/event/connected" : "device://local/ble/event/disconnected");
         shown_hosts = hosts;
     }
 }
@@ -824,7 +824,7 @@ String device_text(const String& address) {
     {
         std::lock_guard<std::mutex> guard(lock);
         const Device* found = find_device(mac);
-        if (!found) return "最近没有听到 " + address + "（先 read ble://scan）";
+        if (!found) return "最近没有听到 " + address + "（先 read device://local/ble/scan）";
         d = *found;
     }
     const uint32_t now = millis();
@@ -947,7 +947,7 @@ String advertise(const String& spec) {
     if (!a->start()) return "广播启动失败";
     adv = Adv::Beacon;
     adv_until = seconds ? millis() + std::min<uint32_t>(seconds, 86400) * 1000 : 0;
-    return "开始广播：" + what + (seconds ? "，" + String(seconds) + " 秒后停" : "，直到停止（write ble://advertise 内容 off）") +
+    return "开始广播：" + what + (seconds ? "，" + String(seconds) + " 秒后停" : "，直到停止（write device://local/ble/advertise 内容 off）") +
            (computers.empty() ? "" : "；广播期间已配对的电脑连不上键盘");
 }
 
@@ -965,7 +965,7 @@ String connect(const String& address) {
     String error;
     NimBLEClient* c = client_for(address, error);
     if (!c) return error;
-    return "已连接 " + address + "。看它有哪些数据：read ble://device/" + address + "/services";
+    return "已连接 " + address + "。看它有哪些数据：read device://local/ble/device/" + address + "/services";
 }
 
 String disconnect(const String& address) {
@@ -996,13 +996,13 @@ String services(const String& address) {
     // discoverAttributes() failed outright against a BlueZ peer (descriptor
     // discovery); service by service works, with one retry for a service that
     // came back empty (seen on 128-bit services, 2026-11-08).
-    String out = address + " 的服务和特征（读：read ble://gatt/" + address + "/服务/特征）：";
+    String out = address + " 的服务和特征（读：read device://local/ble/gatt/" + address + "/服务/特征）：";
     for (auto* s : c->getServices(true)) {
         if (s->getCharacteristics(true).empty()) s->getCharacteristics(true);
         const String su = s->getUUID().toString().c_str();
         const char* sn = service_name(su);
         out += "\n服务 " + su + (sn ? "（" + String(sn) + "）" : "");
-        if (s->getCharacteristics(false).empty()) out += "\n  （没列出特征：知道 UUID 的话可以直接 read ble://gatt/…）";
+        if (s->getCharacteristics(false).empty()) out += "\n  （没列出特征：知道 UUID 的话可以直接 read device://local/ble/gatt/…）";
         for (auto* ch : s->getCharacteristics(false)) {
             String props;
             if (ch->canRead()) props += " 读";
@@ -1091,7 +1091,7 @@ String subscribe(const String& address, const String& service, const String& cha
         subscriptions[slot] = Subscription();
         return "订阅失败";
     }
-    return "已订阅。程序里这样取：{\"stream\":\"ble://notify/" + key + "\",\"as\":\"n\"}，字段 n.len、n.b0…n.b6";
+    return "已订阅。程序里这样取：{\"stream\":\"device://local/ble/notify/" + key + "\",\"as\":\"n\"}，字段 n.len、n.b0…n.b6";
 }
 
 String notify_text(const String& key) {
@@ -1108,7 +1108,7 @@ String notify_text(const String& key) {
                 found = true;
             }
         }
-        if (!found) return "没有订阅 " + key + "（先 write ble://notify/" + key + " 内容 on）";
+        if (!found) return "没有订阅 " + key + "（先 write device://local/ble/notify/" + key + " 内容 on）";
     }
     if (s.at_ms == 0) return "已订阅，还没收到通知";
     return "最新通知（" + String((millis() - s.at_ms) / 1000) + " 秒前）：" + value_text(s.bytes, s.length);

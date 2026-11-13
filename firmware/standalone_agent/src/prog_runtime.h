@@ -33,6 +33,8 @@ String remove(const String& name);
 // From a tool call or the program page: a foreground run (the console;
 // `stdin_text` lines are what io.read gets, then the end).
 String run(const String& name, const String& query, const String& stdin_text = String());
+// Code mode (write lua://run): runs a script once without saving it.
+String run_script(const String& source);
 // The program page's Enter on a program: runs it on the worker; false when busy.
 bool launch(const String& name);
 // Programs the page lists (packages excluded): name, about and when it was

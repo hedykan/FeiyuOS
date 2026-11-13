@@ -15,7 +15,9 @@ constexpr char kUsage[] =
 
 class PlacePackage : public Package {
 public:
-    const char* usage() const override { return place::available() ? kUsage : nullptr; }
+    const char* usage() const override { return kUsage; }
+    bool present() const override { return place::available(); }
+    const char* index() const override { return "问“我在哪”用 place://here，另有 nearby?q=、search?q=、weather、route?to="; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"place", "高德位置服务：当前位置、附近搜索、地点查询、天气、路线",

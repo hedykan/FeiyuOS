@@ -54,18 +54,89 @@ def raw_literal(name: str, tag: str) -> str:
     return match.group(1)
 
 
+INDEX_HEAD = "能力包（要用某个包而不清楚它的地址或参数时，先 discover scope=capabilities query=包名 取它的用法；已经清楚的直接调用）："
+
+
 def system_prompt() -> str:
-    """kCorePrompt + every registered package's kUsage in builtin.cpp order:
-    the same text agent.cpp streams (registry::usages())."""
-    parts = [raw_literal("kCorePrompt", "PROMPT")]
+    """What agent.cpp streams: kCorePrompt, the usage of every package without an
+    index() (registry::usages(), builtin.cpp order), the index of the others,
+    kClosingPrompt.  \\n escapes in the literals are newlines to the model."""
+    core = text_of("core.txt", raw_literal("kCorePrompt", "PROMPT")).replace("\\n", "\n")
+    closing = text_of("closing.txt", raw_literal("kClosingPrompt", "PROMPT")).replace("\\n", "\n")
+    kept, lines = [], []
+    for p in packages():
+        if not p["usage"]:
+            continue
+        if p["index"] is None:
+            kept.append(p["usage"])
+        else:
+            lines.append(f"{p['id']}：{p['summary']}（{p['index']}）")
+    return core + "".join(kept) + INDEX_HEAD + "\n" + "\n".join(lines) + "\n" + closing
+
+
+def string_fields(text: str, start: int, count: int) -> list[str]:
+    """The first `count` comma-separated C++ string fields after `start` (adjacent
+    literals concatenated): the id, summary, keywords of a Manifest."""
+    fields, current, i, in_field = [], "", start, False
+    while i < len(text) and len(fields) < count:
+        c = text[i]
+        if c == '"':
+            end = i + 1
+            while text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            current += text[i + 1:end]
+            in_field = True
+            i = end + 1
+            continue
+        if c in ",}" and in_field:
+            fields.append(current)
+            current, in_field = "", False
+        i += 1
+    return fields
+
+
+def packages() -> list[dict]:
+    """Every builtin package in registration order: id, summary, usage (kUsage, '' if none)."""
+    out = []
     order = re.findall(r"add\(make_(\w+)_package\(\)\)", (SRC / "packages/builtin.cpp").read_text())
     for name in order:
-        source = SRC / "packages" / f"{name}_package.cpp"
-        match = re.search(r'constexpr char kUsage\[\] =\s*((?:\s*"[^"\\]*")+);', source.read_text())
-        if match:
-            parts.append("".join(re.findall(r'"([^"\\]*)"', match.group(1))))
-    parts.append(raw_literal("kClosingPrompt", "PROMPT"))  # after the packages, as agent.cpp sends it
-    return "".join(parts)
+        text = (SRC / "packages" / f"{name}_package.cpp").read_text()
+        at = text.find("Manifest m{")
+        if at < 0:
+            continue
+        pid, summary = string_fields(text, at + len("Manifest m{"), 2)
+        match = re.search(r'constexpr char kUsage\[\] =\s*((?:\s*"[^"\\]*")+);', text)
+        usage = "".join(re.findall(r'"([^"\\]*)"', match.group(1))) if match else ""
+        found = re.search(r'const char\* index\(\) const override \{ return (?:place::available\(\) \? )?"([^"]*)"', text)
+        index = found.group(1) if found else None
+        if TEXTS and (TEXTS / "always.txt").exists():  # a draft decides what is resident
+            drafted = json.loads((TEXTS / "index.json").read_text()) if (TEXTS / "index.json").exists() else {}
+            index = None if pid in ALWAYS else drafted.get(pid, "")
+        out.append({"id": pid, "summary": summary, "usage": text_of(f"usage/{pid}.txt", usage), "index": index})
+    return out
+
+
+ALWAYS: set[str] = set()  # --texts always.txt: the resident packages of a draft
+TEXTS: Path | None = None  # --texts: a directory overriding the firmware's texts
+
+
+def text_of(name: str, fallback: str) -> str:
+    """TEXTS/name when it exists (a draft being tried), else the firmware's text."""
+    if TEXTS and (TEXTS / name).exists():
+        return (TEXTS / name).read_text().strip()
+    return fallback
+
+
+def package_usage(arguments: dict) -> str | None:
+    """discover(capabilities) naming builtin packages: their summary and usage, as
+    registry::package_help gives them.  None when no builtin package is named."""
+    if arguments.get("scope", "capabilities") != "capabilities":
+        return None
+    words = set(re.split(r"[\s,，、:：/]+", (arguments.get("query") or "").lower()))
+    named = [p for p in packages() if p["id"] in words and p["usage"] and p["index"] is not None]
+    if not named:
+        return None
+    return "\n\n".join(f"{p['id']}：{p['summary']}\n\n{p['usage']}" for p in named[:2])
 
 
 def load_cases(only: list[str]) -> list[dict]:
@@ -197,12 +268,13 @@ def run_case(case: dict, args, system: str, tools: list, profiles: str, discover
         for tc, name, arguments in parsed:
             calls.append({"name": name, "arguments": arguments})
             discovers += 1
-            content = discover.answer(arguments) if discovers <= MAX_DISCOVER else '{"error":"discover 次数已达上限"}'
+            usage = package_usage(arguments)  # registry::discover: a named on-demand package's usage
+            content = (usage or discover.answer(arguments)) if discovers <= MAX_DISCOVER else '{"error":"discover 次数已达上限"}'
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": content})
     record = {"calls": calls, "reply": reply or ("(tool)" if calls else "")}
     failures = validate_expect(case["expect"], record)
     return {"id": case["id"], "passed": not failures, "failures": failures, "tokens": tokens,
-            "seconds": round(time.time() - started, 1), "calls": calls, "reply": reply[:120]}
+            "seconds": round(time.time() - started, 1), "discovers": discovers, "calls": calls, "reply": reply[:120]}
 
 
 def main() -> int:
@@ -218,8 +290,17 @@ def main() -> int:
     parser.add_argument("--json", help="write full results here")
     parser.add_argument("--print-prompt", action="store_true", help="print the composed system prompt and exit")
     parser.add_argument("--refresh", action="store_true", help="re-ask the device every cached discover answer first")
+    parser.add_argument("--tools", help="JSON tool list to test instead of kToolsJson")
+    parser.add_argument("--texts", help="a draft to try instead of the firmware's texts: core.txt, closing.txt, usage/<id>.txt, "
+                                        "always.txt (resident packages), index.json (the others' index lines), tools.json")
     args = parser.parse_args()
 
+    global TEXTS
+    TEXTS = Path(args.texts) if args.texts else None
+    if TEXTS and (TEXTS / "always.txt").exists():
+        ALWAYS.update(p for p in (TEXTS / "always.txt").read_text().strip().split(",") if p)
+    if TEXTS and not args.tools and (TEXTS / "tools.json").exists():
+        args.tools = str(TEXTS / "tools.json")
     if not args.model:
         args.model = re.search(r'String agent_model = "([^"]+)"', (ROOT / "firmware/standalone_agent/src/config.h").read_text()).group(1)
         if args.device:
@@ -228,11 +309,12 @@ def main() -> int:
                     args.model = json.loads(response.read()).get("agent", {}).get("model") or args.model
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
                 pass
-    system = Path(args.prompt).read_text().strip() if args.prompt else system_prompt()
+    system = (Path(args.prompt).read_text().strip() if args.prompt
+              else system_prompt())
     if args.print_prompt:
         print(system)
         return 0
-    tools = json.loads(raw_literal("kToolsJson", "TOOLS"))
+    tools = json.loads(Path(args.tools).read_text() if args.tools else raw_literal("kToolsJson", "TOOLS"))
     key = KEY_FILE.read_text().strip()
     names = args.profiles
     if not names and args.device:
@@ -270,8 +352,11 @@ def main() -> int:
     passed = sum(r["passed"] for r in results)
     flaky = sorted({r["id"] for r in results if not r["passed"]} & {r["id"] for r in results if r["passed"]})
     tokens = [r["tokens"] for r in results if r["tokens"]]
+    seconds = sorted(r["seconds"] for r in results if r.get("seconds"))
+    rounds = [r.get("discovers", 0) for r in results]
     print(f"passed {passed}/{len(results)}  flaky={flaky}  prompt_tokens~{max(tokens) if tokens else 0}  "
-          f"discover_misses={len(discover.misses)}")
+          f"discover_misses={len(discover.misses)}  discovers/case={sum(rounds) / max(len(rounds), 1):.2f}  "
+          f"seconds_p50={seconds[len(seconds) // 2] if seconds else 0}")
     if args.json:
         Path(args.json).write_text(json.dumps(results, ensure_ascii=False, indent=1))
     return 0 if passed == len(results) else 1

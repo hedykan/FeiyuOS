@@ -112,7 +112,7 @@ String attempt(const String& name, cJSON* profile, int index, const String& acti
     put_string(profile, "last_sent", now_text());
     save(name, profile);
     return "已向「" + name + "」发送" + set.label + "的" + action_label(action) +
-           "红外码。请看一下是否生效，告诉我生效了或没反应（没反应会换下一组）\n（给模型：用户回答后 write ir://" + name + "/confirm，content 为 yes 或 no）";
+           "红外码。请看一下是否生效，告诉我生效了或没反应（没反应会换下一组）\n（给模型：用户回答后 write device://local/ir/" + name + "/confirm，content 为 yes 或 no）";
 }
 
 }  // namespace
@@ -149,7 +149,7 @@ String brands_text() {
 
 String send(const String& name_in, const String& action, const String& brand) {
     const String name = safe_name(name_in);
-    if (name.isEmpty()) return "ERROR: 缺少电器名称，例如 ir://客厅电视/power";
+    if (name.isEmpty()) return "ERROR: 缺少电器名称，例如 device://local/ir/客厅电视/power";
     if (!action_label(action)) return "ERROR: 不支持的动作「" + action + "」。" + brands_text();
     cJSON* profile = load(name);
     int index = -1;

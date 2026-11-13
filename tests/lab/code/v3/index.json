@@ -1,0 +1,17 @@
+{
+ "settings": "settings://（read 看各项，write 改），settings://open/页名",
+ "wifi": "扫描 read wifi://scan，当前 read wifi://status，连接 session(connect, wifi://网络名)，网络名逐字照用户原话（空格和说出的“WiFi”字样都保留）",
+ "web": "web://search?q=、web://page?url=",
+ "http": "https://网址",
+ "lora": "lora://status|messages|send|settings/…",
+ "gps": "sensor://gps/location|satellites|time",
+ "ble": "ble://scan|status|power|device/地址|gatt/…|notify/…|advertise|hid/…",
+ "place": "问“我在哪”用 place://here，另有 nearby?q=、search?q=、weather、route?to=",
+ "files": "read file:///vat/路径（目录即列出），write 写入",
+ "timer": "到点只提醒：write timer://in/时长（10m、1h30m）或 timer://at/时刻（18:30），read timer://list；到点要做事用 trigger://",
+ "grove": "sensor://grove",
+ "ir": "write ir://电器名/动作（电视）、ir://电器名/ac（空调），用户说生效或没反应 write ir://电器名/confirm（yes 或 no），换码 ir://电器名/try，发已知的码 ir://send，列出 read ir://list",
+ "pkg": "read pkg://list 看全部；write pkg://名字/enable 启用、/disable 停用、/delete 删除；write pkg://scan 重新扫描卡；在线目录 read pkg://catalog，write pkg://install/名字 安装、pkg://update/名字 更新",
+ "ui": "ui://panel/名字、ui://canvas/名字、ui://apps",
+ "program": "写或改程序前先 read prog://help；prog://list、运行用 exec target=prog://名字、program=run、定时或开机运行 write trigger://new（content 为 {when, run}），read trigger://list，write trigger://编号/delete 或 /pause，清理失效的 write trigger://clean"
+}

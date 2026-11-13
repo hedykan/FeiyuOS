@@ -10,7 +10,7 @@ namespace vat::registry {
 namespace {
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "权限模式 deny/ask/allow/allow_all 由本地 Policy 决定；用户要求改变策略时使用 session(action=set_policy,target=...,policy_mode=...)，策略改变本身必须确认。";
+constexpr char kUsage[] = "权限策略 deny/ask/allow/allow_all：改策略用 session(set_policy, target, policy_mode)，要确认。";
 
 class PolicyPackage : public Package {
 public:

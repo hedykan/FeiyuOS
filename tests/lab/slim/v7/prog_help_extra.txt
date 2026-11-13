@@ -1,0 +1,8 @@
+【写程序的做法】
+- 写好就 write prog://名字 保存，保存后一定 exec 运行一次，看结果和输出；有错就改，改完再运行，直到成功。用 1 到 2 组输入覆盖主要路径即可。
+- 程序的输入有两种，不要混用：运行前定好的参数用 -- @input 声明，运行时写在地址里（exec prog://名字?n=10）；运行中要用户在键盘上输入的（用户说让我输入、问我、等我回答）用 io.read 或 vat.readline 读，测试时把输入放进 exec 的 args，每一项是一行输入，多次输入就放多项；不给的话程序会一直等用户在设备上输入。
+- 能力调用的返回值：有数据的调用返回一张表，用变量接住再取字段，不解析文字：电量 b.percent、b.voltage、b.usb；加速度、陀螺仪 a.x、a.y、a.z，姿态 pitch、roll；灯 color；SSH 命令 r.stdout、r.stderr、r.code（code 不是 0 就是命令失败）；调用别的程序 r.result（它 return 的值）、r.stdout、r.stderr。其他调用返回文字。任何调用失败（包括被调用的程序出错）都返回 nil 和原因：local v, err = vat.read(...)，先判断 v 是不是 nil。
+- vat.log 写到标准错误并带时间，不占标准输出。
+- 改已有的程序：大程序不用整份读，read prog://名字?grep=关键词 看匹配的行（带行号），?lines=120-160 看一段原文；只改一小部分用 write prog://名字/patch，content 每段依次是一行 <<<<、要替换的原文（与程序完全一致，包括缩进，且只出现一次）、一行 ====、新文字、一行 >>>>，可以连写多段；新写或大改仍然整份 write prog://名字。
+- 用户问有哪些程序、哪些可以删时先 read prog://list（说明、最近运行、被哪些触发使用），据此建议；删除直接 write prog://名字/delete，设备会弹确认。
+- 定时、开机运行：write trigger://new，content 是 JSON {"when": …, "run": "prog://程序名?参数"}；when 如 time://every/07:00（每天）、time://every/30s（每隔多久，至少 10 秒）、time://weekday/09:00、time://at/18:30（一次）、time://in/10m（一次）、device://boot（开机），不用 cron。只做一件事也写成一两行的程序再建触发。查看 read trigger://list，停用 write trigger://编号/pause，删除 trigger://编号/delete，清理失效的 write trigger://clean。

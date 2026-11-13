@@ -46,6 +46,7 @@ struct Context {
     const Options* options = nullptr;
     bool canvas = false;                  // Script: per-frame budget, no tool calls
     std::size_t first_arena = kFirstArena;
+    bool all_approved = false;            // code mode: the user answered "all"
 };
 
 int depth = 0;  // nested runs (a program calling a program); one task only
@@ -585,6 +586,21 @@ void push_data(lua_State* L, const cJSON* data, const String& text) {
     lua_setmetatable(L, -2);
 }
 
+// Code mode: asks the user about one call.  The wait is not the script's time.
+bool ask_user(lua_State* L, const char* tool, const String& target, const String& reason, String& error) {
+    auto& c = context(L);
+    if (c.all_approved) return true;
+    const uint32_t before = millis();
+    const auto answer = worker::ask(String(tool) + " " + target, reason);
+    c.started += millis() - before;
+    if (answer == worker::Answer::No) {
+        error = "用户拒绝了这一步（没有执行）";
+        return false;
+    }
+    if (answer == worker::Answer::All) c.all_approved = true;
+    return true;
+}
+
 // One tool call as the model would make it.  Policy decides; a call it would
 // ask about runs only when the program's confirmed @uses cover it; secrets
 // are never asked for.
@@ -601,12 +617,18 @@ int call_tool(lua_State* L, const char* tool, cJSON* args) {
         error = "已拒绝：" + verdict.reason;
     } else if (verdict.decision == policy::Decision::Ask) {
         approved = uses && lua_meta::covers(*uses, tool, target);
-        if (!approved) {
+        if (!approved && context(L).options->ask) {
+            approved = ask_user(L, tool, target, verdict.reason, error);
+        } else if (!approved) {
             error = String("需要确认：在程序开头声明 -- @uses ") + tool + " " + target + "，保存时由用户确认（" +
                     verdict.reason + "）";
         }
     }
-    if (error.isEmpty() && (target.startsWith("http://") || target.startsWith("https://")) &&
+    if (error.isEmpty() && !approved && context(L).options->ask &&
+        (target.startsWith("http://") || target.startsWith("https://")) && !(uses && lua_meta::covers(*uses, tool, target))) {
+        approved = ask_user(L, tool, target, "联网", error);  // code mode: the user sees the address
+    }
+    if (error.isEmpty() && !approved && (target.startsWith("http://") || target.startsWith("https://")) &&
         !(uses && lua_meta::covers(*uses, tool, target))) {
         // A read is allowed for the agent, but a program could carry data off in
         // a URL: each site it talks to is confirmed once, like any write.

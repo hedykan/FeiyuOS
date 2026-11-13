@@ -38,6 +38,7 @@
 SET_LOOP_TASK_STACK_SIZE(8 * 1024);
 
 void setup() {
+    vat::boot_step("rom");  // power on to setup(): ROM, bootloader, C++ start-up
     vat::diag::trace_from_boot();  // heap-tracing builds only: what boot leaves behind
     Serial.begin(115200);
     auto cfg = M5.config();
@@ -46,11 +47,14 @@ void setup() {
     M5Cardputer.begin(cfg, true);
     M5Cardputer.Display.setRotation(1);
     M5Cardputer.Display.setBrightness(128);
+    vat::boot_step("m5");
     vat::local::probe_hardware();
+    vat::boot_step("probe");
     // The microphone is started only while recording (see ui.cpp record()).
     constexpr int kBootSteps = 13;
     vat::ui::splash::begin();  // bubbles until the card is mounted
     vat::ui::splash::step("card", 0, kBootSteps);
+    vat::boot_step("splash");
 
     if (!vat::storage::begin()) {
         vat::ui::splash::problem("TF 卡和板载存储都不可用");
@@ -59,6 +63,7 @@ void setup() {
     vat::ui::splash::card_ready();  // the mascot comes in
     vat::ui::splash::step("config", 1, kBootSteps);
     const String problem = vat::config::load();
+    vat::boot_step("config");
     // For tools/device_token.sh: whoever can reach the USB port can reflash anyway.
     Serial.println("{\"event\":\"web_token\",\"detail\":\"" + vat::web_token::token() + "\"}");
     M5Cardputer.Display.setBrightness(vat::config::get().brightness);
@@ -78,6 +83,7 @@ void setup() {
         for (const auto& next : kNext) {
             if (strcmp(next[0], step) == 0) vat::ui::splash::step(next[1], ++boot_step, kBootSteps);
         }
+        vat::boot_step(step);
         const uint32_t now = ESP.getFreeHeap();
         heap_steps += String(heap_steps.isEmpty() ? "" : " ") + step + "=" + String((static_cast<int32_t>(heap_before) - static_cast<int32_t>(now)) / 1024.0f, 1);
         heap_before = now;
@@ -136,10 +142,11 @@ void setup() {
     vat::runtime_event("ready", vat::net::ip() + " " + vat::net::link_text());
     // Which access points carry this SSID (mesh nodes, a second router): when
     // the LAN cannot reach the device, compare with the computer's BSSID.
-    vat::runtime_event("wifi_nodes", vat::net::same_ssid_nodes());
+    vat::net::scan_nodes();  // logged as wifi_nodes from loop() when done
     heap_mark("ready");
     vat::runtime_event("boot_heap", heap_steps + " (KB)");
-    vat::events::emit("device://boot");
+    vat::runtime_event("boot_ms", vat::boot_steps());
+    vat::events::emit("device://local/event/boot");
 }
 
 void loop() {
@@ -157,6 +164,12 @@ void loop() {
     vat::net::report_link_changes();
     vat::portal::loop();
     vat::storage::tick();
+    static bool nodes_logged = false;
+    String nodes;
+    if (!nodes_logged && vat::net::nodes_scanned(nodes)) {
+        nodes_logged = true;
+        vat::runtime_event("wifi_nodes", nodes);
+    }
     vat::local::sample_cpu();
     if (!vat::worker::busy()) {  // never remount under a running job
         const String card = vat::storage::check_card();

@@ -1,0 +1,1 @@
+权限策略 deny/ask/allow/allow_all：改策略用 session(set_policy, target, policy_mode)，要确认。

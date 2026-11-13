@@ -19,7 +19,7 @@ bool is_imu(String target) {
 }
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "本机 RGB 灯为 device://local/led，提示音为 device://local/audio/beep，姿态为 sensor://imu/orientation。";
+constexpr char kUsage[] = "灯 device://local/led，提示音 device://local/audio/beep，姿态 sensor://imu/orientation。";
 
 class HardwarePackage : public Package {
 public:

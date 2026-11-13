@@ -208,7 +208,15 @@ class World:
             if target.startswith(prefix):
                 return "ERROR: " + error, "allow"
         confirm = self.needs_confirm(tool, a)
-        if in_program is not None:
+        if in_program is not None and in_program.get("code_mode") and confirm:
+            # Code mode (lua://run): the device asks the user about each such call
+            # while the script waits; the lab's user says yes (or no with "reject").
+            if self.reject:
+                self.events.append(f"用户拒绝 {tool} {target}")
+                return "用户拒绝了这一步（没有执行）", "rejected"
+            self.events.append(f"脚本里确认 {tool} {target}")
+            decision = "approved"
+        elif in_program is not None:
             if confirm and not covers(in_program["uses"], tool, target):
                 return (f"需要确认：在程序开头声明 -- @uses {tool} {target}，保存时由用户确认", "refused")
             if target.startswith(("http://", "https://")) and not covers(in_program["uses"], tool, target):
@@ -355,7 +363,7 @@ class World:
         if self.debug and target.startswith("prog://") and target.split("?")[0].endswith("/log"):
             return self.debug_read("debug://stdout?prog=" + target[7:].split("?")[0][:-4])  # one program's part of it
         if target == "prog://help":
-            return HELP
+            return getattr(self, "help_extra", "") + HELP
         if target == "prog://help/examples":
             return HELP_EXAMPLES
         if target in ("prog://", "prog://list"):
@@ -389,7 +397,9 @@ class World:
                     return (f"{name} 第 {first}–{last} 行（共 {len(lines)} 行）：\n" +
                             "\n".join(lines[first - 1:last]).encode()[:PAGE].decode(errors="ignore"))
                 return "ERROR: 用 ?grep=关键词 或 ?lines=开始-结束"
-            return f"{name}（已启用，{len(self.programs[name].encode())} 字节，{self.programs[name].count(chr(10)) + 1} 行）\n源码：\n{self.programs[name]}"
+            hint = (f"\n看局部：prog://{name}?grep=关键词、?lines=开始-结束；只改一部分：write prog://{name}/patch（写法见 prog://help）"
+                    if getattr(self, "show_hint", False) else "")
+            return f"{name}（已启用，{len(self.programs[name].encode())} 字节，{self.programs[name].count(chr(10)) + 1} 行）{hint}\n源码：\n{self.programs[name]}"
         if target in ("trigger://", "trigger://list"):
             if not self.triggers:
                 return "还没有触发。"
@@ -489,7 +499,7 @@ class World:
             self.events.append(f"界面 {target}")
             return f"已显示 {target}"
         if target == "lua://run":
-            return self.run_source(content, "script", [], "", foreground=False)["text"]
+            return self.run_source(content, "script", [], "", foreground=False, code_mode=self.code_mode)["text"]
         if target.startswith("memory://"):
             self.events.append(f"记忆 {target}")
             return "已记下"
@@ -565,9 +575,9 @@ class World:
                 seconds = int(every.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 60}[every.group(2)]
                 if seconds < 10:
                     return "ERROR: 间隔至少 10 秒"
-            elif not re.match(r"(time://(every|weekday|weekend)/\d\d:\d\d|time://at/.+|time://in/.+|device://boot|"
-                              r"ble://event/.+|ui://panel/.+|lora://event/.+)$", when):
-                return "ERROR: when 不认识：用 time://every/07:00、time://every/30s、time://in/10m、device://boot"
+            elif not re.match(r"(time://(every|weekday|weekend)/\d\d:\d\d|time://at/.+|time://in/.+|device://local/event/boot|"
+                              r"device://local/ble/event/.+|ui://event/panel/.+|device://local/lora/event/.+)$", when):
+                return "ERROR: when 不认识：用 time://every/07:00、time://every/30s、time://in/10m、device://local/event/boot"
             tid = len(self.triggers) + 1
             self.triggers.append({"id": tid, "when": when, "run": run})
             self.events.append(f"新建触发 #{tid} {when} → {run}")
@@ -699,7 +709,7 @@ class World:
         return text
 
     def run_source(self, source: str, name: str, uses: list, stdin: str, foreground: bool, inputs: dict | None = None,
-                   strict: bool = False, source_tag: str | None = "前台") -> dict:
+                   strict: bool = False, source_tag: str | None = "前台", code_mode: bool = False) -> dict:
         """Runs a program in the harness; the result text is lua_vm / prog_runtime's."""
         program = self.dir / f"{name}.lua"
         program.write_text(source)
@@ -762,7 +772,7 @@ class World:
                         self.clock_ms += 5
                         send({"ok": True, "value": self.clock_ms})
                     else:
-                        result, decision = self.call(tool, a, in_program={"uses": uses})
+                        result, decision = self.call(tool, a, in_program={"uses": uses, "code_mode": code_mode})
                         bad = result.startswith(("ERROR", "没有能力包", "需要确认", "联网要", "用户拒绝"))
                         value = None if bad else self.value_for_program(tool, a, result)
                         send({"ok": not bad, "value": value, "error": result if bad else None})
@@ -803,10 +813,10 @@ RESOURCES = [
     ("sensor://imu/acceleration", "陀螺仪 加速度 倾斜 imu 姿态 传感器"), ("sensor://imu/orientation", "姿态 角度 倾斜 imu"),
     ("timer://in/10m", "提醒 定时 计时 timer 闹钟"), ("timer://list", "提醒 列表 timer"),
     ("file:///vat/", "文件 file 卡 存储"), ("prog://list", "程序 prog 列表 写程序"), ("prog://help", "程序 写法 lua 帮助"),
-    ("trigger://list", "触发 定时 每天 每隔 trigger"), ("ir://list", "红外 电视 空调 遥控 ir"),
-    ("ble://scan", "蓝牙 ble 扫描"), ("lora://status", "lora 无线"), ("wifi://status", "wifi 网络 无线"),
+    ("trigger://list", "触发 定时 每天 每隔 trigger"), ("device://local/ir/list", "红外 电视 空调 遥控 ir"),
+    ("device://local/ble/scan", "蓝牙 ble 扫描"), ("device://local/lora/status", "lora 无线"), ("device://local/wifi/status", "wifi 网络 无线"),
     ("web://search?q=", "搜索 联网 网页 web"), ("place://weather", "天气 位置 地点"), ("ui://panel/名字", "面板 界面 选择 ui"),
-    ("memory://out", "输出 记忆 memory"), ("ssh://开发机", "开发机 ssh 服务器 主机 远程 命令 磁盘"),
+    ("memory://out/list", "输出 记忆 memory"), ("ssh://开发机", "开发机 ssh 服务器 主机 远程 命令 磁盘"),
 ]
 # D: offered when the question is about what ran, what it printed, why it failed, or memory
 DEBUG_WORDS = ("日志", "记录", "输出", "错误", "失败", "报错", "调试", "debug", "log", "历史", "上次", "刚才", "昨",
@@ -890,7 +900,14 @@ def run_case(case: dict, variant: dict, system: str, tools: list, profiles: str,
     world = World(case, workdir, variant.get("io", "v1"), bool(variant.get("structured")), bool(variant.get("debug")))
     world.patch = bool(variant.get("patch"))
     world.ranges = bool(variant.get("ranges"))
+    world.show_hint = True
+    world.code_mode = True  # lua://run: a call that needs confirmation asks the user (worker::ask)  # prog_runtime show(): the header says how to read and change part of a program
+    extra = ROOT / variant.get("texts", "-") / "prog_help_extra.txt"
+    if variant.get("texts") and extra.exists():  # a draft of what prog://help adds
+        world.help_extra = extra.read_text().strip() + "\n\n"
     rules = variant.get("rules", "")
+    if variant.get("texts"):  # a slim draft: its own prompt and tool list
+        system, tools = variant["system"], variant["tools"]
     messages = [{"role": "system", "content": system + (rules and "\n" + rules)},
                 {"role": "system", "content": profiles},
                 {"role": "user", "content": case["text"]}]
@@ -930,7 +947,8 @@ def run_case(case: dict, variant: dict, system: str, tools: list, profiles: str,
                 a = json.loads(raw)
                 if name == "discover":
                     discovers += 1
-                    text = answer_discover(discover, a) if discovers <= prompt_lab.MAX_DISCOVER else '{"error":"discover 次数已达上限"}'
+                    usage = prompt_lab.package_usage(a)  # registry::discover: a named on-demand package's usage
+                    text = (usage or answer_discover(discover, a)) if discovers <= prompt_lab.MAX_DISCOVER else '{"error":"discover 次数已达上限"}'
                     if world.debug and any(w in str(a.get("query", "")).lower() for w in DEBUG_WORDS):
                         text += " 另有：" + DEBUG_RESOURCES
                     if variant.get("discover_programs"):
@@ -1165,12 +1183,22 @@ def main() -> int:
             print(f"{v['name']}: {v.get('about', '')}")
         return 0
     chosen = [all_variants[name] for name in args.variant.split(",")]
+    system = prompt_lab.system_prompt()  # the firmware's, before a draft sets prompt_lab.TEXTS
+    drafts = {v["texts"] for v in chosen if v.get("texts")}
+    if drafts and len(chosen) > 1:
+        # prompt_lab.TEXTS is global: it would change the discover answers of the other variants too
+        raise SystemExit("a variant with a draft (texts) runs alone: run the others separately")
     for v in chosen:
         if v.get("rules_file"):
             v["rules"] = (ROOT / v["rules_file"]).read_text().strip()
+        if v.get("texts"):
+            texts = ROOT / v["texts"]
+            prompt_lab.TEXTS = texts
+            prompt_lab.ALWAYS.update(p for p in (texts / "always.txt").read_text().strip().split(",") if p)
+            v["system"] = prompt_lab.system_prompt()
+            v["tools"] = json.loads((texts / "tools.json").read_text())
     if not args.model:
         args.model = re.search(r'String agent_model = "([^"]+)"', (SRC / "config.h").read_text()).group(1)
-    system = prompt_lab.system_prompt()
     tools = json.loads(prompt_lab.raw_literal("kToolsJson", "TOOLS"))
     key = prompt_lab.KEY_FILE.read_text().strip()
     profiles = f"当前可见 SSH profile（只含名称）: {args.profiles}。"

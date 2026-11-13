@@ -9,7 +9,7 @@ namespace vat::registry {
 namespace {
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "语音中的 Voice Agent Terminal 项目名规范为 voice-agent-terminal；语音识别得到的英文项目名规范为小写，Backend 必须是 backend；已明确拼写的项目 slug 必须保持小写与连字符。用户让 Codex、Claude 或 Pi 在某项目完成任务时，session.action 使用 start_agent，并填 provider、project 和原始任务 prompt。如果启动 Agent 时没有项目名，必须直接澄清，不调用任何工具；“项目”“这个项目”“代码”等泛称不是项目名。恢复、中断、批准当前 Agent 分别使用 session 的 resume_agent、interrupt、approve，target 都是 agent://current。当前远程 Agent 使用 agent://current。结合语音场景纠正常见同音词，例如扣的差通常指 Codex。";
+constexpr char kUsage[] = "远程 Agent（Codex、Claude、Pi）：让它在某项目做事用 session(start_agent, provider, project, prompt=用户的任务原话)；没有具体项目名（“这个项目”“代码”不算）就澄清。当前 Agent 是 agent://current：恢复 resume_agent、中断 interrupt、批准 approve、拒绝 reject。项目名用小写和连字符。";
 
 class AgentsPackage : public Package {
 public:

@@ -18,7 +18,7 @@ void lua_meta() {
         "-- @version 1.2\n"
         "\n"
         "local w = vat.read('place://weather')\n"
-        "-- @uses write ir://late  (after the code: not the header)\n";
+        "-- @uses write device://local/ir/late  (after the code: not the header)\n";
     CHECK(parse(src, h).isEmpty());
     CHECK(h.about == "早上查天气，下雨就提醒带伞");
     CHECK(h.inputs.size() == 2 && h.inputs[0].name == "city" && h.inputs[0].fallback == "深圳" && !h.inputs[0].required);

@@ -68,7 +68,7 @@ String show_image(const String& path) {
 }
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "在本机屏幕全屏显示用 write device://local/display/text、/qr 或 /image，Agent 页一行通知用 device://local/display/banner。";
+constexpr char kUsage[] = "屏幕：全屏显示 write device://local/display/text、/qr 或 /image，Agent 页一行通知 device://local/display/banner。";
 
 class DisplayPackage : public Package {
 public:

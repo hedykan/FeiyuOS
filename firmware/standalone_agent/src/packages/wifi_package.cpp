@@ -1,9 +1,9 @@
-// wifi: nearby networks and connection management.
-//   read  wifi://scan            nearby networks (ssid, rssi, secured, channel)
-//   read  wifi://status          current network
-//   write wifi://SSID            save + switch (Policy: ask); the password is
-//                                typed on the device, never taken from the model
-//   session connect wifi://NAME  switch to a saved network
+// wifi: nearby networks and connection management (docs/EXTENSION_PACKAGE_GUIDE.zh-CN.md §5).
+//   read  device://local/wifi/scan            nearby networks (ssid, rssi, secured, channel)
+//   read  device://local/wifi/status          current network
+//   write device://local/wifi/SSID            save + switch (Policy: ask); the password is
+//                                             typed on the device, never taken from the model
+//   session connect device://local/wifi/NAME  switch to a saved network
 // A failed switch always returns to the previous network.
 #include <WiFi.h>
 
@@ -33,12 +33,16 @@ String status() {
     return json;
 }
 
-// Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "WiFi 规范：搜索、扫描附近 WiFi 用 read target=wifi://scan；查看当前网络用 read target=wifi://status；连接 WiFi（无论是否保存过）用 session(action=connect,target=wifi://网络名)，网络名逐字保留，包括用户说出的 WiFi 后缀，例如连接家里 WiFi 是 target=wifi://家里 WiFi。";
+constexpr char kPrefix[] = "device://local/wifi/";
+
+String name_of(const cJSON* arguments) { return json_str(arguments, "target").substring(strlen(kPrefix)); }
+
+constexpr char kUsage[] = "WiFi：扫描附近 read device://local/wifi/scan；当前网络 read device://local/wifi/status；连接（无论是否保存过）session(action=connect, target=device://local/wifi/网络名)，网络名逐字照用户的叫法，空格和“WiFi”字样都保留。";
 
 class WifiPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "扫描 read device://local/wifi/scan，当前 read device://local/wifi/status，连接 session(connect, device://local/wifi/网络名)，用户对网络的叫法（如“公司 WiFi”）就是网络名，逐字照写（空格和“WiFi”字样都保留），由设备去匹配已保存和扫到的网络，不要反问网络名"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"wifi", "WiFi 扫描、状态与切换（含语音设置新网络）",
@@ -48,7 +52,7 @@ public:
 
     bool supports(const String& tool, const cJSON* arguments) const override {
         const String target = json_str(arguments, "target");
-        if (!target.startsWith("wifi://")) return false;
+        if (!target.startsWith(kPrefix)) return false;
         if (tool == "read" || tool == "write") return true;
         const String action = json_str(arguments, "action");
         return tool == "session" && (action == "connect" || action == "disconnect");
@@ -56,11 +60,11 @@ public:
 
     String execute(const String& tool, const cJSON* arguments, bool) override {
         const String target = json_str(arguments, "target");
-        const String name = target.substring(7);
+        const String name = name_of(arguments);
         if (tool == "read") {
             if (name == "scan" || name.isEmpty()) return wifi::scan_text();
             if (name == "status" || name == "current") return status();
-            return "未知 WiFi 资源：" + target + "（可用 wifi://scan、wifi://status）";
+            return "ERROR: 未知 WiFi 资源：" + target + "（可用 device://local/wifi/scan、device://local/wifi/status）";
         }
         if (json_str(arguments, "action") == "disconnect") return "不支持断开 WiFi（设备需要网络）";
         // Any password in the model's arguments is ignored on purpose: secrets
@@ -72,17 +76,16 @@ public:
     }
 
     String needs_secret(const String& tool, const cJSON* arguments) override {
-        const String target = json_str(arguments, "target");
         const bool connecting = tool == "write" || (tool == "session" && json_str(arguments, "action") == "connect");
         if (!connecting) return {};
-        const String name = target.substring(7);
+        const String name = name_of(arguments);
         if (name.isEmpty() || wifi::saved(name) || !wifi::secured(name)) return {};
         return "WiFi「" + name + "」的密码";
     }
 
     String execute_secret(const String& tool, const cJSON* arguments, bool, const String& secret) override {
         bool ok = false;
-        return wifi::join(json_str(arguments, "target").substring(7), secret, ok);
+        return wifi::join(name_of(arguments), secret, ok);
     }
 
     void hints(std::vector<Hint>& out) override {
@@ -91,7 +94,7 @@ public:
     }
 
     void resources(cJSON* list, int& remaining) override {
-        for (const char* target : {"wifi://scan", "wifi://status"}) {
+        for (const char* target : {"device://local/wifi/scan", "device://local/wifi/status"}) {
             add_resource(list, remaining, target, "wifi");
         }
     }

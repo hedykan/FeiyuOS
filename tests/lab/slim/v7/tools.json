@@ -1,0 +1,238 @@
+[
+ {
+  "type": "function",
+  "function": {
+   "name": "discover",
+   "description": "查有哪些资源、能力包（query 写包名可得它的用法）、命令或命令帮助。只在不知道地址或参数时用。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "scope": {
+      "type": "string",
+      "enum": [
+       "resources",
+       "capabilities",
+       "commands",
+       "help"
+      ]
+     },
+     "query": {
+      "type": "string"
+     },
+     "target": {
+      "type": "string"
+     },
+     "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32
+     }
+    },
+    "required": [
+     "scope",
+     "query"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read",
+   "description": "读资源：文件、传感器、设备状态、列表等。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "target": {
+      "type": "string"
+     },
+     "max_bytes": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "target"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "write",
+   "description": "写资源：文件、设备状态、设置、程序等，需用户确认。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "target": {
+      "type": "string"
+     },
+     "content": {
+      "type": "string"
+     },
+     "mode": {
+      "type": "string",
+      "enum": [
+       "create",
+       "overwrite",
+       "append"
+      ]
+     },
+     "confirm_required": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "target",
+     "content",
+     "mode",
+     "confirm_required"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "exec",
+   "description": "执行一个程序（不经 shell），如 ssh://主机 上的命令或 prog://程序。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "target": {
+      "type": "string"
+     },
+     "program": {
+      "type": "string"
+     },
+     "args": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "confirm_required": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "target",
+     "program",
+     "args",
+     "confirm_required"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "observe",
+   "description": "看终端、TUI 或会话当前的输出。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "target": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "target"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "input",
+   "description": "往终端或 TUI 输入文字或按键。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "target": {
+      "type": "string"
+     },
+     "text": {
+      "type": "string"
+     },
+     "keys": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "submit": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "target",
+     "submit"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "session",
+   "description": "管理连接、tmux 会话、远程 Agent 和案卷：connect、disconnect、list、create、attach、start_agent、resume_agent、interrupt、approve、reject、set_policy。",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": [
+       "connect",
+       "disconnect",
+       "list",
+       "create",
+       "attach",
+       "start_agent",
+       "resume_agent",
+       "interrupt",
+       "approve",
+       "reject",
+       "set_policy"
+      ]
+     },
+     "target": {
+      "type": "string"
+     },
+     "provider": {
+      "type": "string",
+      "enum": [
+       "codex",
+       "claude",
+       "pi",
+       "generic_tui"
+      ]
+     },
+     "project": {
+      "type": "string"
+     },
+     "prompt": {
+      "type": "string"
+     },
+     "policy_mode": {
+      "type": "string",
+      "enum": [
+       "deny",
+       "ask",
+       "allow",
+       "allow_all"
+      ]
+     }
+    },
+    "required": [
+     "action"
+    ]
+   }
+  }
+ }
+]

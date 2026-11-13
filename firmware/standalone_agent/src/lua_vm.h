@@ -42,6 +42,10 @@ struct Options {
     // the output, inputs are not kept.
     String* errors = nullptr;
     String* inputs = nullptr;
+    // Code mode (lua://run, the user is there): a call that needs confirmation
+    // and no @uses covers is asked about on the device (worker::ask) instead
+    // of refused; "all" approves the rest of the run.
+    bool ask = false;
 };
 constexpr uint32_t kForegroundMs = 30 * 60 * 1000;
 constexpr uint64_t kForegroundInstructions = 200000000;

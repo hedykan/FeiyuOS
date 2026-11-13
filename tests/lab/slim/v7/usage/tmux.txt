@@ -1,0 +1,1 @@
+终端：当前终端、TUI、Codex、Claude 或“这里”都是 tui://current：看输出 observe(tui://current)，打字或按键 input(tui://current)。按键写 CTRL_C、UP、ENTER 这样的大写名；只按键或用户说不要发送时 submit=false，要执行或发送时 true。tmux：列会话 session(list, tmux://主机)，新建或连接 session(create 或 attach, tmux://主机/会话名)，主机不能省。终端在等密码时请用户到 SSH 页输入。

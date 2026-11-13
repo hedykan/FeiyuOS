@@ -14,7 +14,7 @@ bool tui_target(const String& target) {
 }
 
 // Always in the system prompt (keep it short; details belong in discover).
-constexpr char kUsage[] = "用户说当前终端、当前 TUI、当前 Codex、当前 Claude 或这里，并要求输入文字/按键时，input 的 target 一律使用 tui://current，绝不能使用 agent://current；agent://current 只用于 session 的恢复、中断、批准或拒绝。用户查看当前终端输出时用 observe(target=tui://current)。Control C 等按键使用 input.keys=[CTRL_C] 且 submit=false。上方向键使用 input.keys=[UP] 且 submit=false。tmux 会话使用 tmux://PROFILE/NAME；列出会话时 target 为 tmux://PROFILE，创建或连接命名会话时 target 为 tmux://PROFILE/NAME。语音识别可能把‘X 的 tmux 会话’写成 XTheTMUX绘画、XTMX绘画；此时 TMUX/TMX/绘画是 tmux/会话，不属于会话名，会话名只取 X 并规范成小写。用户明确说不要发送时 submit=false，否则明确要求执行或发送时为 true。观察到终端在等待密码时，告诉用户到 SSH 页输入，不要代输。";
+constexpr char kUsage[] = "终端：当前终端、TUI、Codex、Claude 或“这里”都是 tui://current：看输出 observe(tui://current)，打字或按键 input(tui://current)。按键写 CTRL_C、UP、ENTER 这样的大写名；只按键或用户说不要发送时 submit=false，要执行或发送时 true。tmux：列会话 session(list, tmux://主机)，新建或连接 session(create 或 attach, tmux://主机/会话名)，主机不能省。终端在等密码时请用户到 SSH 页输入。";
 
 class TmuxPackage : public Package {
 public:

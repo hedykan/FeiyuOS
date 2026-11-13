@@ -51,6 +51,7 @@ constexpr char kUsage[] = "Grove 口接了什么用 read sensor://grove。";
 class GrovePackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "sensor://grove"; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"grove", "Grove 口外接模块探测（I2C 扫描，按地址推测型号）",

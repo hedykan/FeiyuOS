@@ -10,9 +10,9 @@
 namespace vat::pkg_store {
 
 String catalog(const String& url);  // read pkg://catalog[?url=…]: fetch, keep, list
-// write pkg://install/名字 · pkg://update/名字 (from the catalog last read)
+// write pkg://名字/install · pkg://名字/update (from the catalog last read)
 String install(const String& name, bool update);
-// write pkg://install?[sha256=…&]url=… (url last): ends up waiting for enable
+// write pkg://new?[sha256=…&]url=… (url last): ends up waiting for enable
 String install_url(const String& url, const String& sha256);
 // The confirmation text for install / update / install?url / rollback.
 String summary(const String& verb, const String& name, const String& url, const String& sha256);

@@ -33,7 +33,7 @@ wait-ready:
 # cJSON comes from the same ESP-IDF tree as the custom libraries.
 CJSON_DIR ?= ../../esp-libbuild/lib-builder/esp-idf/components/json/cJSON
 HOST_SRC := firmware/standalone_agent/src
-HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/ac_core.cpp $(HOST_SRC)/arena_ledger.cpp $(HOST_SRC)/ui_panel.cpp $(HOST_SRC)/web_token_core.cpp $(HOST_SRC)/ui_canvas.cpp $(HOST_SRC)/lua_meta.cpp $(HOST_SRC)/pkg_catalog.cpp $(HOST_SRC)/console_buffer.cpp
+HOST_UNITS := $(HOST_SRC)/common_text.cpp $(HOST_SRC)/place_format.cpp $(HOST_SRC)/wifi_saved.cpp $(HOST_SRC)/ac_core.cpp $(HOST_SRC)/arena_ledger.cpp $(HOST_SRC)/ui_panel.cpp $(HOST_SRC)/web_token_core.cpp $(HOST_SRC)/ui_canvas.cpp $(HOST_SRC)/lua_meta.cpp $(HOST_SRC)/pkg_catalog.cpp $(HOST_SRC)/console_buffer.cpp $(HOST_SRC)/address_map.cpp
 IREXT_C := $(wildcard $(HOST_SRC)/third_party/irext/*.c)
 host-test:
 	mkdir -p build/host
@@ -43,6 +43,7 @@ host-test:
 		tests/host/host_test.cpp $(HOST_UNITS) build/host/cJSON.o $(patsubst %.c,build/host/%.o,$(notdir $(IREXT_C))) -o build/host/host_test
 	build/host/host_test tests/host/fixtures
 	python3 tools/check_usage.py
+	python3 tools/check_addresses.py
 
 # Corner mascot and boot animation: pack assets/mascot (and assets/boot) and
 # copy them to the card; the firmware shows them when /vat/assets/mascot.bin

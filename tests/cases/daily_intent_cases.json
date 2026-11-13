@@ -12,12 +12,12 @@
   {
     "id": "set_volume",
     "input": "把本机音量调到百分之三十。",
-    "expect": {"call_names": ["write"], "arguments": [{"target": "device://local/audio/volume", "content": "30", "mode": "overwrite", "confirm_required": true}]}
+    "expect": {"call_names": ["write"], "arguments": [{"target": "settings://volume", "content": "30", "mode": "overwrite", "confirm_required": true}]}
   },
   {
     "id": "connect_home_wifi",
     "input": "连接配置家里 WiFi。",
-    "expect": {"call_names": ["session"], "arguments": [{"action": "connect", "target": "wifi://家里 WiFi"}]}
+    "expect": {"call_names": ["session"], "arguments": [{"action": "connect", "target": "device://local/wifi/家里 WiFi"}]}
   },
   {
     "id": "read_recent_tasks",

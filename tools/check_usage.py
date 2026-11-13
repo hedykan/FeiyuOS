@@ -12,21 +12,30 @@ from pathlib import Path
 PACKAGES = Path(__file__).resolve().parents[1] / "firmware/standalone_agent/src/packages"
 
 
+def check(name: str, literal: str, bad: list) -> None:
+    if "\\" in literal:
+        bad.append(f"{name}: kUsage or index() contains a backslash or an escaped quote")
+    if any(ord(c) < 0x20 for c in literal):
+        bad.append(f"{name}: kUsage or index() contains a control character")
+
+
 def main() -> int:
     bad = []
     for source in sorted(PACKAGES.glob("*_package.cpp")):
         text = source.read_text(encoding="utf-8")
+        literals = []
         start = text.find("constexpr char kUsage[]")
-        if start < 0:
-            continue
-        end = text.find(";\n", start)
-        declaration = text[start:end]
-        literal = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', declaration))
-        if "\\" in literal:
-            bad.append(f"{source.name}: kUsage contains a backslash or an escaped quote")
-        if any(ord(c) < 0x20 for c in literal):
-            bad.append(f"{source.name}: kUsage contains a control character")
+        if start >= 0:
+            declaration = text[start:text.find(";\n", start)]
+            literals.append("".join(re.findall(r'"((?:[^"\\]|\\.)*)"', declaration)))
+        # index(): the package's line in the system prompt's index, streamed the same way
+        found = re.search(r'const char\* index\(\) const override \{[^"]*"((?:[^"\\]|\\.)*)"', text)
+        if found:
+            literals.append(found.group(1))
+        for literal in literals:
+            check(source.name, literal, bad)
     for line in bad:
+
         print("FAIL", line)
     print(f"usage check: {len(bad)} problem(s)")
     return 1 if bad else 0

@@ -35,26 +35,29 @@ Package* make_settings_package();
 std::vector<Package*> make_catalog_packages();
 
 void register_builtin() {
-    add(make_memory_package());  // before local: owns memory://out|history|cases
+    add(make_memory_package());  // before local: owns memory://out/…, history, cases/…
     add(make_display_package());  // before local: owns device://local/display/{text,qr,image,banner,clear}
     add(make_hardware_package());  // before local: owns device://local/led and audio/beep
+    // Before local and settings: device://local/lora|ble|wifi|ir and their
+    // settings://lora/…, settings://ble/power (local owns the rest of device://local/,
+    // settings the rest of settings://).
+    add(make_lora_package());
+    add(make_ble_package());
+    add(make_wifi_package());
+    add(make_ir_package());
     add(make_local_package());
     add(make_settings_package());
     add(make_ssh_package());
     add(make_tmux_package());
     add(make_agents_package());
     add(make_policy_package());
-    add(make_wifi_package());
     add(make_web_package());
     add(make_http_package());
-    add(make_lora_package());
     add(make_gps_package());
-    add(make_ble_package());
     add(make_place_package());
     add(make_files_package());
     add(make_timer_package());
     add(make_grove_package());
-    add(make_ir_package());
     add(make_pkg_package());
     add(make_ask_package());
     add(make_lua_package());

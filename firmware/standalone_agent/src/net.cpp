@@ -533,12 +533,21 @@ String link_text() {
     return "bssid=" + WiFi.BSSIDstr() + " ch=" + String(WiFi.channel()) + " rssi=" + String(WiFi.RSSI());
 }
 
-String same_ssid_nodes() {
-    if (WiFi.status() != WL_CONNECTED) return {};
+// Started at the boot without waiting (a blocking scan held setup() 4.6 s);
+// nodes_scanned() gives the list once the scan is done.
+void scan_nodes() {
+    if (WiFi.status() == WL_CONNECTED) WiFi.scanNetworks(true, false);
+}
+
+bool nodes_scanned(String& out) {
+    const int found = WiFi.scanComplete();
+    if (found == WIFI_SCAN_RUNNING) return false;
+    if (found < 0) {
+        out = "(scan failed)";
+        return true;
+    }
     const String ssid = WiFi.SSID();
     const String mine = WiFi.BSSIDstr();
-    const int found = WiFi.scanNetworks(false, false);
-    String out;
     int listed = 0;
     for (int i = 0; i < found && listed < 8; ++i) {
         if (WiFi.SSID(i) != ssid) continue;
@@ -548,7 +557,8 @@ String same_ssid_nodes() {
         ++listed;
     }
     WiFi.scanDelete();
-    return out.isEmpty() ? String("(scan found none)") : out;
+    if (out.isEmpty()) out = "(scan found none)";
+    return true;
 }
 
 namespace {

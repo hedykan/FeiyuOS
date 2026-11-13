@@ -1,19 +1,20 @@
-// lua: prototype runner (branch feat/lua-prog).  write lua://run with a script
-// as content runs it and returns its output with what it cost.  Not in the
-// system prompt yet: tried through the web API while the bindings settle.
-#include <esp_heap_caps.h>
-
+// lua: code mode.  write lua://run with a script as content runs it once,
+// without saving it (programs::run_script): loops, waits and computing on
+// what was read in one call instead of one model round per read.
 #include "../common.h"
-#include "../lua_vm.h"
+#include "../prog_runtime.h"
 #include "../registry.h"
 
 namespace vat::registry {
 namespace {
 
+constexpr char kUsage[] = "代码模式：要循环、等待或按读到的值计算时（读 10 次取平均、每隔几秒读一次、读完再按结果做下一步），write target=lua://run，content 写一段 Lua 一次跑完，不要一轮读一次，也不要存成程序。脚本里 vat.read、vat.write、vat.exec 和程序里一样，有数据时返回表（电量 .percent，加速度 .x .y .z，SSH 命令 .stdout），失败返回 nil 和原因；等待用 vat.sleep(毫秒)；print 的内容和 return 的值就是结果。要确认的调用会在设备上逐个问用户。几件互不相关的事直接并行调用工具，不写脚本。";
+
 class LuaPackage : public Package {
 public:
+    const char* usage() const override { return kUsage; }
     const Manifest& manifest() const override {
-        static const Manifest m{"lua", "Lua 脚本（验证中）", "lua 脚本", {}};
+        static const Manifest m{"lua", "代码模式：写一段 Lua 一次跑完（循环、等待、按读到的值计算）", "lua 脚本 代码 循环 平均 多次 每隔", {}};
         return m;
     }
 
@@ -22,24 +23,13 @@ public:
     }
 
     // Running a script is not itself a change: every vat call inside it goes
-    // through Policy on its own, and one that would ask is refused.
+    // through Policy on its own, and one that needs confirmation asks the user.
     bool reversible(const String&, const cJSON*) const override { return true; }
 
     String execute(const String&, const cJSON* arguments, bool) override {
-        const std::size_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        String output, result, error;
-        luavm::Stats stats;
-        luavm::Options none;
-        const bool ok = luavm::run(json_str(arguments, "content"), "script", none, output, result, error, stats);
-        if (!result.isEmpty()) output += "return: " + result + "\n";
-        const std::size_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        const String cost = "lua: peak=" + String(static_cast<unsigned>(stats.peak)) + " arena=" + String(static_cast<unsigned>(stats.arena)) + " instructions=" +
-                            String(stats.instructions) + " ms=" + String(stats.ms) + " heap_before=" +
-                            String(static_cast<unsigned>(before)) + " heap_after=" + String(static_cast<unsigned>(after));
-        runtime_event("lua_run", cost + (ok ? "" : " error"));
-        if (!ok) return "ERROR: " + error + "\n" + output + cost;
-        return output + cost;
+        return programs::run_script(json_str(arguments, "content"));
     }
+
 };
 
 }  // namespace

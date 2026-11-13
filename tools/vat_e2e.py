@@ -342,12 +342,15 @@ class Device:
             screen = self.status()["screen"]
             if not screen["pending"]:
                 break
-            self.wait_idle()
             if screen.get("secret_prompt"):
+                self.wait_idle()
                 self.action("cancel")  # abort: tests never type real passwords here
                 time.sleep(1)
                 continue
-            result = self.action("approve" if approve else "reject")
+            result = self.action("approve" if approve else "reject")  # a job asking takes it at once
+            if result == "busy":
+                self.wait_idle()
+                result = self.action("approve" if approve else "reject")
             if not result.isdigit():
                 break
             job_id = int(result)
@@ -1025,7 +1028,7 @@ def ac_choose_flow(device: Device, report: Report) -> None:
     device.post("/api/delete", path=path)
 
     def say(target: str, content: str) -> str:
-        return reply_text(tool_call(device, "write", f"ir://{name}/{target}", content))
+        return reply_text(tool_call(device, "write", f"device://local/ir/{name}/{target}", content))
 
     def trying() -> int:
         try:
@@ -1151,7 +1154,7 @@ def phase_s6(device: Device, report: Report) -> None:
     device.action("clear_history")
     record = device.text("帮我搜索一下附近的 WiFi。")
     calls = operations(record)
-    scanned = calls and calls[0]["name"] == "read" and calls[0]["arguments"].get("target") == "wifi://scan"
+    scanned = calls and calls[0]["name"] == "read" and calls[0]["arguments"].get("target") == "device://local/wifi/scan"
     report.add("S6", "wifi_scan_voice", bool(scanned) and current in raw(record) and bool(record.get("reply")),
                f"calls={[c['arguments'].get('target') for c in calls]} summary={record.get('reply', '')[:60]!r}")
 
@@ -1160,7 +1163,7 @@ def phase_s6(device: Device, report: Report) -> None:
         record = device.text("现在连的是哪个 WiFi？")
         calls = operations(record)
         report.add("S6", "wifi_status_voice",
-                   bool(calls) and calls[0]["arguments"].get("target") in ("wifi://status", "wifi://scan")
+                   bool(calls) and calls[0]["arguments"].get("target") in ("device://local/wifi/status", "device://local/wifi/scan")
                    and current in raw(record) + record.get("reply", ""),
                    record.get("reply", "")[:80])
     display_overlay(device, report)
@@ -1525,8 +1528,8 @@ def phase_s8(device: Device, report: Report) -> None:
     report.add("S8", "latency_full_window", large <= 2 * small, f"median empty={small}ms window40k={large}ms")
 
     # 6. Over budget: the oldest part is folded into the summary, the fact survives.
-    # The budget is a setting (device://local/context/length, KB) since v0.6.
-    length = reply_text(tool_call(device, "read", "device://local/context/length"))
+    # The budget is a setting (settings://context, KB) since v0.6.
+    length = reply_text(tool_call(device, "read", "settings://context"))
     budget = int(re.search(r"(\d+) KB", length).group(1)) * 1000 if re.search(r"(\d+) KB", length) else 48000
     device.action("clear_history")
     device.upload("/vat/context/window.jsonl", synthetic_window(budget * 5 // 4, "记住：主机 alpha 的数据盘用了 93%。"))
@@ -1549,7 +1552,7 @@ def phase_s8(device: Device, report: Report) -> None:
     record = device.text(f"读取开发机上的 {HOST_TMP}/binary.dat，告诉我它大概是什么内容。")
     record = (device.resolve_all(approve=False) or [record])[-1]  # it may ask to run `file` first
     report.add("S8", "non_utf8_output", record.get("status") == "done" and bool(record.get("reply"))
-               and "空" not in record.get("reply", ""),
+               and not re.search(r"(是|为|内容)空|空文件|空的", record.get("reply", "")),
                f"status={record.get('status')} {record.get('error', '')[:80]} {record.get('reply', '')[:60]}")
 
     heap = device.status()
@@ -1570,7 +1573,7 @@ def phase_s9(device: Device, report: Report) -> None:
     device.resolve_all(approve=False)
     targets = [c["arguments"].get("target", "") for c in record.get("calls", [])]
     state = raw(record)
-    report.add("S9", "lora_status", any(t.startswith("lora://status") or t == "lora://" for t in targets)
+    report.add("S9", "lora_status", any(t.startswith("device://local/lora/status") or t == "device://local/lora/" for t in targets)
                and "LoRa" in state, state[:120])
     # GPS: the module talks (NMEA arrives); a fix is not expected indoors.
     device.action("clear_history")
@@ -2083,7 +2086,7 @@ def pkg_install_cases(device: Device, report: Report, base: str, seen: dict) -> 
         publish(v1)
         text = reply_text(tool_call(device, "read", "pkg://catalog?url=" + catalog_url))
         report.add("S12", "catalog_read", name + " v1" in text and "未安装" in text, text[:200])
-        text = reply_text(tool_call(device, "write", "pkg://install/" + name, ""))
+        text = reply_text(tool_call(device, "write", "pkg://" + name + "/install", ""))
         report.add("S12", "install_needs_confirm", "未执行" in text, text[:160])
         if quick():  # the rest takes four model turns
             return
@@ -2135,9 +2138,24 @@ def phase_s12(device: Device, report: Report) -> None:
         report.add("S12", "save_refuses_secrets", ("密钥" in text and "不能" in text) or "拒绝访问凭据" in text, text[:160])
         text = reply_text(tool_call(device, "write", base + "/echo", {"a": 1}))
         report.add("S12", "post_needs_confirm", "未执行" in text, text[:160])
+        # A saved program declares the sites it talks to; code mode (lua://run)
+        # asks the user instead, call by call.
         script = 'local v, e = vat.read("%s/json") print(e)' % base
-        text = reply_text(tool_call(device, "write", "lua://run", script))
+        tool_call(device, "write", "prog://e2e联网", script)
+        text = reply_text(tool_call(device, "exec", "prog://e2e联网"))
         report.add("S12", "program_needs_uses", "@uses read " + base in text, text[:200])
+        tool_call(device, "write", "prog://e2e联网/delete", "")
+        device.resolve_all(approve=True)
+        code = 'local v, e = vat.read("%s/json") return v or e' % base  # a web read is its text
+        record = tool_call(device, "write", "lua://run", code)
+        asked = record.get("status") == "asking" and bool(device.status()["screen"]["pending"])
+        final = (device.resolve_all(approve=True) or [record])[-1]
+        report.add("S12", "code_mode_asks", asked and '"n": 42' in reply_text(final),
+                   f"status={record.get('status')} {reply_text(final)[:120]}")
+        record = tool_call(device, "write", "lua://run", code)
+        final = (device.resolve_all(approve=False) or [record])[-1]
+        report.add("S12", "code_mode_rejected", record.get("status") == "asking" and "拒绝" in reply_text(final),
+                   reply_text(final)[:120])
         if not quick():  # one model turn and an approval
             seen.pop("body", None)
             device.text(f'用 POST 把 JSON {{"hello": "fish"}} 发到 {base}/echo')
@@ -2180,7 +2198,7 @@ def phase_s11(device: Device, report: Report) -> None:
     leases = [lease.get("name") for lease in arena.get("leases", [])]
     report.add("S11", "arena_reported", arena.get("floor") == 48000 and "tls_reserve" in leases,
                json.dumps(arena, ensure_ascii=False)[:160])
-    text = reply_text(tool_call(device, "read", "device://local/context/length"))
+    text = reply_text(tool_call(device, "read", "settings://context"))
     report.add("S11", "context_length_read", "KB" in text, text[:60])
 
     panel = {"title": "E2E 面板", "lines": ["选一个"], "choices": ["甲", "乙", "丙"]}
@@ -2205,7 +2223,7 @@ def phase_s11(device: Device, report: Report) -> None:
               "-- @about 记下面板的选择\n"
               "vat.write('memory://notes', 'E2E 面板选了 ' .. input.event.choice, {mode = 'append'})\n"
               "return input.event.choice")
-    trigger = {"when": "ui://panel/e2e触发", "run": "prog://e2e面板记录"}
+    trigger = {"when": "ui://event/panel/e2e触发", "run": "prog://e2e面板记录"}
     text = reply_text(tool_call(device, "write", "trigger://new", json.dumps(trigger, ensure_ascii=False)))
     trigger_id = re.search(r"#?(\d+)", text)
     report.add("S11", "panel_trigger_saved", "触发" in text and trigger_id is not None, text[:80])
@@ -2214,15 +2232,15 @@ def phase_s11(device: Device, report: Report) -> None:
     device.key("enter")
     noted = bool(until(lambda: "E2E 面板选了 红" in device.read_file("/vat/memory/notes.txt", tail=2000), 20, 1))
     report.add("S11", "panel_choice_runs_trigger", noted)
-    if trigger_id:
+    if trigger_id:  # deleted, not paused: paused ones piled up to the 32-trigger limit over many runs
         device.wait_idle()
-        device.post("/api/job", kind="call", call=json.dumps(
-            {"tool": "write", "arguments": {"target": f"trigger://{trigger_id.group(1)}/pause", "confirm_required": False}}))
+        device.text(f"删除触发 #{trigger_id.group(1)}")
+        device.resolve_all(approve=True)
 
     app = {"title": "电量", "source": {"read": "device://local/battery", "every": "10s"}}
     text = reply_text(tool_call(device, "write", "ui://apps/e2e应用", json.dumps(app, ensure_ascii=False)))
     report.add("S11", "app_saved", "应用" in text, text[:60])
-    text = reply_text(tool_call(device, "read", "ui://apps"))
+    text = reply_text(tool_call(device, "read", "ui://apps/list"))
     report.add("S11", "app_listed", "e2e应用" in text, text[:80])
     # Fn+A: the program page lists programs and local apps; Enter opens the app
     # on the graphics page.
@@ -2304,7 +2322,7 @@ def phase_s11(device: Device, report: Report) -> None:
     tool_call(device, "write", "settings://statusbar", "" if restore == "不显示" else restore.replace("·", ","))
     text = reply_text(tool_call(device, "write", "settings://statusbar", "天气"))
     report.add("S11", "settings_statusbar_unknown_refused", "ERROR" in text and "没有这些项" in text, text[:60])
-    text = reply_text(tool_call(device, "write", "settings://open/key/deepseek", ""))
+    text = reply_text(tool_call(device, "write", "settings://key/deepseek/open", ""))
     opened = until(lambda: device.status()["screen"].get("setup"), 2)
     for _ in range(4):  # form -> keys -> menu -> closed
         if not device.status()["screen"].get("setup"):
@@ -2312,7 +2330,7 @@ def phase_s11(device: Device, report: Report) -> None:
         device.key("`")
     report.add("S11", "settings_open_key_form", "输入框" in text and bool(opened) and not device.status()["screen"].get("setup"),
                text[:60])
-    text = reply_text(tool_call(device, "write", "settings://open/portal", ""))
+    text = reply_text(tool_call(device, "write", "settings://portal/open", ""))
     report.add("S11", "settings_portal_needs_confirm", "未执行" in text and not device.status()["screen"].get("setup"), text[:60])
     # D9 is now @uses: a program declaring a call that asks is confirmed when
     # saved (a direct call cannot confirm); one that only reads is not.

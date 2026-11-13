@@ -200,6 +200,7 @@ void wifi_saved() {
 #include "arena_test.cpp"
 #include "ui_panel_test.cpp"
 #include "web_token_test.cpp"
+#include "address_map_test.cpp"
 #include "ui_canvas_test.cpp"
 #include "lua_meta_test.cpp"
 #include "pkg_catalog_test.cpp"
@@ -215,6 +216,7 @@ int main(int argc, char** argv) {
     arena_ledger();
     ui_panel();
     web_token();
+    address_map();
     ui_canvas();
     lua_meta();
     pkg_catalog_tests();

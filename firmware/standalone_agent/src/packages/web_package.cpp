@@ -17,6 +17,7 @@ constexpr char kUsage[] = "联网规范：用户要查网上的信息、最新�
 class WebPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
+    const char* index() const override { return "web://search?q=、web://page?url="; }
 
     const Manifest& manifest() const override {
         static const Manifest m{"web", "联网搜索与网页阅读（DeepSeek Search / Fetch）",

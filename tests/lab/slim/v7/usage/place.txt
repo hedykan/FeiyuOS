@@ -1,0 +1,1 @@
+位置服务（高德，需联网）：用户问我在哪、当前位置、我在什么地方，优先 read target=place://here（返回文字地址，比 GPS 原始坐标更有用）；附近搜索 read place://nearby?q=关键词（如 place://nearby?q=咖啡）；查地点 read place://search?q=关键词（可加 &city=城市）；天气 read place://weather；路线 read place://route?to=目的地&mode=walk（mode：walk 步行 / drive 驾车 / bike 骑行 / ebike 电动车 / transit 公交地铁，默认 walk；返回文字分步与大约时间；“附近的某某”会选最近的那家）。都是只读、免确认。
