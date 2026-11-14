@@ -60,6 +60,7 @@
 - `ui.*` 也会被语音设置（亮度、息屏、音量）写回。
 - `ui.status_items`（0.7）：Agent 页顶栏右侧显示哪些项、什么顺序，逗号分隔的 id：`time` 时间、`battery` 电量、`signal` Wi-Fi 信号、`ssid` Wi-Fi 名称、`heap` 剩余内存、`ble` 蓝牙；缺省 `time,battery,signal`，空字符串表示都不显示，放不下时从后往前省略。设置页「顶栏」或 `write settings://statusbar` 修改。
 - `ui.animation`（0.7）：设置页光标高亮条滑到新行的动画，`2` 开（缺省，120 ms）、`1` 减弱（60 ms）、`0` 关（直接跳）。设置页「动画」或 `write settings://animation` 修改。
+- `ui.reasoning`（0.7.5）：显示思考，`1` 开、`0` 关（缺省）。打开后请求模型时带 `reasoning_effort: "low"`，模型的思考显示在记录详细页。设置页「显示思考」或 `write settings://reasoning`（开 / 关）修改。
 - `ui.terminal_font`（10 / 12 / 14）与 `ui.context_kb`（32 / 64 / 96）由设置页写入。
 
 ## secrets.json

@@ -310,6 +310,13 @@ String discover_help(const String& query, const String& target) {
 
 }  // namespace
 
+bool open_lua(lua_State* L, const String& id) {
+    for (auto* package : installed) {
+        if (id == package->manifest().id) return package->open_lua(L);
+    }
+    return false;
+}
+
 bool add(Package* package) {
     for (auto* existing : installed) {
         if (String(existing->manifest().id) == package->manifest().id) {

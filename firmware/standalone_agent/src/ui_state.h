@@ -67,6 +67,12 @@ uint32_t entry_begin(const String& text);
 void entry_retext(const String& text);  // transcript arrived after the entry was created
 void entry_update(Status status, const String& summary);
 void entry_finish(Status status, const String& summary, const String& detail, const String& steps_json);
+// The newest entry's steps as they happen (agent::Progress::step), at most 16;
+// entry_finish keeps them in the record ("live").  Each is its kind letter
+// followed by the text.
+void entry_step(char kind, const String& text);
+std::vector<String> live_steps(uint32_t id);  // empty unless they are `id`'s
+uint32_t live_version();  // changes with every step and when the entry finishes or waits
 void load_timeline();
 String entry_reply(uint32_t id);  // the whole reply when longer than the preview, else ""
 void set_notice(const String& text, bool error = false);
@@ -106,6 +112,7 @@ struct Overlay {
     std::vector<String> choices;
     // Canvas (ui package): drawing operations; `image` holds a drawImage file.
     std::vector<ui_canvas::Op> canvas;
+    std::vector<std::vector<uint8_t>> blobs;  // bitmaps, pixels and images of its M5GFX calls (gfx_exec::prepare)
     int image_x = 0;
     int image_y = 0;
     uint32_t frame_ms = 0;  // animation: 0 = still
@@ -113,9 +120,13 @@ struct Overlay {
     int step = 1;           // {t} = frame × step
     String vars_json;       // canvas variables and the Lua update run before each frame
     String update;
+    // Bring the graphics page up even when this is a refresh of the overlay on
+    // it (the first frame of a program's run; gfx://frame).
+    bool raise = false;
 };
 void post_overlay(Overlay&& overlay);
 bool take_overlay(Overlay& overlay);
+bool overlay_waiting();  // posted, not yet taken by the UI task (gfx.present paces itself on it)
 String open_panel();    // name of the panel or canvas on screen, "" when none
 // The last choice made on each panel (kept until restart).
 void set_panel_choice(const String& panel, const String& choice);

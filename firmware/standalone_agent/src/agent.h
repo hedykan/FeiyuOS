@@ -41,7 +41,18 @@ struct Outcome {
 
 enum class Answer { Approve, Reject, ApproveAll, Secret };
 
-using Progress = std::function<void(const String& stage)>;
+// What a running task tells its caller as it goes: the stage it is in (the
+// timeline's status line) and each step (the record's detail view, live).
+// Step kinds: 'T' the model's thinking, 'S' what it said along with its calls,
+// 'C' a call starting, 'W' a call waiting for the user, 'R' a call's result,
+// 'X' a call refused or not run.
+struct Progress {
+    std::function<void(const String& stage)> stage;
+    std::function<void(char kind, const String& text)> step;
+};
+
+// One call in a line: "exec 开发机 $ df -h", "write ui://panel/天气".
+String describe_call(const String& name, const String& arguments);
 
 void begin();  // restores bounded conversation history from storage
 

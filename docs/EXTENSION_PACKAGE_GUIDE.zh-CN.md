@@ -278,7 +278,8 @@ public:
 | `prog` | program | 程序 |
 | `trigger` | program | 触发 |
 | `pkg` | pkg | 卡上程序和扩展包的管理、在线目录 |
-| `ui` | ui | 面板、画布、本地应用 |
+| `ui` | ui | 面板、本地应用（保存的面板或画布） |
+| `gfx` | gfx | 画图：画布 `gfx://canvas/名字`、程序逐帧画 `gfx://frame`（程序里 `-- @uses gfx` 后 `gfx.*`）、`gfx://screen`、`gfx://measure` |
 | `debug` | debug | 三条全局流 |
 | `lua` | lua | 代码模式 `lua://run` |
 | `timer` | `timer://in/…` `timer://at/…` 的 write；`timer://list` 读；`timer://编号/delete`、`timer://all/delete` | 存 `/vat/things/timers/`；到点全屏提醒 + 提示音，不做别的事；关机期间错过的开机补发。触发的时间条件：`time://at/…` `in/…` `every/…` `weekday/…` `weekend/…` |
@@ -300,7 +301,7 @@ public:
 
 ### 5.6 已废弃的写法
 
-改地址时不留旧写法（不做「新旧都认」的兼容层）：旧写法直接报「没有能力包可处理」，卡上已保存的程序、`@uses`、已确认的权限、触发、面板应用在开机时按本表一次性改写（记一条 `address_migrated` 事件，只做一次）。
+改地址时不留旧写法（不做「新旧都认」的兼容层）：调用旧写法不执行，直接失败并给出新写法（`address::retired()`，和开机改写同一张表），卡上已保存的程序、`@uses`、已确认的权限、触发、面板应用在开机时按本表一次性改写（记一条 `address_migrated` 事件，只做一次）。
 
 | 旧写法 | 新写法 |
 |:--|:--|
@@ -327,6 +328,7 @@ public:
 | `device://boot` | `device://local/event/boot` |
 | `device://lora` | `device://local/lora/` |
 | `settings://open/` | `settings://页名/open`，Key 输入框 `settings://key/提供方/open` |
+| `ui://canvas/` | `gfx://canvas/` |
 
 第一列以 `/` 或 `?` 结尾的是前缀，其余的是整个地址（`ui://apps` 不拦 `ui://apps/名字`）。另有两条不在表里检查：面板选择的事件由 `ui://panel/名字` 改为 `ui://event/panel/名字`（`ui://panel/名字` 本身仍是面板）；LoRa 包原来额外接受的猜测写法（`device://lora/…`）去掉。
 

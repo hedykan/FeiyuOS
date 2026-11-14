@@ -59,7 +59,8 @@ constexpr char kHelp[] = R"HELP(程序（prog://，Lua 5.4）与触发（trigger
 -- @about 一句话说明（列表里显示）
 -- @input city 深圳        参数和默认值；不写默认值就是必填。程序里用 input.city（都是字符串，数字用 tonumber）
 -- @uses exec ssh://开发机  需要确认的能力：动作 + 目标，目标可以用 * 结尾表示前缀，如 write device://local/display/*
-会改变外部东西的能力（远端命令、写远端文件、红外遥控家电、发消息、联网写入……）必须在 @uses 里声明，保存时用户确认一次，之后运行不再确认；没声明的会在运行时被拒绝。不用声明：读取类（读电量、读天气、只读命令），以及本机可撤销的操作（屏幕显示、LED、声音、音量、剪贴板、定时提醒 timer://、面板 ui://）——多声明会让用户多确认一次。需要输密码的操作不能放进程序。
+会改变外部东西的能力（远端命令、写远端文件、红外遥控家电、发消息、联网写入……）必须在 @uses 里声明，保存时用户确认一次，之后运行不再确认；没声明的会在运行时被拒绝。不用声明：读取类（读电量、读天气、只读命令），以及本机可撤销的操作（屏幕显示、LED、声音、音量、剪贴板、定时提醒 timer://、面板 ui://、画图 gfx://）——多声明会让用户多确认一次。需要输密码的操作不能放进程序。
+-- @uses gfx              在程序里画图（逐帧）：gfx.fillScreen("black")、gfx.fillRect(x, y, 宽, 高, 颜色)、gfx.drawString(文字, x, y, {size = 2})……与 gfx://canvas 的指令同名同参；画完一帧 gfx.present() 一次上屏（不调用屏幕不变），动画在循环里每帧 present 一次并 vat.sleep(33)；gfx.size() 宽高，gfx.measure(文字, size) 文字宽度
 
 【vat：调用设备的各项能力】（和你平时的工具一样，失败时返回 nil 和错误原因）
 vat.read(target[, 选项])                     例 vat.read("device://local/battery")
@@ -126,7 +127,7 @@ vat.write("timer://in/25m", "第 " .. r .. " 轮结束，休息 5 分钟")
 if r < 4 then vat.after("30m", "prog://番茄钟?round=" .. (r + 1)) end
 return "第 " .. r .. " 轮开始"
 
-面板（显示几个选项，用户选了再处理：触发监听 ui://panel/灯光，run 填 prog://灯光处理）：
+面板（显示几个选项，用户选了再处理：触发监听 ui://event/panel/灯光，run 填 prog://灯光处理）：
 -- @about 灯光面板
 vat.write("ui://panel/灯光", {title = "灯光", choices = {"开", "关"}})
 -- 另一个程序 灯光处理：

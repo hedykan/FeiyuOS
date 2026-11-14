@@ -6,6 +6,7 @@
 #include <M5Cardputer.h>
 
 #include <algorithm>
+#include <functional>
 #include <math.h>
 
 #include "agent.h"
@@ -22,6 +23,7 @@
 #include "registry.h"
 #include "storage.h"
 #include "settings_page.h"
+#include "ui_compose.h"
 #include "ui_kit.h"
 #include "ui_mascot.h"
 #include "ui_overlay.h"
@@ -51,9 +53,9 @@ struct ProgramItem {
     time_t used = 0;   // last run / saved / changed: the list is newest first
 };
 int delete_pending = -1;   // the item Del asked about (Y deletes it), -1: none
-// The list is cached: reading every program's header from the card takes a
-// moment, so entering the page draws the cache and refreshes it a frame later,
-// only when something changed (programs, a run, or a minute went by).
+// The list is kept while the page is up (reading every program's header from
+// the card takes a moment) and re-read only when something changed (programs,
+// a run, or a minute went by); leaving the page frees it (program_leave).
 bool program_items_loaded = false;
 bool program_items_stale = true;
 uint32_t program_items_at = 0;
@@ -64,7 +66,6 @@ bool program_list = true;  // false: the console (a run, or the last one's outpu
 int program_cursor = 0;
 int output_scroll = 0;     // display rows up from the newest
 uint32_t console_drawn = UINT32_MAX;
-int program_layout = -1;   // what the program page shows (list / console); -1: clear it first
 uint32_t console_second = 0;
 CursorSlide program_bar;
 CursorSlide program_scroll;
@@ -87,6 +88,73 @@ unsigned long last_draw = 0;
 unsigned long last_terminal_refresh = 0;
 bool mascot_live = false;  // the corner mascot is on screen and animating
 
+// ---------------------------------------------------------------- pages
+// A page is a row of this table (docs/V075_PLAN.zh-CN.md G4): the dispatcher
+// handles the global keys (settings, Esc, Fn+Space/H/W/A, Opt+, /., help) and
+// hands the rest to the page; switching, the Btn0 round, drawing and the web
+// screen model all read the table.  A new page is a new row.
+struct PageSpec {
+    Page id;
+    const char* name;    // top bar
+    const char* web_id;  // /api/status screen.page
+    bool (*can_enter)();           // nullptr: always
+    void (*enter)(Page from);      // after it became the current page
+    void (*leave)();               // before another page becomes current
+    void (*render)(bool force);
+    // Takes every key while it is in a mode (a secret being typed, a picture
+    // up); true when it took this one.
+    bool (*modal)(const Keyboard_Class::KeysState& state, const Model& model, bool esc);
+    void (*fn_key)(const Keyboard_Class::KeysState& state, const Model& model, bool busy);  // Fn+ other than the global ones
+    void (*key)(const Keyboard_Class::KeysState& state, const Model& model, bool busy, bool esc);
+    void (*paint)(Gfx& g, const Model& model);  // the list view's body, for the shared renderer
+    String (*header)(const Model& model);      // web screen model
+    String (*body)(const Model& model);
+};
+
+void render(bool force = false);
+void render_views(bool force);
+bool graphics_open();
+void program_enter(Page from);
+void program_leave();
+void terminal_enter(Page from);
+void graphics_enter(Page from);
+void graphics_leave();
+void program_render(bool force);
+void graphics_render(bool force);
+bool agent_modal(const Keyboard_Class::KeysState& state, const Model& model, bool esc);
+bool graphics_modal(const Keyboard_Class::KeysState& state, const Model& model, bool esc);
+void agent_fn(const Keyboard_Class::KeysState& state, const Model& model, bool busy);
+void terminal_fn(const Keyboard_Class::KeysState& state, const Model& model, bool busy);
+void agent_key(const Keyboard_Class::KeysState& state, const Model& model, bool busy, bool esc);
+void terminal_key(const Keyboard_Class::KeysState& state, const Model& model, bool busy, bool esc);
+void program_page_key(const Keyboard_Class::KeysState& state, const Model& model, bool busy, bool esc);
+void agent_paint(Gfx& g, const Model& model);
+void terminal_paint(Gfx& g, const Model& model);
+String plain_header(const Model& model);
+String terminal_header(const Model& model);
+String program_header(const Model& model);
+String agent_body(const Model& model);
+String terminal_body(const Model& model);
+String program_body(const Model& model);
+
+const PageSpec kPages[] = {  // in the Btn0 order
+    {Page::Agent, "Agent", "agent", nullptr, nullptr, nullptr, render_views, agent_modal, agent_fn, agent_key,
+     agent_paint, plain_header, agent_body},
+    {Page::Terminal, "SSH", "ssh", nullptr, terminal_enter, nullptr, render_views, nullptr, terminal_fn, terminal_key,
+     terminal_paint, terminal_header, terminal_body},
+    {Page::Program, "程序", "program", nullptr, program_enter, program_leave, program_render, nullptr, nullptr,
+     program_page_key, nullptr, program_header, program_body},
+    {Page::Graphics, "图形", "graphics", graphics_open, graphics_enter, graphics_leave, graphics_render, graphics_modal,
+     nullptr, nullptr, nullptr, plain_header, nullptr},
+};
+
+const PageSpec& page_of(Page id) {
+    for (const auto& page : kPages) {
+        if (page.id == id) return page;
+    }
+    return kPages[0];
+}
+
 // Masked input for secrets requested by a paused step.
 String secret_buffer;
 bool secret_reveal = false;
@@ -95,42 +163,6 @@ bool secret_reveal = false;
 
 
 // ---------------------------------------------------------------- text helpers
-
-std::vector<String> wrap(Gfx& g, const String& text, int max_px, int max_lines) {
-    std::vector<String> lines;
-    int start = 0;
-    while (start <= static_cast<int>(text.length()) && static_cast<int>(lines.size()) < max_lines) {
-        int end = text.indexOf('\n', start);
-        if (end < 0) end = text.length();
-        String paragraph = text.substring(start, end);
-        start = end + 1;
-        if (paragraph.isEmpty()) {
-            if (start <= static_cast<int>(text.length())) lines.push_back("");
-            continue;
-        }
-        while (!paragraph.isEmpty() && static_cast<int>(lines.size()) < max_lines) {
-            String line;
-            std::size_t i = 0;
-            while (i < paragraph.length()) {
-                std::size_t len = 1;
-                const unsigned char c = paragraph[i];
-                if (c >= 0xF0) len = 4;
-                else if (c >= 0xE0) len = 3;
-                else if (c >= 0xC0) len = 2;
-                const String next = line + paragraph.substring(i, i + len);
-                if (g.textWidth(next) > max_px && !line.isEmpty()) break;
-                line = next;
-                i += len;
-            }
-            lines.push_back(line);
-            paragraph = paragraph.substring(i);
-        }
-    }
-    if (static_cast<int>(lines.size()) == max_lines && start < static_cast<int>(text.length())) {
-        lines.back() = fit(g, lines.back() + "…", max_px);
-    }
-    return lines;
-}
 
 // ---------------------------------------------------------------- primitives
 
@@ -176,14 +208,7 @@ void icon(Gfx& g, int x, int y, Status status, bool selected) {
     }
 }
 
-const char* page_name(Page page) {
-    switch (page) {
-        case Page::Agent: return "Agent";
-        case Page::Terminal: return "SSH";
-        case Page::Program: return "程序";
-        default: return "图形";
-    }
-}
+const char* page_name(Page page) { return page_of(page).name; }
 
 void top_bar(Gfx& screen, const Model& model) {
     // Through the strip: the bar is also redrawn on its own when a status item
@@ -331,10 +356,11 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
     g.setFont(&cjk::cn12);
     const int count = model.timeline.size();
     const int selected = cursor < 0 || cursor >= count ? count - 1 : cursor;
-    const auto rows = timeline_rows(g, model, selected);
+    static compose::PerUpdate<std::vector<Row>> layout;  // laid out once for all the bands
+    const auto& rows = layout.get(g, [&] { return timeline_rows(g, model, selected); });
     const int top = kBarHeight + 2;
-    const int footer = (!model.busy && model.pending.empty()) || !model.notice.isEmpty() ? kLine : 0;
-    const int visible = (kHeight - top - footer) / kLine;
+    const int footer_rows = (!model.busy && model.pending.empty()) || !model.notice.isEmpty() ? kLine : 0;
+    const int visible = (kHeight - top - footer_rows) / kLine;
 
     // Keep the selected entry's block in view (bottom-anchored like a chat).
     int last_row = rows.size() - 1;
@@ -379,11 +405,12 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
 
     g.fillRect(0, kBarHeight, kWidth, top - 1 - kBarHeight, kBg);
     if (mascot_on) mascot::reset_backdrop(kBg);  // rows beside it set their own colour below
-    g.setClipRect(0, region_top, kWidth, region_bottom - region_top);  // rows half out while sliding
+    compose::clip(g, 0, region_top, kWidth, region_bottom - region_top);  // rows half out while sliding
     for (int r = std::max(0, scroll_px / kLine); r < static_cast<int>(rows.size()); ++r) {
         const Row& row = rows[r];
         const int y = top + r * kLine - scroll_px;
         if (y - 1 >= region_bottom) break;
+        if (!compose::visible(g, y - 1, kLine)) continue;
         const Entry& e = model.timeline[row.entry];
         const bool sel = row.entry == selected && cursor >= 0;
         const bool attention = row.entry == count - 1 &&
@@ -410,7 +437,7 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
             mascot::set_backdrop(y - 1, kLine, bg);
             if (lit) mascot::set_backdrop(hl_top, hl_bottom - hl_top, kSurface);
             const int clip_top = std::max(y - 1, region_top);
-            g.setClipRect(0, clip_top, right, std::max(0, std::min(y - 1 + kLine, region_bottom) - clip_top));
+            compose::clip(g, 0, clip_top, right, std::max(0, std::min(y - 1 + kLine, region_bottom) - clip_top));
         }
         if (attention) g.fillRect(0, y - 1, 2, kLine, kWarn);
         else if (lit) g.fillRect(0, hl_top, 2, hl_bottom - hl_top, kAccent);
@@ -431,9 +458,9 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
             text_color(row.color);
             g.drawString(short_row ? fit(g, row.text, right - kPad - row.indent) : row.text, kPad + row.indent, y);
         }
-        if (short_row) g.setClipRect(0, region_top, kWidth, region_bottom - region_top);
+        if (short_row) compose::clip(g, 0, region_top, kWidth, region_bottom - region_top);
     }
-    g.clearClipRect();
+    compose::unclip(g);
 
     // Clear what the rows did not cover.
     const int rows_end = std::clamp(top - 1 + static_cast<int>(rows.size()) * kLine - scroll_px, region_top, region_bottom);
@@ -447,23 +474,16 @@ void draw_timeline(Gfx& g, const Model& model, bool mascot_on) {
         g.setTextColor(kMuted, kBg);
         g.drawCentreString("还没有对话", kWidth / 2, 54);
     }
-    if (footer) {
-        const int y = kHeight - kLine;
-        const int span = mascot_on ? mascot::kLeft - 2 : kWidth;  // centred left of the mascot
+    if (footer_rows) {
+        const int span = mascot_on ? mascot::kLeft - 2 : kWidth;  // left of the mascot
         if (!model.notice.isEmpty()) {
-            g.setTextColor(model.notice_error ? kDanger : kMuted, kBg);
-            g.drawCentreString(fit(g, model.notice, span - 8), span / 2, y);
+            footer(g, {model.notice, model.notice_error ? kDanger : kMuted, Align::Center}, span);
         } else if (!model.agent_draft.isEmpty()) {
-            g.setTextColor(kText, kBg);
-            // The newest segment is at the end: keep the end in view.
-            const String label = "草稿：";
-            g.drawString(label + fit_tail(g, model.agent_draft, span - 8 - 70 - g.textWidth(label)), kPad, y);
-            g.setTextColor(kMuted, kBg);
-            g.drawRightString("Enter 发送", span - 4, y);
+            // The newest segment is at the end: Left keeps the end in view.
+            footer(g, {"草稿：" + model.agent_draft, kText, Align::Left, "Enter 发送"}, span);
         } else {
-            g.setTextColor(kMuted, kBg);
-            g.drawCentreString(voice_mode == VoiceMode::Agent ? "按住 Enter 说话" : "按住 Enter 说话（只转写）",
-                               span / 2, y);
+            footer(g, {voice_mode == VoiceMode::Agent ? "按住 Enter 说话" : "按住 Enter 说话（只转写）", kMuted, Align::Center},
+                   span);
         }
     }
     if (mascot_on) mascot::push(g);
@@ -504,13 +524,36 @@ void draw_secret(Gfx& g, const Model& model) {
 
 // ---------------------------------------------------------------- detail
 
-void build_detail(const Model& model, int index) {
+int detail_visible() { return (kHeight - kBarHeight - 2 - kLine) / kLine; }
+uint32_t detail_live = 0;  // live_version() the detail was built at
+
+// One step of live_steps / a record's "live": its kind letter, then the text.
+void add_live_step(const String& step, const std::function<void(const String&, uint16_t, int)>& add) {
+    const char kind = step.isEmpty() ? 'R' : step[0];
+    const String text = step.substring(1);
+    if (kind == 'T' || kind == 'C') detail_lines.push_back({"", kBg});  // a round, a call: a gap above
+    switch (kind) {
+        case 'T': return add("想：" + text, kMuted, 6);
+        case 'S': return add(text, kText, 4);
+        case 'C': return add(text, kAccent, 2);
+        case 'W':
+        case 'X': return add(text, kWarn, 3);
+        default: return add(text, kMuted, 8);
+    }
+}
+
+// `follow`: rebuilt while open (a running entry's steps arrive): the scroll
+// stays where it was, or at the end when it was there.
+void build_detail(const Model& model, int index, bool follow = false) {
+    const int old_scroll = detail_scroll;
+    const bool at_end = old_scroll >= std::max(0, static_cast<int>(detail_lines.size()) - detail_visible());
     detail_lines.clear();
     detail_scroll = 0;
+    detail_live = live_version();
     if (index < 0 || index >= static_cast<int>(model.timeline.size())) return;
     const Entry& e = model.timeline[index];
     detail_id = e.id;
-    auto& g = M5Cardputer.Display;
+    auto& g = M5Cardputer.Display;  // measure only
     g.setFont(&cjk::cn12);
     const int w = kWidth - kPad * 2;
     auto add = [&](const String& text, uint16_t color, int max_lines) {
@@ -522,9 +565,17 @@ void build_detail(const Model& model, int index) {
     String reply = entry_reply(e.id);
     if (reply.isEmpty()) reply = e.summary;
     add(reply.isEmpty() ? String("（进行中）") : reply, e.status == Status::Failed ? kDanger : kText, 60);
-    cJSON* record = cJSON_Parse(entry_detail(e.id).c_str());
+    // Steps as they happened: in memory while the entry runs or waits, then in its record.
+    std::vector<String> live = live_steps(e.id);
+    cJSON* record = live.empty() && e.status != Status::Running ? cJSON_Parse(entry_detail(e.id).c_str()) : nullptr;
+    const cJSON* saved = nullptr;
+    const cJSON* saved_steps = record ? cJSON_GetObjectItemCaseSensitive(record, "live") : nullptr;
+    cJSON_ArrayForEach(saved, saved_steps) {
+        if (cJSON_IsString(saved)) live.push_back(saved->valuestring);
+    }
+    for (const auto& line : live) add_live_step(line, add);
     const cJSON* step = nullptr;
-    cJSON* steps = record ? cJSON_GetObjectItemCaseSensitive(record, "steps") : nullptr;
+    cJSON* steps = record && live.empty() ? cJSON_GetObjectItemCaseSensitive(record, "steps") : nullptr;  // before 0.7.5
     cJSON_ArrayForEach(step, steps) {
         detail_lines.push_back({"", kBg});
         const String decision = json_str(step, "decision");
@@ -535,6 +586,21 @@ void build_detail(const Model& model, int index) {
         add(json_str(step, "result"), kMuted, 12);
     }
     cJSON_Delete(record);
+    if (follow) {
+        const int end = std::max(0, static_cast<int>(detail_lines.size()) - detail_visible());
+        detail_scroll = at_end ? end : std::min(old_scroll, end);
+    }
+}
+
+// The open detail again when its entry has new steps, waits or finished
+// (also with the screen off: the web page reads it).
+void refresh_detail() {
+    if (view != View::Detail || live_version() == detail_live) return;
+    const Model model = snapshot();
+    for (int i = 0; i < static_cast<int>(model.timeline.size()); ++i) {
+        if (model.timeline[i].id == detail_id) return build_detail(model, i, true);
+    }
+    detail_live = live_version();
 }
 
 void draw_detail(Gfx& g, const Model& model) {
@@ -552,10 +618,11 @@ void draw_detail(Gfx& g, const Model& model) {
         g.drawString(took, kWidth - kPad - g.textWidth(took), top);
         icon(g, kWidth - kPad - g.textWidth(took) - 14, top + 1, entry->status, false);
     }
-    const int visible = (kHeight - top - kLine) / kLine;
+    const int visible = detail_visible();
     detail_scroll = std::max(0, std::min(detail_scroll, static_cast<int>(detail_lines.size()) - visible));
     for (int i = 0; i < visible && detail_scroll + i < static_cast<int>(detail_lines.size()); ++i) {
         const auto& line = detail_lines[detail_scroll + i];
+        if (!compose::visible(g, top + kLine * (i + 1), kLine)) continue;
         g.setTextColor(line.second, kBg);
         g.drawString(line.first, kPad, top + kLine * (i + 1));
     }
@@ -574,6 +641,10 @@ void draw_help(Gfx& g) {
     g.drawString(pager, kWidth - kPad - g.textWidth(pager), top);
     int y = top + kLine + 2;
     auto row = [&](const String& left, const String& right, uint16_t right_color) {
+        if (!compose::visible(g, y, kLine)) {
+            y += kLine;
+            return;
+        }
         g.setTextColor(kText, kBg);
         g.drawString(fit(g, left, 70), kPad, y);
         g.setTextColor(right_color, kBg);
@@ -600,15 +671,14 @@ void draw_help(Gfx& g) {
         const auto& hint = rows[help_cursor];
         String text = hint.name + (hint.value.isEmpty() ? String() : "：当前 " + hint.value) + "\n怎么说：“" +
                       hint.example + "”\n\n" + registry::package_help(hint.package);
-        const auto lines = wrap_text(g, text, kWidth - kPad * 2);
+        const auto lines = wrap(g, text, kWidth - kPad * 2);
         const int visible = (kHeight - y - kLine) / kLine;
         help_scroll = std::clamp(help_scroll, 0, std::max(0, static_cast<int>(lines.size()) - visible));
         for (int i = help_scroll; i < static_cast<int>(lines.size()) && i < help_scroll + visible; ++i, y += kLine) {
             g.setTextColor(i < 2 ? kText : kMuted, kBg);
             g.drawString(lines[i], kPad, y);
         }
-        g.setTextColor(kMuted, kBg);
-        g.drawRightString("; . 滚动  , 返回", kWidth - kPad, kHeight - kLine);
+        footer(g, {"; . 滚动  , 返回"});
         return;
     }
     const int visible = (kHeight - y - kLine) / kLine;
@@ -630,8 +700,7 @@ void draw_help(Gfx& g) {
         b.setTextColor(kMuted);
         b.drawString(fit(b, "“" + hint.example + "”", kWidth - x - kPad), x, ty);
     });
-    g.setTextColor(kMuted, kBg);
-    g.drawRightString("; . 选择  Enter 详情", kWidth - kPad, kHeight - kLine);
+    footer(g, {"; . 选择  Enter 详情"});
 }
 
 // ---------------------------------------------------------------- SSH page
@@ -657,12 +726,14 @@ void draw_terminal(Gfx& g, const Model& model) {
     }
     const int bottom = model.terminal_password ? kHeight - tf.line - 2 : kHeight;
     const int visible = (bottom - top) / tf.line;
-    auto lines = wrap(g, body, kWidth - 4, 200);
+    static compose::PerUpdate<std::vector<String>> wrapped;  // once for all the bands
+    const auto& lines = wrapped.get(g, [&] { return wrap(g, body, kWidth - 4, 200); });
     const int first = std::max(0, static_cast<int>(lines.size()) - visible);
     const bool offline = model.terminal_title == "未连接";
     // Each row is cleared just before it is drawn, so the screen never goes blank.
     for (int row = 0; row < visible; ++row) {
         const int y = top + row * tf.line;
+        if (!compose::visible(g, y, tf.line)) continue;
         g.fillRect(0, y, kWidth, tf.line, kBg);
         const int i = first + row;
         if (i >= static_cast<int>(lines.size())) continue;
@@ -688,6 +759,7 @@ void wake_screen() {
         M5Cardputer.Display.setBrightness(config::get().brightness);
         screen_on = true;
         drawn_version = UINT32_MAX;
+        compose::invalidate();
     }
     note_activity();
 }
@@ -738,10 +810,7 @@ constexpr int kProgramTop = kBarHeight + 3;  // the first text row
 constexpr int kProgramRows = (kHeight - kLine - kProgramTop + 1) / kLine;
 
 void program_footer(Gfx& screen, const String& text, uint16_t color) {
-    band(screen, kHeight - kLine, kLine, kBg, [&](Gfx& g, int top) {
-        g.setTextColor(color, kBg);
-        g.drawString(fit_tail(g, text, kWidth - kPad * 2), kPad, top);
-    });
+    footer(screen, {text, color, Align::Left});
 }
 
 void draw_program_list(Gfx& g) {
@@ -785,15 +854,19 @@ void draw_program_list(Gfx& g) {
 
 void draw_console(Gfx& g) {
     const console::View v = console::view();
-    std::vector<std::pair<String, bool>> rows;  // display rows: text, error
     g.setFont(&cjk::cn12);
-    for (const auto& line : v.lines) {
-        if (line.text.isEmpty()) {
-            rows.push_back({String(), line.error});
-            continue;
+    static compose::PerUpdate<std::vector<std::pair<String, bool>>> wrapped;  // display rows: text, error
+    const auto& rows = wrapped.get(g, [&] {
+        std::vector<std::pair<String, bool>> out;
+        for (const auto& line : v.lines) {
+            if (line.text.isEmpty()) {
+                out.push_back({String(), line.error});
+                continue;
+            }
+            for (auto& part : wrap(g, line.text, kWidth - kPad * 2)) out.push_back({std::move(part), line.error});
         }
-        for (const auto& part : wrap_text(g, line.text, kWidth - kPad * 2)) rows.push_back({part, line.error});
-    }
+        return out;
+    });
     const int total = rows.size();
     output_scroll = std::clamp(output_scroll, 0, std::max(0, total - kProgramRows));
     const int first = std::max(0, total - kProgramRows - output_scroll);
@@ -828,24 +901,12 @@ void draw_program_page(bool force, uint32_t version_now) {
     drawn_version = version_now;
     console_drawn = console_now;
     console_second = second;
-    Gfx& g = M5Cardputer.Display;
-    g.startWrite();
-    g.setTextWrap(false, false);
-    // Coming from another page (the Agent page leaves its stage line at the
-    // bottom) or between list and console: start from a clear screen once.
-    const int layout = program_list ? 1 : 2;
-    if (layout != program_layout) {
-        g.fillScreen(kBg);
-        program_layout = layout;
-    }
-    top_bar(g, snapshot());
-    // The strips the rows and the footer do not cover.
-    g.fillRect(0, kBarHeight, kWidth, kProgramTop - 1 - kBarHeight, kBg);
-    const int rows_end = kProgramTop - 1 + kProgramRows * kLine;
-    g.fillRect(0, rows_end, kWidth, kHeight - kLine - rows_end, kBg);
-    if (program_list) draw_program_list(g);
-    else draw_console(g);
-    g.endWrite();
+    const Model model = snapshot();
+    compose::frame([&](Gfx& g) {
+        top_bar(g, model);
+        if (program_list) draw_program_list(g);
+        else draw_console(g);
+    });
 }
 
 String key_name(const Keyboard_Class::KeysState& state) {
@@ -950,96 +1011,80 @@ mascot::State mascot_state(const Model& model) {
     return mascot::State::Understand;
 }
 
-void render(bool force = false) {
+void render(bool force) {
     if (!screen_on) return;
     if (settings::active()) {
         settings::draw(force);
         return;
     }
-    if (current_page == Page::Graphics) {
-        if (overlay::open()) {
-            overlay::draw(force);
-            return;
-        }
-        switch_page(previous_page);  // its picture closed meanwhile
-        force = true;
-    }
-    if (current_page == Page::Program && view == View::List) {
-        draw_program_page(force, version());
+    page_of(current_page).render(force);
+}
+
+void graphics_render(bool force) {
+    if (overlay::open()) {
+        overlay::draw(force);
         return;
     }
+    switch_page(previous_page);  // its picture closed meanwhile
+    render(true);
+}
+
+void program_render(bool force) {
+    if (view == View::List) draw_program_page(force, version());
+    else render_views(force);  // help over the program page
+}
+
+void agent_paint(Gfx& t, const Model& model) {
+    const bool secret = secret_active(model);
+    draw_timeline(t, model, mascot_live);
+    if (secret) draw_secret(t, model);
+}
+
+void terminal_paint(Gfx& t, const Model& model) { draw_terminal(t, model); }
+
+// The pages drawn from the model: the list view of a page (its paint), help
+// and the Agent page's detail over any of them.
+void render_views(bool force) {
     // The highlight or the rows move: redraw them each frame.
     if (timeline_sliding() || help_bar.sliding() || help_list_scroll.sliding()) force = true;
     const uint32_t current = version();
-    // Mascot frames: a 32x32 push of a frame read beforehand, nothing else redrawn.
+    // Mascot frames: its corner only.
     if (!force && current == drawn_version && mascot_live && mascot::due() && mascot::load()) {
-        Gfx& g = M5Cardputer.Display;
-        g.startWrite();
-        mascot::push(g);
-        g.endWrite();
+        compose::area({mascot::kLeft, mascot::kTop, mascot::kSize, mascot::kSize}, [](Gfx& g) { mascot::push(g); });
     }
     // A status item changed on its own (the minute, the battery): the bar only.
     if (!force && current == drawn_version && status::changed()) {
-        Gfx& g = M5Cardputer.Display;
-        g.startWrite();
-        top_bar(g, snapshot());
-        g.endWrite();
+        const Model model = snapshot();
+        compose::area({0, 0, kWidth, kBarHeight}, [&](Gfx& g) { top_bar(g, model); }, kSurface);
     }
     const bool animating = (is_busy() || has_pending()) && millis() - last_draw > 400;
     if (!force && current == drawn_version && !animating) return;
-    Gfx& g = M5Cardputer.Display;
     last_draw = millis();
     if (!force && current == drawn_version) {  // animation frame: only the stage dot changes
         if (stage_dot.valid && current_page == Page::Agent && view == View::List) {
-            g.startWrite();
-            g.fillCircle(stage_dot.x, stage_dot.y, 1, (millis() / 400) % 2 ? kAccent : stage_dot.bg);
-            g.endWrite();
+            const StageDot dot = stage_dot;
+            compose::area({dot.x - 1, dot.y - 1, 3, 3}, [&](Gfx& g) {
+                if ((millis() / 400) % 2) g.fillCircle(dot.x, dot.y, 1, kAccent);
+            }, dot.bg);
         }
         return;
     }
     const Model model = snapshot();
     drawn_version = current;
     stage_dot.valid = false;
-    // Leaving help for the terminal page: the terminal only overwrites its rows.
-    static bool shown_help = false;
-    const bool last_drawn_help = shown_help;
-    shown_help = view == View::Help;
-    const bool timeline = view != View::Help && current_page != Page::Terminal && view != View::Detail;
-    const bool secret = timeline && secret_active(model);
-    mascot_live = timeline && !secret && mascot::enabled();
-    if (mascot_live) {  // the card is read before the display transaction starts
+    const PageSpec& page = page_of(current_page);
+    const bool timeline = view == View::List && current_page == Page::Agent;  // the mascot keeps the timeline company
+    mascot_live = timeline && !secret_active(model) && mascot::enabled();
+    if (mascot_live) {  // the card is read before the screen is composed
         mascot::request(mascot_state(model));
         mascot_live = mascot::load();
     }
-    // No full-screen sprite (64 KB): drawn directly, the timeline row by row
-    // without blanking first.
-    // Pages that are not drawn row by row are cleared when their layout
-    // changes, not on every redraw (help flashed at every key).
-    static int drawn_layout = -1;
-    int layout = static_cast<int>(current_page) * 16 + static_cast<int>(view) * 4;
-    if (view == View::Help) layout = layout * 256 + help_page * 2 + (help_detail ? 1 : 0) + (help_detail ? help_scroll * 8 : 0);
-    if (view == View::Detail) layout = layout * 4096 + detail_scroll;
-    const bool clear = !timeline && current_page != Page::Terminal && layout != drawn_layout;
-    drawn_layout = layout;
-    const auto paint = [&](Gfx& t) {
-        if (clear) t.fillScreen(kBg);  // the terminal clears row by row
-        t.setTextWrap(false, false);
+    compose::frame([&](Gfx& t) {
         top_bar(t, model);
-        if (view == View::Help) {
-            draw_help(t);
-        } else if (current_page == Page::Terminal) {
-            if (last_drawn_help) t.fillScreen(kBg);
-            draw_terminal(t, model);
-        } else if (view == View::Detail) {
-            draw_detail(t, model);
-        } else {
-            draw_timeline(t, model, mascot_live);
-            if (secret) draw_secret(t, model);
-        }
-    };
-    g.startWrite();
-    paint(g);
-    g.endWrite();
+        if (view == View::Help) draw_help(t);
+        else if (view == View::Detail) draw_detail(t, model);
+        else if (page.paint) page.paint(t, model);
+    });
 }
 
 // Page side of a recording: the screen is on and current before the meter
@@ -1048,7 +1093,7 @@ bool record(bool (*held)()) {
     wake_screen();
     render(true);
     if (mascot_live) {  // the meter strip covers only part of the corner: hide it while recording
-        M5Cardputer.Display.fillRect(mascot::kLeft, mascot::kTop, mascot::kSize, mascot::kSize, kBg);
+        compose::area({mascot::kLeft, mascot::kTop, mascot::kSize, mascot::kSize}, [](Gfx&) {});
         mascot_live = false;
     }
     const bool ok = recorder::record(held);
@@ -1073,36 +1118,65 @@ void submit_or_busy(const worker::Job& job) {
     if (worker::submit(job) == 0) set_notice("正在处理上一个任务，` 可取消");
 }
 
-void switch_page(Page next) {
-    if (next == Page::Graphics && !overlay::open()) return;
-    if (current_page == Page::Graphics && next != Page::Graphics) overlay::suspend();
-    if (next == Page::Graphics && current_page != Page::Graphics) previous_page = current_page;
-    if (next == Page::Program && current_page != Page::Program) {
-        // Drawn now from the cache; loop() refreshes it a frame later if needed.
-        if (!program_items_loaded || programs::generation() != program_items_gen ||
-            console::head().started != program_items_run || millis() - program_items_at > 60000) {
-            program_items_stale = true;
-        }
-        program_layout = -1;  // drawn from a clear screen
-    }
-    if (next != current_page) timeline_scroll.reset();
-    current_page = next;
-    view = View::List;
-    drawn_version = UINT32_MAX;
-    if (next == Page::Terminal && !worker::busy() && draft_empty()) {
-        worker::submit({worker::Kind::TerminalObserve});
-        last_terminal_refresh = millis();
+bool graphics_open() { return overlay::open(); }
+
+void graphics_enter(Page from) {
+    if (from != Page::Graphics) previous_page = from;  // where closing the picture returns to
+}
+
+void graphics_leave() { overlay::suspend(); }
+
+void program_enter(Page from) {
+    if (from == Page::Program) return;
+    // Drawn now from the cache; loop() refreshes it a frame later if needed.
+    if (!program_items_loaded || programs::generation() != program_items_gen ||
+        console::head().started != program_items_run || millis() - program_items_at > 60000) {
+        program_items_stale = true;
     }
 }
 
-// Btn0: Agent, SSH, program, graphics (only while a picture is open), Agent…
-Page next_page() {
-    switch (current_page) {
-        case Page::Agent: return Page::Terminal;
-        case Page::Terminal: return Page::Program;
-        case Page::Program: return overlay::open() ? Page::Graphics : Page::Agent;
-        default: return Page::Agent;
+// Off the page the list goes: its names and descriptions are a few KB that a
+// task's SSH or TLS work needs more (S8 heap_low_water).  Entering shows
+// 读取中… for a frame and reads it again.
+void program_leave() {
+    std::vector<ProgramItem>().swap(program_items);
+    program_items_loaded = false;
+    program_items_stale = true;
+    delete_pending = -1;
+}
+
+void terminal_enter(Page) {
+    if (worker::busy() || !draft_empty()) return;
+    worker::submit({worker::Kind::TerminalObserve});
+    last_terminal_refresh = millis();
+}
+
+void switch_page(Page next) {
+    const PageSpec& to = page_of(next);
+    if (to.can_enter && !to.can_enter()) return;
+    const Page from = current_page;
+    if (next != from) {
+        const PageSpec& leaving = page_of(from);
+        if (leaving.leave) leaving.leave();
+        timeline_scroll.reset();
     }
+    current_page = next;
+    view = View::List;
+    drawn_version = UINT32_MAX;
+    if (to.enter) to.enter(from);
+}
+
+// Btn0: the pages in table order, skipping those that cannot be entered now
+// (the graphics page without a picture).
+Page next_page() {
+    const int count = static_cast<int>(sizeof(kPages) / sizeof(kPages[0]));
+    int at = 0;
+    while (at < count && kPages[at].id != current_page) ++at;
+    for (int step = 1; step <= count; ++step) {
+        const PageSpec& page = kPages[(at + step) % count];
+        if (!page.can_enter || page.can_enter()) return page.id;
+    }
+    return current_page;
 }
 
 void send_terminal(const String& text, std::vector<String> keys, bool submit) {
@@ -1127,7 +1201,12 @@ void open_detail() {
     const Model model = snapshot();
     const int count = model.timeline.size();
     if (count == 0) return;
-    build_detail(model, cursor < 0 || cursor >= count ? count - 1 : cursor);
+    const int index = cursor < 0 || cursor >= count ? count - 1 : cursor;
+    build_detail(model, index);
+    const Status status = model.timeline[index].status;
+    if (status == Status::Running || status == Status::Confirm || status == Status::Secret) {
+        detail_scroll = INT32_MAX / 2;  // a task under way: open at its newest step (draw_detail clamps)
+    }
     view = View::Detail;
     drawn_version = UINT32_MAX;
 }
@@ -1183,6 +1262,145 @@ void handle_keys() {
     dispatch_keys(state);
 }
 
+// A picture is up: a running program reads its keys, a panel takes its own,
+// any other key closes it (a running program's picture stays until it ends).
+bool graphics_modal(const Keyboard_Class::KeysState& state, const Model&, bool) {
+    if (!overlay::open()) return false;
+    if (console::waiting() == console::Wait::Key) {  // vat.key
+        const String name = key_name(state);
+        if (!name.isEmpty()) console::key(name);
+        return true;
+    }
+    if (console::active() && has_char(state, '`')) {
+        action("cancel");
+        return true;
+    }
+    if (overlay::is_panel()) {
+        if (overlay::panel_key(state)) dismiss_overlay();
+        else overlay::draw(false);
+        return true;
+    }
+    if (!console::active()) dismiss_overlay();
+    return true;
+}
+
+// Masked secret input takes every key while it is open.
+bool agent_modal(const Keyboard_Class::KeysState& state, const Model& model, bool esc) {
+    if (!secret_active(model) || view != View::List) return false;
+    if (state.fn && has_char(state, 's')) secret_reveal = !secret_reveal;
+    else if (esc) submit_secret(true);
+    else if (state.enter) submit_secret(false);
+    else if (state.del) erase_last(secret_buffer);
+    else for (const char c : state.word) secret_buffer += c;
+    drawn_version = UINT32_MAX;
+    return true;
+}
+
+void agent_fn(const Keyboard_Class::KeysState& state, const Model& model, bool busy) {
+    if (state.tab) voice_mode = voice_mode == VoiceMode::Agent ? VoiceMode::Text : VoiceMode::Agent;
+    else if (state.enter && !busy && model.pending.empty()) {
+        // A segment into the draft; Enter alone sends the draft.
+        if (record(enter_held)) submit_or_busy({worker::Kind::DraftPcm, "agent", "/vat/cache/ptt.pcm"});
+    }
+    else if (has_char(state, 'l')) open_detail();
+    else if (has_char(state, 'j')) close_overlay();
+    else if (state.del) { agent::clear_history(); set_notice("对话记忆已清空"); }
+}
+
+void terminal_fn(const Keyboard_Class::KeysState& state, const Model& model, bool busy) {
+    if (has_char(state, '=') || has_char(state, '-')) {
+        static const uint8_t sizes[] = {10, 12, 14};
+        const uint8_t now = config::get().terminal_font;
+        int index = now == 10 ? 0 : now == 14 ? 2 : 1;
+        index = constrain(index + (has_char(state, '=') ? 1 : -1), 0, 2);
+        config::get().terminal_font = sizes[index];
+        config::save_ui_number("terminal_font", sizes[index]);
+        apply_terminal_size();
+        render(true);
+        if (!busy) worker::submit({worker::Kind::TerminalObserve});  // the remote window follows
+    }
+    else if (has_char(state, 'v')) set_draft(model.terminal_draft + local::clipboard());
+    else if (has_char(state, 'r') && !busy) worker::submit({worker::Kind::TerminalObserve});
+    else if (has_char(state, ';')) send_terminal("", {"up"}, false);
+    else if (has_char(state, '.')) send_terminal("", {"down"}, false);
+    else if (state.enter && !busy) {
+        if (record(enter_held)) submit_or_busy({worker::Kind::DraftPcm, "", "/vat/cache/ptt.pcm"});
+    }
+}
+
+void agent_key(const Keyboard_Class::KeysState& state, const Model& model, bool busy, bool esc) {
+    if (view == View::Detail) {
+        if (has_char(state, ';')) detail_scroll -= 3;
+        else if (has_char(state, '.')) detail_scroll += 3;
+        else if (has_char(state, ',')) close_overlay();
+        drawn_version = UINT32_MAX;
+        return;
+    }
+    if (!model.pending.empty() && (!busy || worker::asking())) {
+        if (has_char(state, 'y')) { action("approve"); return; }
+        if (has_char(state, 'n')) { action("reject"); return; }
+        if (has_char(state, 'a')) { action("approve_all"); return; }
+    }
+    if (!model.agent_draft.isEmpty() && !busy && model.pending.empty()) {
+        if (state.enter) {
+            cursor = -1;
+            submit_or_busy({worker::Kind::AgentText, take_agent_draft()});
+            return;
+        }
+        if (esc) { take_agent_draft(); return; }
+        if (state.del) {
+            String draft = model.agent_draft;
+            erase_last(draft);
+            set_agent_draft(draft);
+            return;
+        }
+    }
+    if (has_char(state, ';')) { move_cursor(-1); return; }
+    if (has_char(state, '.')) { move_cursor(1); return; }
+    if (has_char(state, '/')) { open_detail(); return; }
+    if (has_char(state, ',')) { cursor = -1; drawn_version = UINT32_MAX; return; }
+    if (state.enter && !busy && model.pending.empty()) {
+        cursor = -1;
+        const bool text_mode = voice_mode == VoiceMode::Text;
+        if (record(enter_held)) {
+            submit_or_busy({text_mode ? worker::Kind::TranscribePcm : worker::Kind::AgentPcm, "",
+                            "/vat/cache/ptt.pcm"});
+        }
+    }
+}
+
+// The SSH page: the keyboard types into the remote terminal.  The draft is
+// local, so typing never waits for the 5 s screen refresh; sending queues
+// behind it (the worker queue holds two jobs).
+void terminal_key(const Keyboard_Class::KeysState& state, const Model& model, bool, bool esc) {
+    if (state.ctrl && has_char(state, 'c')) { send_terminal("", {"ctrl_c"}, false); return; }
+    if (esc) { send_terminal("", {"esc"}, false); return; }
+    if (state.tab) { send_terminal("", {"tab"}, false); return; }
+    String draft = model.terminal_draft;
+    if (state.enter) {
+        worker::Job job;
+        job.kind = worker::Kind::TerminalInput;
+        job.text = draft;  // a password draft is never displayed or logged
+        job.submit = true;
+        if (worker::submit(job)) take_draft();
+        else set_notice("终端忙，稍后再按 Enter（草稿还在）");
+        return;
+    }
+    if (state.del) {
+        if (draft.isEmpty()) send_terminal("", {"backspace"}, false);
+        else {
+            erase_last(draft);
+            set_draft(draft);
+        }
+        return;
+    }
+    for (const char c : state.word) draft += c;
+    if (!state.word.empty()) set_draft(draft);
+}
+
+void program_page_key(const Keyboard_Class::KeysState& state, const Model&, bool, bool esc) { program_key(state, esc); }
+
+// The keys every page shares; the rest go to the page (kPages).
 void dispatch_keys(const Keyboard_Class::KeysState& state) {
     if (!screen_on) {
         wake_screen();
@@ -1190,44 +1408,16 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
         if (!state.enter) return;
     }
     note_activity();
-    if (current_page == Page::Graphics && overlay::open() && !settings::active()) {
-        if (console::waiting() == console::Wait::Key) {  // a running program reads its keys (vat.key)
-            const String name = key_name(state);
-            if (!name.isEmpty()) console::key(name);
-            return;
-        }
-        if (console::active() && has_char(state, '`')) {
-            action("cancel");
-            return;
-        }
-        if (overlay::is_panel()) {
-            if (overlay::panel_key(state)) dismiss_overlay();
-            else overlay::draw(false);
-            return;
-        }
-        if (console::active()) return;  // a running program's picture stays until it ends
-        dismiss_overlay();
-        return;
-    }
     if (settings::active()) {
         settings::handle(state);
         if (!settings::active()) drawn_version = UINT32_MAX;  // closed: redraw the page
         return;
     }
+    const PageSpec& page = page_of(current_page);
     const Model model = snapshot();
     const bool busy = worker::busy();
     const bool esc = has_char(state, '`');
-
-    // Masked secret input takes every key while it is open.
-    if (secret_active(model) && view == View::List) {
-        if (state.fn && has_char(state, 's')) secret_reveal = !secret_reveal;
-        else if (esc) submit_secret(true);
-        else if (state.enter) submit_secret(false);
-        else if (state.del) erase_last(secret_buffer);
-        else for (const char c : state.word) secret_buffer += c;
-        drawn_version = UINT32_MAX;
-        return;
-    }
+    if (page.modal && page.modal(state, model, esc)) return;
     if (esc && view == View::Help && help_detail) {  // back to the list first
         help_detail = false;
         drawn_version = UINT32_MAX;
@@ -1244,18 +1434,6 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
     if (state.fn) {
         if (state.space) sleep_screen();
         else if (has_char(state, 'h')) { view = view == View::Help ? View::List : View::Help; help_page = 0; help_cursor = 0; help_detail = false; }
-        else if (state.tab && current_page == Page::Agent) voice_mode = voice_mode == VoiceMode::Agent ? VoiceMode::Text : VoiceMode::Agent;
-        else if ((has_char(state, '=') || has_char(state, '-')) && current_page == Page::Terminal) {
-            static const uint8_t sizes[] = {10, 12, 14};
-            const uint8_t now = config::get().terminal_font;
-            int index = now == 10 ? 0 : now == 14 ? 2 : 1;
-            index = constrain(index + (has_char(state, '=') ? 1 : -1), 0, 2);
-            config::get().terminal_font = sizes[index];
-            config::save_ui_number("terminal_font", sizes[index]);
-            apply_terminal_size();
-            render(true);
-            if (!busy) worker::submit({worker::Kind::TerminalObserve});  // the remote window follows
-        }
         else if (has_char(state, 'w')) enter_setup("设置");
         else if (has_char(state, 'a')) {  // the program page, at its list unless a program is running
             switch_page(Page::Program);
@@ -1264,20 +1442,7 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
                 program_items_stale = true;
             }
         }
-        else if (state.enter && current_page == Page::Agent && !busy && model.pending.empty()) {
-            // A segment into the draft; Enter alone sends the draft.
-            if (record(enter_held)) submit_or_busy({worker::Kind::DraftPcm, "agent", "/vat/cache/ptt.pcm"});
-        }
-        else if (has_char(state, 'l') && current_page == Page::Agent) open_detail();
-        else if (has_char(state, 'j') && current_page == Page::Agent) close_overlay();
-        else if (has_char(state, 'v') && current_page == Page::Terminal) set_draft(model.terminal_draft + local::clipboard());
-        else if (has_char(state, 'r') && current_page == Page::Terminal && !busy) worker::submit({worker::Kind::TerminalObserve});
-        else if (has_char(state, ';') && current_page == Page::Terminal) send_terminal("", {"up"}, false);
-        else if (has_char(state, '.') && current_page == Page::Terminal) send_terminal("", {"down"}, false);
-        else if (state.del && current_page == Page::Agent) { agent::clear_history(); set_notice("对话记忆已清空"); }
-        else if (state.enter && current_page == Page::Terminal && !busy) {
-            if (record(enter_held)) submit_or_busy({worker::Kind::DraftPcm, "", "/vat/cache/ptt.pcm"});
-        }
+        else if (page.fn_key) page.fn_key(state, model, busy);
         drawn_version = UINT32_MAX;
         return;
     }
@@ -1315,77 +1480,7 @@ void dispatch_keys(const Keyboard_Class::KeysState& state) {
         drawn_version = UINT32_MAX;
         return;
     }
-    if (current_page == Page::Program) {
-        program_key(state, esc);
-        return;
-    }
-    if (current_page == Page::Agent) {
-        if (view == View::Detail) {
-            if (has_char(state, ';')) detail_scroll -= 3;
-            else if (has_char(state, '.')) detail_scroll += 3;
-            else if (has_char(state, ',')) close_overlay();
-            drawn_version = UINT32_MAX;
-            return;
-        }
-        if (!model.pending.empty() && (!busy || worker::asking())) {
-            if (has_char(state, 'y')) { action("approve"); return; }
-            if (has_char(state, 'n')) { action("reject"); return; }
-            if (has_char(state, 'a')) { action("approve_all"); return; }
-        }
-        if (!model.agent_draft.isEmpty() && !busy && model.pending.empty()) {
-            if (state.enter) {
-                cursor = -1;
-                submit_or_busy({worker::Kind::AgentText, take_agent_draft()});
-                return;
-            }
-            if (esc) { take_agent_draft(); return; }
-            if (state.del) {
-                String draft = model.agent_draft;
-                erase_last(draft);
-                set_agent_draft(draft);
-                return;
-            }
-        }
-        if (has_char(state, ';')) { move_cursor(-1); return; }
-        if (has_char(state, '.')) { move_cursor(1); return; }
-        if (has_char(state, '/')) { open_detail(); return; }
-        if (has_char(state, ',')) { cursor = -1; drawn_version = UINT32_MAX; return; }
-        if (state.enter && !busy && model.pending.empty()) {
-            cursor = -1;
-            const bool text_mode = voice_mode == VoiceMode::Text;
-            if (record(enter_held)) {
-                submit_or_busy({text_mode ? worker::Kind::TranscribePcm : worker::Kind::AgentPcm, "",
-                                "/vat/cache/ptt.pcm"});
-            }
-        }
-        return;
-    }
-    // SSH page: the keyboard types into the remote terminal.  The draft is
-    // local, so typing never waits for the 5 s screen refresh; sending queues
-    // behind it (the worker queue holds two jobs).
-    if (state.ctrl && has_char(state, 'c')) { send_terminal("", {"ctrl_c"}, false); return; }
-    if (esc) { send_terminal("", {"esc"}, false); return; }
-    if (state.tab) { send_terminal("", {"tab"}, false); return; }
-    String draft = model.terminal_draft;
-    if (state.enter) {
-        worker::Job job;
-        job.kind = worker::Kind::TerminalInput;
-        job.text = draft;  // a password draft is never displayed or logged
-        job.submit = true;
-        if (worker::submit(job)) take_draft();
-        else set_notice("终端忙，稍后再按 Enter（草稿还在）");
-        return;
-    }
-    if (state.del) {
-        if (draft.isEmpty()) send_terminal("", {"backspace"}, false);
-        else {
-            erase_last(draft);
-            set_draft(draft);
-        }
-        return;
-    }
-    for (const char c : state.word) draft += c;
-    if (!state.word.empty()) set_draft(draft);
+    if (page.key) page.key(state, model, busy, esc);
 }
 
 void apply_hardware_requests() {
@@ -1400,25 +1495,30 @@ void apply_hardware_requests() {
         else sleep_screen();
     }
     hw::play_pending_beeps();  // between recordings: speaker and microphone share I2S
+    // A foreground run started: its console.  Before the overlay, so a run that
+    // draws (gfx.present) in the same loop ends on its picture, not under it.
+    if (console::take_show_request()) {
+        if (current_page != Page::Program) switch_page(Page::Program);
+        program_list = false;
+        output_scroll = 0;
+        drawn_version = UINT32_MAX;
+        wake_screen();
+    }
     Overlay incoming;
     settings::poll();
     if (take_overlay(incoming)) {
         if (incoming.kind == Overlay::Kind::None) {
             if (overlay::open()) dismiss_overlay();
         } else {
+            const bool raise = incoming.raise;
             const bool fresh = overlay::show(std::move(incoming));
-            if (fresh && !settings::active()) switch_page(Page::Graphics);  // a refresh leaves you where you are
+            if ((fresh || raise) && !settings::active() && current_page != Page::Graphics) {
+                switch_page(Page::Graphics);  // a refresh leaves you where you are
+            }
             if (current_page == Page::Graphics) drawn_version = UINT32_MAX;
             wake_screen();
             note_activity();
         }
-    }
-    if (console::take_show_request()) {  // a foreground run started: its console
-        if (current_page != Page::Program) switch_page(Page::Program);
-        program_list = false;
-        output_scroll = 0;
-        drawn_version = UINT32_MAX;
-        wake_screen();
     }
     const console::Wait wait = console::waiting();
     if (wait == console::Wait::Line && current_page == Page::Graphics) {  // typing needs the console
@@ -1491,6 +1591,21 @@ String action(const String& name) {
         set_notice("对话记忆已清空");
     }
     else if (name == "mic_test") return recorder::mic_test();
+    else if (name == "compose_bench") {  // how long the current page takes to compose (V075_PLAN E0)
+        if (settings::active() || current_page == Page::Graphics) return "only on Agent, SSH or program pages";
+        auto run = [](bool push_all) {
+            const uint32_t started = millis();
+            for (int i = 0; i < 10; ++i) {
+                if (push_all) compose::invalidate();
+                render(true);
+            }
+            return (millis() - started) / 10.0f;
+        };
+        const float pushed = run(true);
+        const float skipped = run(false);
+        return "{\"page\":\"" + String(page_name(current_page)) + "\",\"push_all_ms\":" + String(pushed, 1) +
+               ",\"unchanged_ms\":" + String(skipped, 1) + ",\"display\":" + compose::stats_json() + "}";
+    }
     else if (name == "record_test") {
         if (worker::busy()) return "busy";
         simulated_release_ms = millis() + 2000;
@@ -1528,35 +1643,50 @@ String press(const String& spec) {
     return "ok";
 }
 
-String screen_text() {
-    const Model model = snapshot();
-    cJSON* root = cJSON_CreateObject();
-    const char* view_name = view == View::Help ? "help" : view == View::Detail ? "detail"
-                            : secret_active(model) ? "secret" : "list";
-    static const char* const kPageIds[] = {"agent", "ssh", "program", "graphics"};
-    cJSON_AddStringToObject(root, "page", kPageIds[static_cast<int>(current_page)]);
-    cJSON_AddStringToObject(root, "view", view_name);
-    const char* mascot_name = mascot::describe();  // read-only: this runs on the web task
-    cJSON_AddStringToObject(root, "mascot", mascot_live || strcmp(mascot_name, "off") == 0 ? mascot_name : "hidden");
-    String header = current_page == Page::Terminal ? "SSH " + model.terminal_title : String(page_name(current_page));
-    if (current_page == Page::Program) header += " " + console::head().name;
-    cJSON_AddStringToObject(root, "header", header.c_str());
-    cJSON_AddStringToObject(root, "status", status::line().c_str());  // the top bar's items
-    cJSON_AddStringToObject(root, "notice", model.notice.c_str());  // the bottom line ("" when none)
+namespace {  // the pages' web screen model (declared with the page table)
+
+String plain_header(const Model&) { return page_name(current_page); }
+String terminal_header(const Model& model) { return "SSH " + model.terminal_title; }
+String program_header(const Model&) { return String(page_name(current_page)) + " " + console::head().name; }
+
+String agent_body(const Model& model) {
     String body;
-    if (current_page == Page::Terminal) {
-        body = model.terminal_text;
-    } else if (current_page == Page::Program) {
-        if (program_list) {
-            for (const auto& item : program_items) body += String(item.app ? "[应用] " : "[程序] ") + item.name + "\n";
-        } else {
-            for (const auto& line : console::view().lines) body += line.text + "\n";
-        }
-    } else if (view == View::Detail) {
+    if (view == View::Detail) {
         for (const auto& line : detail_lines) body += line.first + "\n";
     } else {
         for (const auto& e : model.timeline) body += e.time + " " + e.text + " | " + e.summary + "\n";
     }
+    return body;
+}
+
+String terminal_body(const Model& model) { return model.terminal_text; }
+
+String program_body(const Model&) {
+    String body;
+    if (program_list) {
+        for (const auto& item : program_items) body += String(item.app ? "[应用] " : "[程序] ") + item.name + "\n";
+    } else {
+        for (const auto& line : console::view().lines) body += line.text + "\n";
+    }
+    return body;
+}
+
+}  // namespace
+
+String screen_text() {
+    const Model model = snapshot();
+    const PageSpec& page = page_of(current_page);
+    cJSON* root = cJSON_CreateObject();
+    const char* view_name = view == View::Help ? "help" : view == View::Detail ? "detail"
+                            : secret_active(model) ? "secret" : "list";
+    cJSON_AddStringToObject(root, "page", page.web_id);
+    cJSON_AddStringToObject(root, "view", view_name);
+    const char* mascot_name = mascot::describe();  // read-only: this runs on the web task
+    cJSON_AddStringToObject(root, "mascot", mascot_live || strcmp(mascot_name, "off") == 0 ? mascot_name : "hidden");
+    cJSON_AddStringToObject(root, "header", page.header(model).c_str());
+    cJSON_AddStringToObject(root, "status", status::line().c_str());  // the top bar's items
+    cJSON_AddStringToObject(root, "notice", model.notice.c_str());  // the bottom line ("" when none)
+    const String body = view == View::Detail ? agent_body(model) : page.body ? page.body(model) : String();
     cJSON_AddStringToObject(root, "body", body.c_str());
     cJSON_AddNumberToObject(root, "entries", model.timeline.size());
     cJSON_AddNumberToObject(root, "cursor", cursor);
@@ -1611,6 +1741,7 @@ void loop() {
         worker::submit({worker::Kind::TerminalObserve});
     }
     if (worker::busy()) note_activity();
+    refresh_detail();
     render();
     // A program saved or removed while the page is open (the agent wrote one): the
     // list was only checked when the page was entered.
@@ -1618,7 +1749,7 @@ void loop() {
         program_items_stale = true;
     }
     // The program list, once the page (from the cache) is on screen.
-    if (current_page == Page::Program && program_list && program_items_stale && program_layout != -1 &&
+    if (current_page == Page::Program && program_list && program_items_stale &&
         !settings::active()) {
         refresh_program_items();
         drawn_version = UINT32_MAX;

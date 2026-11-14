@@ -27,6 +27,7 @@ namespace vat::worker {
 namespace {
 
 void agent_stage(const String& stage);
+const agent::Progress kAgentProgress{agent_stage, ui::entry_step};  // the record shows each step live
 void heap_mark(const String& next);  // below: records each step's heap low, then shows the stage
 
 constexpr uint32_t kStackBytes = 24576;  // peak 15.4-16 KB (libssh + mbedTLS, full E2E); 1.5x headroom (was 32 KB)
@@ -208,22 +209,8 @@ String steps_json(const std::vector<agent::Call>& calls) {
     cJSON* list = cJSON_CreateArray();
     for (const auto& call : calls) {
         if (call.decision == "discover") continue;
-        cJSON* args = cJSON_Parse(call.arguments.c_str());
-        String what = call.name;
-        const String target = json_str(args, "target");
-        if (!target.isEmpty()) what += " " + target;
-        if (call.name == "exec") {
-            what += " $ " + json_str(args, "program");
-            const cJSON* item = nullptr;
-            cJSON_ArrayForEach(item, cJSON_GetObjectItemCaseSensitive(args, "args")) {
-                if (cJSON_IsString(item)) what += String(" ") + item->valuestring;
-            }
-        } else if (call.name == "session") {
-            what += " " + json_str(args, "action");
-        }
-        cJSON_Delete(args);
         cJSON* step = cJSON_CreateObject();
-        cJSON_AddStringToObject(step, "what", utf8_head(what, 160).c_str());
+        cJSON_AddStringToObject(step, "what", agent::describe_call(call.name, call.arguments).c_str());
         cJSON_AddStringToObject(step, "decision", call.decision.c_str());
         cJSON_AddStringToObject(step, "result", utf8_head(call.result, 600).c_str());
         cJSON_AddItemToArray(list, step);
@@ -266,7 +253,7 @@ void run_agent(uint32_t id, const String& transcript) {
     task_transcript = transcript;
     ui::set_stage("THINK");
     update(id, [&](Record& record) { record.transcript = transcript; });
-    const auto outcome = agent::run(transcript, agent_stage);
+    const auto outcome = agent::run(transcript, kAgentProgress);
     finish_agent(id, outcome);
     if (!outcome.paused) agent::maintain();  // the answer is already on screen
 }
@@ -428,7 +415,7 @@ void handle(uint32_t id, Job& job) {
             ui::set_stage("RUN");
             update(id, [&](Record& record) { record.transcript = task_transcript; });
             const auto outcome =
-                agent::resume(answer, job.text, agent_stage);
+                agent::resume(answer, job.text, kAgentProgress);
             wipe(job.text);  // the secret is gone once the step has run
             finish_agent(id, outcome);
             if (!outcome.paused) agent::maintain();

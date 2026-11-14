@@ -12,6 +12,7 @@
 //   -- @input city 深圳            (a parameter and its default; none: required)
 //   -- @uses read place://weather  (a call that needs the user's confirmation)
 //   -- @uses write device://local/display/*
+//   -- @uses gfx                   (a package's Lua functions: gfx.fillRect …; nothing to confirm)
 //   -- @version 1.2
 //   -- @package weather            (a package: it serves @target for others)
 //   -- @target weather://
@@ -39,6 +40,7 @@ struct Header {
     String keywords;
     std::vector<Input> inputs;
     std::vector<Use> uses;
+    std::vector<String> libraries;  // packages whose Lua functions the script uses (@uses gfx)
 };
 
 constexpr std::size_t kMaxName = 48;     // bytes (16 Chinese characters)

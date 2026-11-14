@@ -24,5 +24,7 @@ String remove_profile(const String& id);
 String set_terminal_font(int size);
 // ui.animation 0 off, 1 reduced, 2 on.
 String set_animation(int level);
+// The model thinks before answering (settings://reasoning).
+void set_reasoning(bool on);
 
 }  // namespace vat::settings_store

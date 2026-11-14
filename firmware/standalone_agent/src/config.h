@@ -82,6 +82,7 @@ struct Config {
     uint8_t context_kb = 64;
     String status_items = "time,battery,signal,failed";  // Agent page top bar (ui_status)
     uint8_t animation = 2;  // the settings cursor slide: 0 off, 1 reduced, 2 on
+    bool reasoning = false;  // the model thinks first (reasoning_effort low); shown in the record's details
     // ssh
     std::vector<SshProfile> profiles;
     String default_profile;

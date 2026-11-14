@@ -39,7 +39,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "tests" / "cases"
 PCM = ROOT / "tests" / "pcm"
-ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12"]
+ALL_PHASES = ["s0", "s1", "s2", "s2i", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12", "s13"]
 # quick: a representative case or two per phase (<= 5 min, after every flash);
 # normal: impacted phases (auto) or a named list, run whole;
 # all: release (<= 15 min); full: everything on the device (the old `all`).
@@ -113,7 +113,8 @@ IMPACT = {
     "firmware/standalone_agent/src/packages/ask_package": ["s10"],
     "tests/programs/": ["s10"],
     "firmware/standalone_agent/src/packages/": ["s6"],
-    "firmware/standalone_agent/src/ui": ["s4", "s6", "s10", "s11"],
+    "firmware/standalone_agent/src/packages/gfx_package": ["s13"],
+    "firmware/standalone_agent/src/ui": ["s4", "s6", "s10", "s11", "s13"],
     "firmware/standalone_agent/src/ui_recorder.": ["s1", "s4"],
     "firmware/standalone_agent/src/worker.": ["s4", "s7"],
     "firmware/standalone_agent/src/storage.": ["s5", "s8", "s9"],
@@ -880,6 +881,13 @@ def phase_s4(device: Device, report: Report) -> None:
     report.add("S4", "ui_cursor_detail", moved and screen["view"] == "detail" and len(screen["body"]) > 0,
                screen["body"][:60])
     device.action("close")
+    # v0.7.5: a task's steps are kept in its record and shown in the detail view.
+    device.text("读一下设置页各项，只读，不要改")
+    device.action("cursor_latest")
+    device.action("open_detail")
+    body = device.status()["screen"]["body"]
+    device.action("close")
+    report.add("S4", "ui_detail_steps", "read settings://" in body, body[-120:])
     device.action("cursor_latest")
     device.action("help")
     first = device.status()["screen"]["help_page"]
@@ -2172,6 +2180,175 @@ def phase_s12(device: Device, report: Report) -> None:
         server.server_close()
 
 
+def screen_pixel(shot: bytes, x: int, y: int) -> tuple:
+    """(r, g, b) of a pixel in a /api/screenshot BMP (24-bit, rows bottom-up)."""
+    width = int.from_bytes(shot[18:22], "little")
+    height = int.from_bytes(shot[22:26], "little")
+    row = (width * 3 + 3) & ~3
+    at = 54 + (height - 1 - y) * row + x * 3
+    return shot[at + 2], shot[at + 1], shot[at]
+
+
+def same_pixels(a: bytes, b: bytes, skip: list) -> bool:
+    """Two screenshots equal outside the rectangles in `skip` ((x, y, w, h))."""
+    width = int.from_bytes(a[18:22], "little")
+    height = int.from_bytes(a[22:26], "little")
+    for y in range(height):
+        for x in range(0, width, 2):
+            if any(sx <= x < sx + sw and sy <= y < sy + sh for sx, sy, sw, sh in skip):
+                continue
+            if screen_pixel(a, x, y) != screen_pixel(b, x, y):
+                return False
+    return True
+
+
+def phase_s13(device: Device, report: Report) -> None:
+    """v0.7.5: everything on the screen goes through the band compositor and
+    the gfx package draws with it.  Device side of V075_PLAN T3/T4: idle and
+    page switches never repaint more than needed, frames show whole and only
+    the bands that changed are pushed, pictures land where they were drawn."""
+    device.wait_idle()
+    display = lambda: device.status()["display"]
+    shot = lambda: device._request("GET", "/api/screenshot")[1]
+    device.action("page_agent")
+    time.sleep(2)
+    a = display()
+    time.sleep(5)
+    b = display()
+    report.add("S13", "idle_no_full_frames", b["frames"] == a["frames"],
+               f"frames +{b['frames'] - a['frames']} areas +{b['areas'] - a['areas']} pushed +{b['pushed'] - a['pushed']}")
+
+    before = shot()
+    ok = True
+    notes = []
+    for page in ["page_ssh", "page_program", "page_agent"]:
+        a = display()
+        device.action(page)
+        time.sleep(1.5)
+        b = display()
+        frames = b["frames"] - a["frames"]
+        pushed = b["frame_pushed"] - a["frame_pushed"]  # by whole-screen updates (the mascot's corner is an area)
+        ok = ok and 1 <= frames <= 3 and pushed <= 9 * frames
+        notes.append(f"{page}:{frames}f/{pushed}p/{b['last_ms']}ms")
+    report.add("S13", "page_switch", ok, " ".join(notes))
+    after = shot()
+    # The top bar holds the clock and the corner the mascot (both move on their own).
+    report.add("S13", "page_round_trip", same_pixels(before, after, [(0, 0, 240, 15), (208, 103, 32, 32)]))
+
+    text = reply_text(tool_call(device, "write", "gfx://frame",
+                                '[["fillScreen","#000000"],["fillRect",10,10,50,30,"#FF0000"],["fillCircle",120,90,10,"#00FF00"]]'))
+    time.sleep(1)
+    picture = shot()
+    red, black, green = screen_pixel(picture, 20, 20), screen_pixel(picture, 200, 20), screen_pixel(picture, 120, 90)
+    report.add("S13", "frame_pixels", red[0] > 200 and red[1] < 40 and max(black) < 40 and green[1] > 200
+               and device.status()["screen"]["page"] == "graphics", f"{text[:30]} red={red} black={black} green={green}")
+    tool_call(device, "write", "gfx://frame/close", "")
+
+    program = """-- @uses gfx
+local x, vx = 12, 6
+for i = 1, 60 do
+  gfx.fillScreen("#101820")
+  gfx.fillCircle(x, 70, 10, "#E8A33D")
+  gfx.drawString("frame " .. i, 4, 4)
+  gfx.present()
+  x = x + vx
+  if x > 228 or x < 12 then vx = -vx end
+  vat.sleep(30)
+end
+"""
+    tool_call(device, "write", "prog://e2e画面", program)
+    a = display()
+    started = time.time()
+    run = reply_text(tool_call(device, "exec", "prog://e2e画面"))
+    seconds = time.time() - started
+    b = display()
+    frames = b["frames"] - a["frames"]
+    per_frame = (b["pushed"] - a["pushed"]) / max(1, frames)
+    report.add("S13", "program_frames", "完成" in run and frames >= 54 and per_frame <= 6,
+               f"presents=60 composed={frames} pushed/frame={per_frame:.1f} fps~{frames / max(seconds, 0.1):.0f} max_ms={b['max_ms']}")
+    tool_call(device, "write", "gfx://frame/close", "")
+    tool_call(device, "write", "prog://e2e画面/delete", "")
+    device.resolve_all(approve=True)
+
+    canvas = {"ops": [["fillScreen", "#000000"], ["fillCircle", "{t}", 67, 12, "#E8A33D"]],
+              "animate": {"every": "50ms", "frames": 0, "step": 4}}
+    tool_call(device, "write", "gfx://canvas/e2e动画", json.dumps(canvas))
+    time.sleep(1)
+    a = display()
+    time.sleep(3)
+    b = display()
+    frames = b["frames"] - a["frames"]
+    per_frame = (b["pushed"] - a["pushed"]) / max(1, frames)
+    report.add("S13", "canvas_animation", frames >= 30 and per_frame <= 3,
+               f"frames={frames} in 3 s, pushed/frame={per_frame:.1f}")
+    tool_call(device, "write", "gfx://canvas/e2e动画/close", "")
+
+    panel = {"title": "e2e刷新", "lines": ["…"], "source": {"read": "device://local/battery", "every": "10s"}}
+    tool_call(device, "write", "ui://panel/e2e刷新", json.dumps(panel))
+    time.sleep(2)
+    a = display()
+    time.sleep(11)
+    b = display()
+    report.add("S13", "panel_refresh", b["skipped"] > a["skipped"] and b["pushed"] - a["pushed"] < 9 * max(1, b["frames"] - a["frames"]),
+               f"frames +{b['frames'] - a['frames']} pushed +{b['pushed'] - a['pushed']} skipped +{b['skipped'] - a['skipped']}")
+    tool_call(device, "write", "ui://panel/e2e刷新/close", "")
+
+    # G2b: every function of read gfx://help, its example, in frames of 30 (a frame holds 64 ops).
+    help_text = reply_text(tool_call(device, "read", "gfx://help"))
+    calls = [c for _, c in re.findall(r"^(\w+)\([^)]*\) 例 (gfx\.\w+\(.*\))$", help_text, re.M)]
+    queries = re.compile(r"gfx\.(width|height|textWidth|textLength|fontHeight|fontWidth|getCursorX|getCursorY|color565|color888|color332)\(")
+    lines, drawn = ["-- @uses gfx", "local q = {}"], 0
+    for call in calls:
+        if queries.match(call):
+            lines.append(f"q[#q+1] = tostring({call})")
+            continue
+        lines.append(call)
+        drawn += 1
+        if drawn % 30 == 0:
+            lines.append("gfx.present()")
+    lines += ["gfx.present()", 'return table.concat(q, " ")']
+    before = device.status()["uptime_s"]
+    text = reply_text(tool_call(device, "write", "lua://run", "\n".join(lines)))
+    report.add("S13", "gfx_all_functions", "完成" in text and len(calls) >= 60 and device.status()["uptime_s"] >= before,
+               f"functions={len(re.findall(r'^\w+\(', help_text, re.M))} with examples={len(calls)} {text[:80]}")
+    report.add("S13", "gfx_queries", "18 3 63488 #FF0000 224" in text, text.split("【结果】")[-1][:40])
+    # State lasts across frames, as on M5GFX's screen: setColor in one frame, a
+    # colourless fillRect in the next; and a colour given to a drawing call (M5GFX
+    # sets the current colour with it) lasts the same way.
+    pixels = []
+    for first in ["gfx.setColor('#FF0000')", "gfx.drawPixel(0, 0, '#FF0000')"]:
+        text = reply_text(tool_call(device, "write", "lua://run",
+                                    f"-- @uses gfx\n{first} gfx.present()\ngfx.fillRect(10, 10, 30, 30) gfx.present()"))
+        time.sleep(1)
+        pixels.append(screen_pixel(shot(), 20, 20))
+    report.add("S13", "gfx_state_across_frames", all(p[0] > 200 and p[1] < 40 for p in pixels), f"pixels={pixels} {text[:40]}")
+    tool_call(device, "write", "gfx://frame/close", "")
+    # Feiyu writes a gfx program itself and runs it.
+    device.wait_idle()
+    tool_call(device, "write", "prog://e2e自画/delete", "")
+    device.resolve_all(approve=True)
+    a = display()
+    device.text("写一个程序叫 e2e自画：用 gfx 在屏幕上画一个绿色小方块从左往右移动，画 30 帧，每帧停 30 毫秒，然后运行它")
+    device.wait_idle()
+    device.resolve_all(approve=True)
+    device.wait_idle()
+    b = display()
+    source = device.read_file("/vat/things/lua/e2e自画.lua")
+    report.add("S13", "agent_writes_gfx", "@uses gfx" in source and "gfx.present" in source and b["frames"] - a["frames"] >= 20,
+               f"frames +{b['frames'] - a['frames']} source={len(source)} bytes")
+    tool_call(device, "write", "gfx://frame/close", "")
+    tool_call(device, "write", "prog://e2e自画/delete", "")
+    device.resolve_all(approve=True)
+
+    text = reply_text(tool_call(device, "write", "ui://canvas/e2e旧", '{"ops":[["fillScreen","red"]]}'))
+    report.add("S13", "old_canvas_address", "gfx://canvas/e2e旧" in text, text[:100])
+    text = reply_text(tool_call(device, "write", "lua://run",
+                                "-- @uses gfx\ngfx.fillScreen('black') gfx.present() return gfx.measure('abc')"))
+    report.add("S13", "code_mode_gfx", "18" in text.split("【结果】")[-1][:12], text[:120])
+    tool_call(device, "write", "gfx://frame/close", "")
+    device.action("page_agent")
+
+
 def phase_s11(device: Device, report: Report) -> None:
     """v0.6: the web token, the arena report, the context length, ui panels
     (choice, refused fields, choice as a trigger) and local apps (Fn+A)."""
@@ -2291,7 +2468,7 @@ def phase_s11(device: Device, report: Report) -> None:
     ball = {"vars": {"x": 20, "vx": 6},
             "update": "x = x + vx  if x > 220 or x < 20 then vx = -vx end",
             "ops": [["fillScreen", "#101820"], ["fillCircle", "{x}", 67, 8, "cyan"], ["drawString", "{x}", 4, 4]]}
-    text = reply_text(tool_call(device, "write", "ui://canvas/e2e弹球", json.dumps(ball)))
+    text = reply_text(tool_call(device, "write", "gfx://canvas/e2e弹球", json.dumps(ball)))
     up = until(lambda: screen().get("overlay") == "canvas", 2)
     first = screen().get("canvas_frame", 0)
     time.sleep(1.0)
@@ -2300,12 +2477,12 @@ def phase_s11(device: Device, report: Report) -> None:
     report.add("S11", "canvas_vars_animate", "ERROR" not in text and up and frames >= 10 and not after.get("canvas_error"),
                f"{text[:40]} frames/s={frames} error={after.get('canvas_error')!r}")
     broken = {"vars": {"x": 1}, "update": "x = x + nothing", "ops": [["fillScreen", "red"]]}  # nil arithmetic
-    tool_call(device, "write", "ui://canvas/e2e坏画布", json.dumps(broken))
+    tool_call(device, "write", "gfx://canvas/e2e坏画布", json.dumps(broken))
     error = until(lambda: screen().get("canvas_error"), 2)
     report.add("S11", "canvas_update_error_shown", bool(error), repr(error)[:80])
     device.key("esc")
     unknown = {"update": "x = = 1", "ops": [["fillScreen", "red"]]}  # refused when saved: a syntax error
-    text = reply_text(tool_call(device, "write", "ui://canvas/e2e坏画布", json.dumps(unknown)))
+    text = reply_text(tool_call(device, "write", "gfx://canvas/e2e坏画布", json.dumps(unknown)))
     report.add("S11", "canvas_unknown_var_refused", "ERROR" in text and "update" in text, text[:80])
 
     # v0.6.2 settings package (runs on the UI task) and D9.
@@ -2316,6 +2493,10 @@ def phase_s11(device: Device, report: Report) -> None:
     after = reply_text(tool_call(device, "read", "settings://"))
     tool_call(device, "write", "settings://animation", "开")
     report.add("S11", "settings_animation", "已设为" in text and "动画：减弱" in after, text[:60])
+    text = reply_text(tool_call(device, "write", "settings://reasoning", "开"))
+    after = reply_text(tool_call(device, "read", "settings://"))
+    tool_call(device, "write", "settings://reasoning", "关")
+    report.add("S11", "settings_reasoning", "已打开" in text and "显示思考：开" in after, text[:60])
     text = reply_text(tool_call(device, "write", "settings://statusbar", "时间,内存"))
     report.add("S11", "settings_statusbar", "时间·剩余内存" in text, text[:60])
     restore = before_bar.group(1).strip() if before_bar else "时间,电量,信号"
@@ -2415,9 +2596,9 @@ def main() -> int:
     if args.phases == "quick":
         TIER = "quick"
         phases = [p for p in ALL_PHASES if p != "s2i"]
-    elif args.phases in ("all", "full"):
-        TIER = args.phases
-        phases = ALL_PHASES
+    elif args.phases.split(":")[0] in ("all", "full"):  # "all:s5,s8": that tier, those phases
+        TIER, _, subset = args.phases.partition(":")
+        phases = subset.split(",") if subset else ALL_PHASES
     elif args.phases == "auto":
         phases = impacted_phases(args.since)
     else:

@@ -107,7 +107,8 @@ LoRa 要先定的事：
 
 - 界面描述：很小的 JSON（标题、编号行、选项、数值、刷新来源和周期），有大小上限和字段白名单，渲染器只画声明过的元素。
 - `ui` 包：`write ui://panel/<名字>` 创建或更新界面，`read ui://panel/<名字>` 读取用户的选择；新增一个渲染页，键盘选择和确认。
-- 本地应用：把界面描述连同用到的 target 和刷新周期保存下来，可以列出、打开、删除（`ui://apps/list`）。
+- 本地应用：把界面描述连同用到的 target 和刷新周期保存下来，可以列出、打开、删除（`ui://apps/list`）；应用里也可以存画布。
+- `gfx` 包：画图。`write gfx://canvas/<名字>`（绘制指令、动画、变量、定时刷新）、`write gfx://frame`（一帧）、`read gfx://screen`、`read gfx://measure?text=…`；程序里 `-- @uses gfx` 后用 `gfx.*` 逐帧画、`gfx.present()` 上屏（见 PROGRAMS 2.1.3）。
 - 例子：“做一个看开发机负载的小面板，每 30 秒刷新”= `exec ssh://开发机 uptime` + `write ui://panel/load`；“WiFi 选择器”= `read device://local/wifi/scan` + `write ui://panel/wifi`，选中后 `write device://local/wifi/SSID`（仍走确认与密钥输入）；“GPS 面板”= `read gps://local` + `write ui://panel/gps`。
 
 前置条件：v0.5 的基础扩展包（面板要有数据来源）。

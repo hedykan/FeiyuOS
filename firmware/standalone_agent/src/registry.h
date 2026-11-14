@@ -5,6 +5,8 @@
 
 #include <vector>
 
+struct lua_State;
+
 // Capability packages.
 //
 // The model only ever sees the seven tools (discover/read/write/exec/observe/
@@ -140,6 +142,12 @@ public:
 
     // Extra search text for one catalog command.
     virtual const char* search_text(const String& command) const { return ""; }
+
+    // A program that declares "-- @uses <id>" gets the package's Lua functions:
+    // another way of writing its addresses, never more than they can do
+    // (CLAUDE.md §3).  Registers them (a global table named like the package)
+    // and returns true; false when the package has none.
+    virtual bool open_lua(lua_State* L) const { return false; }
 };
 
 // Appends {target, kind} to a discover(resources) list and decrements
@@ -151,6 +159,9 @@ bool add(Package* package);
 const std::vector<Package*>& packages();
 // The packages' usage() texts in registration order (system prompt parts).
 const std::vector<const char*>& usages();
+
+// The Lua functions of package `id` into L (@uses id); false: no such package, or it has none.
+bool open_lua(lua_State* L, const String& id);
 
 // Explicit, audited list of first-party packages (src/packages/builtin.cpp).
 void register_builtin();

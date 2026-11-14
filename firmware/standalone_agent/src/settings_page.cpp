@@ -18,6 +18,7 @@
 #include "ops_ssh.h"
 #include "ops_wifi.h"
 #include "settings_store.h"
+#include "ui_compose.h"
 #include "storage.h"
 #include "ui_kit.h"
 #include "ui_status.h"
@@ -26,8 +27,8 @@
 namespace vat::ui::settings {
 namespace {
 
-enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context, Ble, StatusBar, Animation };
-const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal", "webtoken", "context", "ble", "statusbar", "animation"};
+enum class View : uint8_t { Menu, WifiList, Form, Message, Keys, Hosts, Host, PublicKey, Lora, Font, Storage, Portal, WebToken, Context, Ble, StatusBar, Animation, Reasoning };
+const char* const kViewNames[] = {"menu", "wifi", "form", "message", "keys", "hosts", "host", "pubkey", "lora", "font", "storage", "portal", "webtoken", "context", "ble", "statusbar", "animation", "reasoning"};
 
 struct Field {
     String label;
@@ -50,7 +51,7 @@ struct MenuItem {
     View view;
 };
 const MenuItem kMenu[] = {{"WiFi", View::WifiList}, {"Key", View::Keys},   {"SSH 主机", View::Hosts},
-                          {"LoRa", View::Lora},     {"蓝牙", View::Ble},      {"顶栏", View::StatusBar}, {"动画", View::Animation}, {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
+                          {"LoRa", View::Lora},     {"蓝牙", View::Ble},      {"顶栏", View::StatusBar}, {"动画", View::Animation}, {"显示思考", View::Reasoning}, {"终端字号", View::Font}, {"对话记忆", View::Context}, {"存储", View::Storage},
                           {"手机设置（扫码）", View::Portal}, {"网页令牌", View::WebToken}};
 constexpr int kMenuCount = sizeof(kMenu) / sizeof(kMenu[0]);
 
@@ -153,12 +154,7 @@ void row(Gfx& screen, int y, int highlight, const String& left, const String& ri
     });
 }
 
-void footer(Gfx& screen, const String& text) {
-    band(screen, kHeight - kLine, kLine, kBg, [&](Gfx& g, int top) {
-        g.setTextColor(kMuted, kBg);
-        g.drawCentreString(fit(g, text, kWidth - 4), kWidth / 2, top);
-    });
-}
+void footer(Gfx& screen, const String& text) { ui::footer(screen, {text, kMuted, Align::Center}); }
 
 void blank_row(Gfx& screen, int y) {
     band(screen, y - 1, kLine, kBg, [](Gfx&, int) {});
@@ -200,7 +196,7 @@ void list(Gfx& g, const std::vector<Line>& lines) {
 
 void text_block(Gfx& g, const String& text, uint16_t color, int y = kTop + 4) {
     g.setTextColor(color, kBg);
-    for (const auto& line : wrap_text(g, text, kWidth - kPad * 2)) {
+    for (const auto& line : wrap(g, text, kWidth - kPad * 2)) {
         if (y > kHeight - kLine * 2) break;
         g.drawString(line, kPad, y);
         y += kLine;
@@ -231,6 +227,7 @@ std::vector<String> menu_values() {
         cfg.ble.enabled == ble::running() ? String(ble::running() ? "开" : "关") : String(cfg.ble.enabled ? "开（待重启）" : "关（待重启）"),
         status::summary(),
         animation_word(cfg.animation),
+        String(cfg.reasoning ? "开" : "关"),
         String(cfg.terminal_font) + " 号",
         String(cfg.context_kb) + " KB",
         storage::kind() == "tf" ? String("TF 卡") : storage::degraded() ? String("板载（降级）") : String("板载"),
@@ -318,6 +315,7 @@ bool list_view(View v) {
         case View::Context:
         case View::StatusBar:
         case View::Animation:
+        case View::Reasoning:
         case View::Font: return true;
         default: return false;
     }
@@ -451,7 +449,7 @@ void paint_page(Gfx& g) {
             g.drawString("网页令牌", x, 2);
             g.setTextColor(kText, kBg);
             int y = 16;
-            for (const auto& line : wrap_text(g, token, kWidth - x - 2)) {
+            for (const auto& line : wrap(g, token, kWidth - x - 2)) {
                 g.drawString(line, x, y);
                 y += 11;
             }
@@ -477,7 +475,7 @@ void paint_page(Gfx& g) {
                 g.drawString("设备公钥", x, 2);
                 g.setTextColor(kText, kBg);
                 int y = 16;
-                for (const auto& line : wrap_text(g, public_key, kWidth - x - 2)) {
+                for (const auto& line : wrap(g, public_key, kWidth - x - 2)) {
                     if (y > kHeight - 12) break;
                     g.drawString(line, x, y);
                     y += 11;
@@ -509,6 +507,15 @@ void paint_page(Gfx& g) {
             g.setTextColor(kMuted, kBg);
             g.drawString("光标高亮条滑到新行；", kPad, kTop + 3 * kLine + 6);
             g.drawString("减弱：时长减半  关：直接跳过去", kPad, kTop + 4 * kLine + 6);
+            footer(g, "; . 选择  Enter 使用  ` 返回");
+            break;
+        }
+        case View::Reasoning: {
+            const bool on = config::get().reasoning;
+            list(g, {{"关（默认）", on ? "" : "当前"}, {"开", on ? "当前" : ""}});
+            g.setTextColor(kMuted, kBg);
+            g.drawString("模型先想一想再回答，", kPad, kTop + 2 * kLine + 6);
+            g.drawString("想法显示在记录详细页；稍慢一点", kPad, kTop + 3 * kLine + 6);
             footer(g, "; . 选择  Enter 使用  ` 返回");
             break;
         }
@@ -591,10 +598,7 @@ void paint_page(Gfx& g) {
 }
 
 void draw_page() {
-    auto& screen = M5Cardputer.Display;
-    screen.startWrite();
-    paint_page(screen);
-    screen.endWrite();
+    compose::frame(paint_page);
     dirty = false;
     last_draw = millis();
 }
@@ -712,6 +716,7 @@ int item_count() {
         case View::Font: return 3;
         case View::Context: return 3;
         case View::Animation: return 3;
+        case View::Reasoning: return 2;
         default: return 1;
     }
 }
@@ -759,6 +764,7 @@ void enter() {
                 return go(View::Context, kb == 32 ? 0 : kb == 96 ? 2 : 1);
             }
             if (to == View::Animation) return go(View::Animation, 2 - std::min<uint8_t>(config::get().animation, 2));
+            if (to == View::Reasoning) return go(View::Reasoning, config::get().reasoning ? 1 : 0);
             if (to == View::Font) {
                 const uint8_t f = config::get().terminal_font;
                 return go(View::Font, f == 10 ? 0 : f == 14 ? 2 : 1);
@@ -800,6 +806,10 @@ void enter() {
             return;
         case View::Animation:
             settings_store::set_animation(2 - cursor);
+            dirty = true;
+            return;
+        case View::Reasoning:
+            settings_store::set_reasoning(cursor == 1);
             dirty = true;
             return;
         default: return;

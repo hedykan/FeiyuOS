@@ -36,15 +36,39 @@ TermFont term_font();
 void apply_terminal_size();
 constexpr int kPad = 4;
 
+// Width in pixels of `text` in cjk::cn12 at `size` (1..4), from any task: a
+// measuring object of its own, not the display's font state.
+int measure_text(const String& text, int size);
 // `text` cut with "…" to fit `max_px` in the current font.
 String fit(Gfx& g, const String& text, int max_px);
 // The end of `text` that fits, "…" in front (for text that grows at the end).
 String fit_tail(Gfx& g, const String& text, int max_px);
-// Lines of `text` no wider than `width`; breaks at '\n' and between UTF-8 characters.
-std::vector<String> wrap_text(Gfx& g, const String& text, int width);
+// Lines of `text` no wider than `width` in g's font: breaks at '\n' (an empty
+// paragraph is an empty line; a final '\n' adds none) and between UTF-8
+// characters.  With `max_lines` (> 0) the last line ends in "…" when text was
+// left over.  One glyph measured at a time, no String per character.
+std::vector<String> wrap(Gfx& g, const String& text, int width, int max_lines = 0);
+
+// The bottom line of a page or an overlay (kLine high at kHeight - kLine, on
+// kBg): a status or key hints.  Left keeps the end of a text that grows at
+// its end (typing); Center and Right cut the end.  `hint`, when given, sits
+// at the right in kMuted after a Left text.  `span`: the width it may use
+// from x 0 (the timeline stops short of the corner mascot).
+enum class Align : uint8_t { Left, Center, Right };
+struct Footer {
+    String text;
+    uint16_t color = kMuted;
+    Align align = Align::Right;
+    String hint;
+};
+void footer(Gfx& g, const Footer& f, int span = kWidth);
 // Full-height QR code on a white square at the left; returns the x where the
 // text column to its right starts.
 int qr_panel(Gfx& g, const String& data);
+// A QR code of `data` at (x, y), `w` pixels square, black modules on white (as
+// LGFXBase::qrcode without a margin).  Encoded once per text and kept; drawn
+// row by row, only the rows in the band being composed.
+void draw_qr(Gfx& g, const String& data, int x, int y, int w);
 // Off-screen strip, kWidth × kStripHeight at 16 bits (7.5 KB, claimed on first
 // use and kept, so it never moves): a band is drawn there, then pushed whole,
 // and the screen never shows it half drawn (no flicker).  nullptr when the

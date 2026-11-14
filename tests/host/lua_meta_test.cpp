@@ -5,6 +5,15 @@
 namespace {
 
 void lua_meta() {
+    {  // @uses gfx: a package's Lua functions, nothing to confirm
+        vat::lua_meta::Header h;
+        CHECK(vat::lua_meta::parse("-- @uses gfx\n-- @uses gfx\n-- @uses read device://local/battery\nprint(1)", h).isEmpty());
+        CHECK(h.libraries.size() == 1 && h.libraries[0] == "gfx" && h.uses.size() == 1);
+        CHECK(vat::lua_meta::parse("-- @uses gfx\nprint(1)", h).isEmpty() && h.uses.empty());
+        CHECK(!vat::lua_meta::needs_confirm(h));  // a package's Lua functions alone: nothing to confirm
+        CHECK(!vat::lua_meta::parse("-- @uses Gfx\n", h).isEmpty());   // not a package name
+        CHECK(!vat::lua_meta::parse("-- @uses write\n", h).isEmpty()); // a tool without a target
+    }
     using namespace vat::lua_meta;
     Header h;
     const char* src =

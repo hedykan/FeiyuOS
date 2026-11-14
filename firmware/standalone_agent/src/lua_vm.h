@@ -46,6 +46,8 @@ struct Options {
     // and no @uses covers is asked about on the device (worker::ask) instead
     // of refused; "all" approves the rest of the run.
     bool ask = false;
+    // Packages whose Lua functions the script declared (-- @uses gfx).
+    const std::vector<String>* libraries = nullptr;
 };
 constexpr uint32_t kForegroundMs = 30 * 60 * 1000;
 constexpr uint64_t kForegroundInstructions = 200000000;

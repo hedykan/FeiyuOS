@@ -205,6 +205,8 @@ void wifi_saved() {
 #include "lua_meta_test.cpp"
 #include "pkg_catalog_test.cpp"
 #include "console_test.cpp"
+#include "ui_compose_test.cpp"
+#include "gfx_api_test.cpp"
 
 int main(int argc, char** argv) {
     if (argc > 1) fixture_dir = argv[1];
@@ -217,6 +219,8 @@ int main(int argc, char** argv) {
     ui_panel();
     web_token();
     address_map();
+    ui_compose();
+    gfx_api();
     ui_canvas();
     lua_meta();
     pkg_catalog_tests();

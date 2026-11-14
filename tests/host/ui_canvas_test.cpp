@@ -1,10 +1,27 @@
 // Host tests for canvases (ui_canvas.cpp).  Included by host_test.cpp; uses
 // its CHECK macro.
+#include "gfx_api.h"
 #include "ui_canvas.h"
 
 namespace {
 
 void ui_canvas() {
+    {  // gfx://frame and gfx.* (one op at a time)
+        std::vector<vat::ui_canvas::Op> ops;
+        String error;
+        CHECK(vat::ui_canvas::parse_frame(R"([["fillRect",0,0,10,10,"red"],["drawString","分数",4,4,{"size":2}]])", ops, error));
+        CHECK(ops.size() == 2 && ops[1].size == 2);
+        CHECK(vat::ui_canvas::parse_frame(R"({"ops":[["fillCircle",5,5,3,"#3FB8AF"]]})", ops, error) && ops.size() == 1);
+        CHECK(!vat::ui_canvas::parse_frame(R"({"op":[]})", ops, error));
+        CHECK(!vat::ui_canvas::parse_frame(R"([["blink",1]])", ops, error) && error.indexOf("blink") >= 0);
+        cJSON* one = cJSON_Parse(R"(["drawImage","/vat/a.png",0,0])");
+        vat::ui_canvas::Op op;
+        int images = 0;
+        std::size_t bytes = 0;
+        CHECK(vat::ui_canvas::parse_one(one, op, images, bytes, error) && images == 1);
+        CHECK(!vat::ui_canvas::parse_one(one, op, images, bytes, error));  // a second image in the same frame
+        cJSON_Delete(one);
+    }
     using vat::ui_canvas::Kind;
     vat::ui_canvas::Spec s;
     String error;
@@ -14,8 +31,9 @@ void ui_canvas() {
                                 R"(["progressBar",10,110,220,10,"{2}","#3FB8AF","gray"],)"
                                 R"(["drawGradientLine",0,0,239,0,"red","blue"]],)"
                                 R"("source":{"read":"device://local/battery","every":"30s"}})", s, error));
-    CHECK(s.ops.size() == 6 && s.ops[1].kind == Kind::FillRoundRect && s.ops[1].args.size() == 5);
-    CHECK(s.ops[3].kind == Kind::DrawString && s.ops[3].size == 3 && s.ops[3].datum == "middle_center");
+    CHECK(s.ops.size() == 6 && s.ops[1].kind == Kind::Call && s.ops[1].args.size() == 6 && s.ops[1].args[5] == "#3FB8AF");
+    CHECK(String(vat::gfx_api::table()[s.ops[1].fn].name) == "fillRoundRect");
+    CHECK(s.ops[3].kind == Kind::DrawText && s.ops[3].size == 3 && s.ops[3].datum == "middle_center");
     CHECK(s.ops[4].color2 == "gray" && s.source_tool == "read" && s.every_s == 30);
 
     s.ops[3].args[0] = "{2#}%";
@@ -78,7 +96,7 @@ void ui_canvas() {
         return true;
     };
     vat::ui_canvas::fill_vars(ops, values);
-    CHECK(ops[0].args[0] == "22" && ops[0].color == "red");
+    CHECK(ops[0].args[0] == "22" && ops[0].args.back() == "red");  // a Call: the colour is its last argument
     CHECK(ops[1].args[0] == "x= 22");
     CHECK(vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"animate":{"every":"33ms"}})", s, error));
     CHECK(!vat::ui_canvas::parse(R"({"ops":[["fillScreen","red"]],"animate":{"every":"20ms"}})", s, error));
@@ -92,7 +110,7 @@ void ui_canvas() {
     vat::ui_canvas::set_compiler(nullptr);
     // {1} of the source is not a variable: fill_vars leaves it for fill().
     std::vector<vat::ui_canvas::Op> mixed(1);
-    mixed[0].kind = Kind::DrawString;
+    mixed[0].kind = Kind::DrawText;
     mixed[0].args = {"{1} {n}"};
     vat::ui_canvas::fill_vars(mixed, [](const String& name, String& value) {
         if (name != "n") return false;

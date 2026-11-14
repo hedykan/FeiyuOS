@@ -41,6 +41,10 @@ void address_map() {
     CHECK(vat::address::retired("device://local/ble/devices/list").isEmpty());
     CHECK(vat::address::retired("pkg://天气/install").isEmpty());
     CHECK(vat::address::retired("").isEmpty());
+    // 0.7.5: canvases moved to gfx
+    CHECK(rewrite("vat.write(\"ui://canvas/钟\", c)") == "vat.write(\"gfx://canvas/钟\", c)");
+    CHECK(vat::address::retired("ui://canvas/钟/close") == "gfx://canvas/钟/close");
+    CHECK(vat::address::retired("ui://panel/钟").isEmpty());
 }
 
 }  // namespace

@@ -8,7 +8,7 @@ namespace vat::address {
 
 // The card's data is rewritten once per version (prog_runtime: programs,
 // approved.json, triggers.json, ui apps); bump it with a new §5.6 row.
-constexpr int kVersion = 2;
+constexpr int kVersion = 3;  // 3: ui://canvas/ -> gfx://canvas/ (0.7.5)
 
 // Every retired address in `text` (a Lua source, JSON, …) in its current form.
 String rewrite(const String& text);

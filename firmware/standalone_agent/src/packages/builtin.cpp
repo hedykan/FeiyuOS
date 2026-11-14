@@ -26,6 +26,7 @@ Package* make_timer_package();
 Package* make_grove_package();
 Package* make_ir_package();
 Package* make_ui_package();
+Package* make_gfx_package();
 Package* make_program_package();
 Package* make_debug_package();
 Package* make_pkg_package();
@@ -62,6 +63,7 @@ void register_builtin() {
     add(make_ask_package());
     add(make_lua_package());
     add(make_ui_package());
+    add(make_gfx_package());
     // Programs and their run records after the other built-ins: their usage is the
     // longest and the one most worth being read last.
     add(make_program_package());

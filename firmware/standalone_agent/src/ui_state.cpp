@@ -129,10 +129,21 @@ void set_idle() {
     ++model.version;
 }
 
+// The newest entry's steps (entry_step); kept off Model so a snapshot does not copy them.
+namespace {
+constexpr std::size_t kLiveSteps = 16;
+std::vector<String> live;
+uint32_t live_id = 0;
+uint32_t live_changes = 0;
+}  // namespace
+
 uint32_t entry_begin(const String& text) {
     Lock lock;
     Entry entry;
     entry.id = next_entry_id++;
+    live.clear();
+    live_id = entry.id;
+    ++live_changes;
     entry.time = clock_now();
     entry.text = utf8_head(text, 120);
     entry.started_ms = millis();
@@ -171,7 +182,28 @@ void entry_update(Status status, const String& summary) {
     }
     model.busy = false;
     model.stage = "";
+    ++live_changes;
     ++model.version;
+}
+
+void entry_step(char kind, const String& text) {
+    Lock lock;
+    const Entry* entry = last_entry();
+    if (!entry || entry->id != live_id) return;
+    if (live.size() >= kLiveSteps) live.erase(live.begin());
+    live.push_back(String(kind) + utf8_head(text, 240));
+    ++live_changes;
+    ++model.version;
+}
+
+std::vector<String> live_steps(uint32_t id) {
+    Lock lock;
+    return id == live_id ? live : std::vector<String>();
+}
+
+uint32_t live_version() {
+    Lock lock;
+    return live_changes;
 }
 
 // One slot per entry id, reused every 32 entries (the timeline keeps 20).
@@ -179,10 +211,12 @@ String reply_path(uint32_t id) { return "/vat/memory/reply/" + String(id % 32) +
 
 void entry_finish(Status status, const String& summary, const String& detail, const String& steps_json) {
     Entry copy;
+    std::vector<String> steps_live;
     {
         Lock lock;
         Entry* entry = last_entry();
         if (!entry) return;
+        if (entry->id == live_id) steps_live = live;
         entry->status = status;
         entry->summary = utf8_head(summary, 300);
         entry->elapsed_ms = millis() - entry->started_ms;
@@ -202,8 +236,29 @@ void entry_finish(Status status, const String& summary, const String& detail, co
     cJSON_AddStringToObject(record, "detail", utf8_head(detail, 1500).c_str());
     cJSON* steps = cJSON_Parse(steps_json.c_str());
     cJSON_AddItemToObject(record, "steps", steps ? steps : cJSON_CreateArray());
+    // The newest steps that fit in about 1.2 KB, 160 bytes each: the timeline
+    // is read back from its last 12 KB, and every record takes room there.
+    if (!steps_live.empty()) {
+        std::size_t from = steps_live.size(), bytes = 0;
+        while (from > 0 && bytes + std::min<std::size_t>(steps_live[from - 1].length(), 160) <= 1200) {
+            bytes += std::min<std::size_t>(steps_live[--from].length(), 160);
+        }
+        cJSON* kept = cJSON_AddArrayToObject(record, "live");
+        for (std::size_t i = from; i < steps_live.size(); ++i) {
+            cJSON_AddItemToArray(kept, cJSON_CreateString(utf8_head(steps_live[i], 160).c_str()));
+        }
+    }
     storage::append_line(kTimelineFile, json_print(record));
     cJSON_Delete(record);
+    {  // in the record now: the detail view reads them from there
+        Lock lock;
+        if (live_id == copy.id) {
+            live.clear();
+            live_id = 0;
+        }
+        ++live_changes;
+        ++model.version;
+    }
     // The entry keeps a 300-byte preview; a longer reply (the agent caps it at
     // 1500 bytes) goes to a small file of its own for the detail view.
     if (summary.length() > 300) {
@@ -373,6 +428,11 @@ bool take_overlay(Overlay& overlay) {
     overlay_request = Overlay();
     overlay_pending = false;
     return true;
+}
+
+bool overlay_waiting() {
+    Lock lock;
+    return overlay_pending;
 }
 
 void set_overlay_kind(const String& kind) {

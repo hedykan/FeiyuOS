@@ -12,6 +12,16 @@ bool known_tool(const String& tool) {
     return false;
 }
 
+// A package name in "@uses gfx": a lowercase word (letters, digits, _), not a tool.
+bool library_name(const String& word) {
+    if (word.isEmpty() || word.length() > 24 || word[0] < 'a' || word[0] > 'z') return false;
+    for (std::size_t i = 0; i < word.length(); ++i) {
+        const char c = word[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    }
+    return true;
+}
+
 // "a b c" -> "a" and "b c" (both trimmed).
 void split_first(const String& text, String& first, String& rest) {
     int at = -1;
@@ -75,7 +85,15 @@ String parse(const String& source, Header& out) {
         if (key == "uses") {
             String tool, target;
             split_first(without_comment(value), tool, target);
-            if (!known_tool(tool)) return where + "要写成 @uses 动作 目标，动作是 read、write、exec、observe、input 或 session";
+            if (target.isEmpty() && !known_tool(tool) && library_name(tool)) {  // @uses gfx: a package's Lua functions
+                bool seen = false;
+                for (const auto& l : out.libraries) seen = seen || l == tool;
+                if (!seen) out.libraries.push_back(tool);
+                continue;
+            }
+            if (!known_tool(tool)) {
+                return where + "要写成 @uses 动作 目标（动作是 read、write、exec、observe、input 或 session），或 @uses 扩展包名（用它的 Lua 写法，如 @uses gfx）";
+            }
             const String problem = check_target(target);
             if (!problem.isEmpty()) return where + problem;
             out.uses.push_back({tool, target});

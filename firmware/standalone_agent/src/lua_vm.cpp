@@ -877,6 +877,12 @@ bool run(const String& source, const String& name, const Options& options, Strin
     bool ok = false;
     try {
         open_libraries(L);
+        String missing;  // a package in @uses with no Lua functions
+        if (options.libraries) {
+            for (const auto& library : *options.libraries) {
+                if (!registry::open_lua(L, library)) missing = library;
+            }
+        }
         if (options.input) push_json(L, options.input, 0);
         else lua_newtable(L);
         lua_setglobal(L, "input");
@@ -886,7 +892,9 @@ bool run(const String& source, const String& name, const Options& options, Strin
         worker::heap_step(name + ">load");
         const int loaded = luaL_loadbufferx(L, source.c_str(), source.length(), chunk.c_str(), "t");
         worker::heap_step(name + ">run");
-        if (loaded != LUA_OK) {
+        if (!missing.isEmpty()) {
+            error = "@uses " + missing + "：没有这个扩展包的 Lua 写法（@uses 后面写包名，如 gfx；或写 动作 目标）";
+        } else if (loaded != LUA_OK) {
             const String problem = lua_tostring(L, -1);
             error = problem.indexOf("not enough memory") >= 0 ? String(kTooBig) : "语法错误：" + problem;
         } else if (lua_pcall(L, 0, 1, -2) != LUA_OK) {

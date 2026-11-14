@@ -12,6 +12,7 @@
 #include "common.h"
 #include "net.h"
 #include "storage.h"
+#include "ui_compose.h"
 #include "ui_kit.h"
 #include "ui_state.h"
 
@@ -69,9 +70,8 @@ int16_t mulaw_decode(uint8_t byte) {
 // Recording strip at the bottom of the current screen: red dot, scrolling
 // level bars, seconds.  The timeline above stays where it was.
 void draw_meter(const std::deque<uint8_t>& levels, float seconds, float limit) {
-    auto& d = M5Cardputer.Display;
     const int y = kHeight - kLine - 4;
-    d.fillRect(0, y - 2, kWidth, kHeight - y + 2, kBg);
+    compose::area({0, y - 2, kWidth, kHeight - y + 2}, [&](Gfx& d) {
     d.drawFastHLine(0, y - 2, kWidth, kSurface);
     d.fillCircle(kPad + 4, y + 8, 4, kDanger);
     int x = kPad + 14;
@@ -86,6 +86,7 @@ void draw_meter(const std::deque<uint8_t>& levels, float seconds, float limit) {
     d.drawString(text, kWidth - kPad - d.textWidth(text), y + 2);
     const int bar = static_cast<int>((kWidth - kPad * 2) * std::min(1.0f, seconds / limit));
     d.fillRect(kPad, kHeight - 2, bar, 2, seconds / limit > 0.85f ? kWarn : kMuted);
+    });
 }
 
 }  // namespace
@@ -144,13 +145,22 @@ bool record(bool (*held)()) {
     std::deque<uint8_t> levels;
     int peak = 0;
     const unsigned long started = millis();
+    // Where a recording stalls: a capture that gets no data, or a card write.
+    int capture_fails = 0;
+    unsigned long max_capture_ms = 0, max_write_ms = 0;
     const unsigned long max_ms = to_card ? kMaxRecordMsTf : kMaxRecordMsFlash;
     const float limit_s = to_card ? kMaxRecordMsTf / 1000.0f
                                   : std::min(kMaxRecordMsFlash / 1000.0f, ram_budget / 8000.0f);
     while (millis() - started < max_ms) {
         M5Cardputer.update();
         if (!held() && samples > 0) break;
-        if (!capture_chunk()) continue;
+        const unsigned long capture_at = millis();
+        const bool captured = capture_chunk();
+        max_capture_ms = std::max(max_capture_ms, millis() - capture_at);
+        if (!captured) {
+            ++capture_fails;
+            continue;
+        }
         if (samples == 0) {
             for (std::size_t i = 0; i < kFadeSamples; ++i) {
                 audio_chunk[i] = static_cast<int16_t>(static_cast<int32_t>(audio_chunk[i]) * i / kFadeSamples);
@@ -158,7 +168,11 @@ bool record(bool (*held)()) {
         }
         for (const auto s : audio_chunk) peak = std::max(peak, abs(static_cast<int>(s)));
         if (to_card) {
-            if (output.write(reinterpret_cast<const uint8_t*>(audio_chunk), sizeof(audio_chunk)) != sizeof(audio_chunk)) {
+            const unsigned long write_at = millis();
+            const bool written =
+                output.write(reinterpret_cast<const uint8_t*>(audio_chunk), sizeof(audio_chunk)) == sizeof(audio_chunk);
+            max_write_ms = std::max(max_write_ms, millis() - write_at);
+            if (!written) {
                 write_failed = true;
                 break;
             }
@@ -215,7 +229,9 @@ bool record(bool (*held)()) {
         return false;
     }
     runtime_event("ptt_recorded", String(samples * 1000 / kSampleRate) + "ms" + (to_card ? " tf" : " ram") +
-                                      (ram_full ? " ram_full" : ""));
+                                      (ram_full ? " ram_full" : "") + " held=" + String(millis() - started) +
+                                      "ms fails=" + String(capture_fails) + " capture_max=" + String(max_capture_ms) +
+                                      "ms write_max=" + String(max_write_ms) + "ms");
     return true;
 }
 

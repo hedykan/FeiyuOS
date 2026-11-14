@@ -27,6 +27,7 @@ RULES = [
     (re.compile(r"ui://apps(?![/\w])"), "ui://apps/list"),
     (re.compile(r"memory://cases(?![/\w])"), "memory://cases/list"),
     (re.compile(r"memory://out(?![/\w])"), "memory://out/list"),
+    (re.compile(r"ui://canvas/"), "gfx://canvas/"),
 ]
 
 

@@ -39,7 +39,8 @@ CACHE = ROOT / "tests/fixtures/discover_cache.json"
 OLD_CACHE = ROOT / "logs/discover_cache.json"
 KEY_FILE = ROOT.parent / ".deepseek_key"
 CASE_FILES = [ROOT / "tests/cases/daily_intent_cases.json", ROOT / "tests/cases/ssh_intent_cases.json",
-              ROOT / "tests/cases/v05_intent_cases.json", ROOT / "tests/cases/v053_program_cases.json"]
+              ROOT / "tests/cases/v05_intent_cases.json", ROOT / "tests/cases/v053_program_cases.json",
+              ROOT / "tests/cases/v075_gfx_cases.json"]
 MANIFEST = ROOT / "tests/pcm/manifest.json"
 MAX_ROUNDS = 4  # model rounds before the operation
 MAX_DISCOVER = 2  # agent.cpp kMaxDiscoverCalls
@@ -107,8 +108,9 @@ def packages() -> list[dict]:
         pid, summary = string_fields(text, at + len("Manifest m{"), 2)
         match = re.search(r'constexpr char kUsage\[\] =\s*((?:\s*"[^"\\]*")+);', text)
         usage = "".join(re.findall(r'"([^"\\]*)"', match.group(1))) if match else ""
-        found = re.search(r'const char\* index\(\) const override \{ return (?:place::available\(\) \? )?"([^"]*)"', text)
-        index = found.group(1) if found else None
+        # One literal or several ("a" "b"), on the same line as `{ return` or the next
+        found = re.search(r'const char\* index\(\) const override \{\s*return (?:place::available\(\) \? )?((?:\s*"[^"\\]*")+)', text)
+        index = "".join(re.findall(r'"([^"\\]*)"', found.group(1))) if found else None
         if TEXTS and (TEXTS / "always.txt").exists():  # a draft decides what is resident
             drafted = json.loads((TEXTS / "index.json").read_text()) if (TEXTS / "index.json").exists() else {}
             index = None if pid in ALWAYS else drafted.get(pid, "")
@@ -175,7 +177,7 @@ class Discover:
         with self.lock:
             for _ in range(60):  # the device may be busy with someone else's job
                 try:
-                    with urllib.request.urlopen(self.device + "/api/job", data=body, timeout=20) as response:
+                    with device_open(self.device + "/api/job", data=body, timeout=20) as response:
                         job = json.loads(response.read())["id"]
                     break
                 except urllib.error.HTTPError as error:
@@ -189,7 +191,7 @@ class Discover:
             for _ in range(120):
                 time.sleep(0.5)
                 try:
-                    with urllib.request.urlopen(f"{self.device}/api/job?id={job}", timeout=20) as response:
+                    with device_open(f"{self.device}/api/job?id={job}", timeout=20) as response:
                         record = json.loads(response.read())
                 except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
                     continue
@@ -223,6 +225,18 @@ class Discover:
         CACHE.write_text(json.dumps(self.cache, ensure_ascii=False, indent=1, sort_keys=True) + "\n")
 
 
+TOKEN_FILE = Path(os.path.expanduser("~/.config/feiyuos/device_token"))
+
+
+def device_open(url: str, data: bytes | None = None, timeout: float = 20):
+    """urlopen for the device's web API, with its token (as tools/vat_e2e.py).
+    Without it every request is a 401, and the lab silently ran with no SSH
+    profiles and no discover answers (2026-11-14)."""
+    token = os.environ.get("VAT_TOKEN") or (TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else "")
+    request = urllib.request.Request(url, data=data, headers={"Authorization": f"Bearer {token}"} if token else {})
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def call_model(api: str, key: str, body: dict) -> dict:
     request = urllib.request.Request(api, data=json.dumps(body, ensure_ascii=False).encode(),
                                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
@@ -245,7 +259,7 @@ def run_case(case: dict, args, system: str, tools: list, profiles: str, discover
     calls, reply, tokens, started, discovers = [], "", 0, time.time(), 0
     for _ in range(MAX_ROUNDS):
         body = {"model": args.model, "temperature": 0, "max_tokens": 700, "tool_choice": "auto",
-                "reasoning_effort": "none", "messages": messages, "tools": tools}
+                "reasoning_effort": args.reasoning, "messages": messages, "tools": tools}
         result = call_model(args.api, key, body)
         tokens = max(tokens, result.get("usage", {}).get("prompt_tokens", 0))
         message = result["choices"][0]["message"]
@@ -264,7 +278,10 @@ def run_case(case: dict, args, system: str, tools: list, profiles: str, discover
             # The device would execute these now; that is what the cases judge.
             calls += [{"name": name, "arguments": arguments} for _, name, arguments in parsed]
             break
-        messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls})
+        assistant = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
+        if args.reasoning != "none":  # thinking mode wants this turn's calling messages back with it (agent.cpp)
+            assistant["reasoning_content"] = (message.get("reasoning_content") or "")[:1500]
+        messages.append(assistant)
         for tc, name, arguments in parsed:
             calls.append({"name": name, "arguments": arguments})
             discovers += 1
@@ -282,6 +299,8 @@ def main() -> int:
     parser.add_argument("--prompt", help="plain-text system prompt to test instead of agent_prompt.h")
     parser.add_argument("--only", default="", help="comma list of case-id substrings")
     parser.add_argument("--repeat", type=int, default=1, help="runs per case (stability)")
+    parser.add_argument("--reasoning", default="none", choices=["none", "low"],
+                        help="reasoning_effort: low is the device's 显示思考 setting")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--model", default="", help="default: the device's agent model (config.json), else the firmware default")
     parser.add_argument("--api", default="https://api.deepseek.com/chat/completions")
@@ -305,7 +324,7 @@ def main() -> int:
         args.model = re.search(r'String agent_model = "([^"]+)"', (ROOT / "firmware/standalone_agent/src/config.h").read_text()).group(1)
         if args.device:
             try:
-                with urllib.request.urlopen(args.device + "/api/file?path=/vat/config.json", timeout=10) as response:
+                with device_open(args.device + "/api/file?path=/vat/config.json", timeout=10) as response:
                     args.model = json.loads(response.read()).get("agent", {}).get("model") or args.model
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
                 pass
@@ -319,7 +338,7 @@ def main() -> int:
     names = args.profiles
     if not names and args.device:
         try:
-            with urllib.request.urlopen(args.device + "/api/status", timeout=10) as response:
+            with device_open(args.device + "/api/status", timeout=10) as response:
                 names = json.loads(response.read()).get("profiles", "")
         except (urllib.error.URLError, TimeoutError):
             names = ""

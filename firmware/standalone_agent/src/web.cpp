@@ -245,7 +245,7 @@ void handle_secret() {
 
 // Current screen as a 24-bit BMP, read back from the display row by row.
 void handle_screenshot() {
-    auto& d = M5Cardputer.Display;
+    auto& d = M5Cardputer.Display;  // read back only
     const int w = d.width();
     const int h = d.height();
     const uint32_t row_bytes = (w * 3 + 3) & ~3u;

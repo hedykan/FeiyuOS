@@ -35,7 +35,7 @@ public:
         question.trim();
         if (question.isEmpty()) return "ERROR: ask:// 要在 content 里写问题";
         if (agent::active()) return "ERROR: 已有对话在进行或等待确认，ask:// 只能在程序里使用";
-        const auto outcome = agent::run(question, [](const String& stage) { ui::set_stage("ASK " + stage); }, true);
+        const auto outcome = agent::run(question, {[](const String& stage) { ui::set_stage("ASK " + stage); }, nullptr}, true);
         if (!outcome.ok) return "ERROR: " + outcome.error;
         return outcome.reply;
     }

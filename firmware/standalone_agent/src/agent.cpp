@@ -228,6 +228,7 @@ struct QueuedCall {
     String name;
     String arguments;  // compact JSON
     bool approved = false;
+    bool announced = false;  // its 'C' step was sent (a paused call comes round again)
 };
 
 // One task = one utterance.  Everything needed to continue after a pause
@@ -271,19 +272,19 @@ String piece(cJSON* item) {
     return json;
 }
 
-String request_head(const String& tool_choice, int max_tokens = 0) {
+String request_head(const String& tool_choice, int max_tokens = 0, bool reasoning = false) {
     const auto& cfg = config::get();
     if (max_tokens <= 0) max_tokens = static_cast<int>(cfg.agent_max_tokens);
     return "{\"model\":" + to_json(cJSON_CreateString(cfg.agent_model.c_str())) +
            ",\"temperature\":0,\"max_tokens\":" + String(max_tokens) + ",\"tool_choice\":\"" + tool_choice +
-           "\",\"reasoning_effort\":\"none\",\"messages\":[{\"role\":\"system\",\"content\":";
+           "\",\"reasoning_effort\":\"" + (reasoning ? "low" : "none") + "\",\"messages\":[{\"role\":\"system\",\"content\":";
 }
 
 // Asks the model with everything so far.  Returns the assistant message.
 cJSON* ask_model(const String& tool_choice, String& error, long budget_ms) {
     const auto& cfg = config::get();
     const unsigned long began = millis();
-    const String head = request_head(tool_choice);
+    const String head = request_head(tool_choice, 0, cfg.reasoning);
     const String profiles = "},{\"role\":\"system\",\"content\":" +
                             to_json(cJSON_CreateString(profiles_message().c_str())) + "}";
     const String case_notes = context::case_fragment();
@@ -545,7 +546,21 @@ String slim_arguments(const String& arguments) {
     return to_json(parsed);
 }
 
-void record_result(const QueuedCall& call, const String& decision, const String& result, long ms = -1) {
+void stage(const Progress& progress, const String& name) {
+    if (progress.stage) progress.stage(name);
+}
+
+void step(const Progress& progress, char kind, String text) {
+    text.trim();
+    if (progress.step && !text.isEmpty()) progress.step(kind, text);
+}
+
+void record_result(const QueuedCall& call, const String& decision, const String& result, const Progress& progress,
+                   long ms = -1) {
+    if (decision != "discover") {
+        step(progress, decision == "deny" || decision == "rejected" || decision == "secret_cancelled" ? 'X' : 'R',
+             utf8_head(result, 240));
+    }
     Call record{call.name, slim_arguments(call.arguments), result, decision};
     String in_context = result;
     long out = 0;
@@ -598,32 +613,38 @@ bool drain_queue(Outcome& paused, const String* secret, const Progress& progress
         if (!arguments) arguments = cJSON_CreateObject();
         if (call.name == "discover") {
             ++task.discover;
-            if (progress) progress("DISCOVER");
+            stage(progress, "DISCOVER");
             const String result = task.discover > kMaxDiscoverCalls ? String("{\"error\":\"discover 次数已达上限\"}")
                                                                     : discover_result(arguments);
-            record_result(call, "discover", result);
+            record_result(call, "discover", result, progress);
         } else {
+            if (!call.announced) {
+                call.announced = true;
+                step(progress, 'C', describe_call(call.name, call.arguments));
+            }
             const auto verdict = policy::evaluate(call.name, arguments);
             if (verdict.decision == policy::Decision::Deny) {
-                record_result(call, "deny", "已拒绝：" + verdict.reason);
+                record_result(call, "deny", "已拒绝：" + verdict.reason, progress);
             } else if (verdict.decision == policy::Decision::Ask && !call.approved && !task.approve_all &&
                        task.unattended) {
-                record_result(call, "rejected", "无人值守，不执行需要确认的操作：" + verdict.reason);
+                record_result(call, "rejected", "无人值守，不执行需要确认的操作：" + verdict.reason, progress);
             } else if (verdict.decision == policy::Decision::Ask && !call.approved && !task.approve_all) {
                 cJSON_Delete(arguments);
+                step(progress, 'W', "等待确认：" + verdict.reason);
                 paused = pause_for(call, verdict.reason, "");
                 return true;
             } else if (task.unattended && !registry::needs_secret(call.name, arguments).isEmpty()) {
-                record_result(call, "rejected", "无人值守，不能输入密码");
+                record_result(call, "rejected", "无人值守，不能输入密码", progress);
             } else {
                 const String prompt = registry::needs_secret(call.name, arguments);
                 if (!prompt.isEmpty() && !secret) {
                     if (verdict.decision == policy::Decision::Ask) call.approved = true;
                     cJSON_Delete(arguments);
+                    step(progress, 'W', prompt);
                     paused = pause_for(call, "", prompt);
                     return true;
                 }
-                if (progress) progress("RUN " + call.name);
+                stage(progress, "RUN " + call.name);
                 // From here the parsed arguments do the work; the queue's copy of a
                 // program's source would only sit beside it while it compiles.
                 if (call.arguments.length() > 800) call.arguments = slim_tree(arguments);
@@ -632,7 +653,7 @@ bool drain_queue(Outcome& paused, const String* secret, const Progress& progress
                 const String result = registry::execute(call.name, arguments, approved, secret ? *secret : String());
                 const String decision = verdict.decision == policy::Decision::Allow ? "allow"
                                         : task.approve_all && !call.approved ? "approved_all" : "approved";
-                record_result(call, decision, result, static_cast<long>(millis() - began));
+                record_result(call, decision, result, progress, static_cast<long>(millis() - began));
                 secret = nullptr;  // a secret is used for exactly one call
             }
         }
@@ -658,13 +679,14 @@ Outcome advance(const String* secret, const Progress& progress) {
         const long budget = static_cast<long>(cfg.agent_total_timeout_ms) - static_cast<long>(task.model_ms);
         if (budget <= 1000) return fail("理解超时：模型累计用了 " + String(task.model_ms / 1000) + " 秒");
         const bool last = task.steps >= kMaxSteps;
-        if (progress) progress(last ? String("SUMMARY") : "THINK " + String(task.steps + 1));
+        stage(progress, last ? String("SUMMARY") : "THINK " + String(task.steps + 1));
         String error;
         const unsigned long asked = millis();
         cJSON* message = ask_model(last ? "none" : "auto", error, budget);
         task.model_ms += millis() - asked;
         if (!message) return fail(error);
         ++task.rounds;
+        step(progress, 'T', utf8_head(json_str(message, "reasoning_content"), 240));
         cJSON* tool_calls = cJSON_GetObjectItemCaseSensitive(message, "tool_calls");
         const int count = cJSON_IsArray(tool_calls) ? cJSON_GetArraySize(tool_calls) : 0;
         if (count == 0 || last) {
@@ -677,8 +699,16 @@ Outcome advance(const String* secret, const Progress& progress) {
         cJSON* assistant = cJSON_CreateObject();
         cJSON_AddStringToObject(assistant, "role", "assistant");
         const String content = json_str(message, "content");
+        step(progress, 'S', utf8_head(content, 240));
         if (content.isEmpty()) cJSON_AddNullToObject(assistant, "content");
         else cJSON_AddStringToObject(assistant, "content", content.c_str());
+        // Thinking mode refuses a request whose calling messages of this turn come
+        // back without reasoning_content (HTTP 400), also one made before the
+        // setting was turned on: an empty one will do there.
+        const String thought = json_str(message, "reasoning_content");
+        if (cfg.reasoning || !thought.isEmpty()) {
+            cJSON_AddStringToObject(assistant, "reasoning_content", utf8_head(thought, 1500).c_str());
+        }
         cJSON* kept = cJSON_AddArrayToObject(assistant, "tool_calls");
         bool counts_as_step = false;
         // A call that writes a program carries its whole source: it is parsed once to
@@ -715,7 +745,7 @@ Outcome advance(const String* secret, const Progress& progress) {
         cJSON_Delete(message);
         task_message(assistant);
         if (counts_as_step) ++task.steps;
-        if (progress) progress("STEP " + String(task.steps));
+        stage(progress, "STEP " + String(task.steps));
     }
 }
 
@@ -737,13 +767,13 @@ Outcome resume(Answer answer, const String& secret, const Progress& progress) {
     task.started = millis();
     QueuedCall& call = task.queue.front();
     if (answer == Answer::Reject) {
-        record_result(call, "rejected", "用户在设备上拒绝了这一步，未执行。");
+        record_result(call, "rejected", "用户在设备上拒绝了这一步，未执行。", progress);
         task.queue.erase(task.queue.begin());
         return advance(nullptr, progress);
     }
     if (answer == Answer::Secret) {
         if (secret.isEmpty()) {
-            record_result(call, "secret_cancelled", "用户取消了密码输入，未执行。");
+            record_result(call, "secret_cancelled", "用户取消了密码输入，未执行。", progress);
             task.queue.erase(task.queue.begin());
             return advance(nullptr, progress);
         }
@@ -752,6 +782,24 @@ Outcome resume(Answer answer, const String& secret, const Progress& progress) {
     call.approved = true;
     if (answer == Answer::ApproveAll) task.approve_all = true;
     return advance(nullptr, progress);
+}
+
+String describe_call(const String& name, const String& arguments) {
+    cJSON* args = cJSON_Parse(arguments.c_str());
+    String what = name;
+    const String target = json_str(args, "target");
+    if (!target.isEmpty()) what += " " + target;
+    if (name == "exec") {
+        what += " $ " + json_str(args, "program");
+        const cJSON* item = nullptr;
+        cJSON_ArrayForEach(item, cJSON_GetObjectItemCaseSensitive(args, "args")) {
+            if (cJSON_IsString(item)) what += String(" ") + item->valuestring;
+        }
+    } else if (name == "session") {
+        what += " " + json_str(args, "action");
+    }
+    cJSON_Delete(args);
+    return utf8_head(what, 160);
 }
 
 bool paused() { return task.active && !task.queue.empty(); }

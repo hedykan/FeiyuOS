@@ -53,6 +53,7 @@ const Rule kRules[] = {
     {"memory://cases", "memory://cases/list", Match::Whole, false},
     {"memory://out", "memory://out/list", Match::Whole, false},
     {"pkg://install?", "pkg://new?", Match::Prefix, false},
+    {"ui://canvas/", "gfx://canvas/", Match::Prefix, false},
 };
 
 String apply(const String& text, const Rule& rule) {

@@ -1,0 +1,78 @@
+[
+ {
+  "id": "gfx_draw_shape",
+  "input": "在屏幕上画一个红色的圆和一行字“你好”",
+  "expect": {
+   "first_any": [
+    {
+     "name": "write",
+     "target": "gfx://"
+    },
+    {
+     "name": "read",
+     "target": "gfx://help"
+    },
+    {
+     "name": "read",
+     "target": "gfx://screen"
+    }
+   ]
+  }
+ },
+ {
+  "id": "gfx_program_animation",
+  "input": "写个程序，在屏幕上画一个来回弹的小球动画",
+  "expect": {
+   "first_any": [
+    {
+     "name": "read",
+     "target": "prog://help"
+    },
+    {
+     "name": "read",
+     "target": "gfx://help"
+    },
+    {
+     "name": "write",
+     "target": "prog://"
+    },
+    {
+     "name": "read",
+     "target": "prog://list"
+    },
+    {
+     "name": "read",
+     "target": "gfx://screen"
+    }
+   ]
+  }
+ },
+ {
+  "id": "gfx_clock_canvas",
+  "input": "在屏幕上画一个每秒走动的时钟",
+  "expect": {
+   "first_any": [
+    {
+     "name": "write",
+     "target": "gfx://canvas/"
+    },
+    {
+     "name": "read",
+     "target": "gfx://help"
+    },
+    {
+     "name": "read",
+     "target": "prog://help"
+    },
+    {
+     "name": "write",
+     "target": "prog://"
+    },
+    {
+     "name": "read",
+     "target": "gfx://screen"
+    }
+   ]
+  }
+ }
+]

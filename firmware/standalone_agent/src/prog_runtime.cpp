@@ -537,6 +537,7 @@ Outcome run_checked(const String& name, const String& query, const String& event
     }
     luavm::Options options;
     options.uses = &e.header.uses;
+    options.libraries = &e.header.libraries;
     options.input = input;
     options.foreground = foreground;
     options.errors = &o.errors;
@@ -1200,6 +1201,8 @@ String run_script(const String& source) {
     Outcome o;
     luavm::Options options;
     options.ask = true;
+    lua_meta::Header header;  // a script may say "-- @uses gfx" like a program
+    if (lua_meta::parse(source, header).isEmpty()) options.libraries = &header.libraries;
     options.errors = &o.errors;
     options.inputs = &o.inputs;
     luavm::Stats stats;
@@ -1637,6 +1640,7 @@ String run_package(const String& name, const String& tool, const cJSON* argument
     }
     luavm::Options options;
     options.uses = &e.header.uses;
+    options.libraries = &e.header.libraries;
     options.input = arguments;
     options.entry = tool.c_str();
     String output, result, error;

@@ -2,10 +2,14 @@
 #include "cjk_font.h"
 
 #include <algorithm>
+#include <cstring>
+#include <mutex>
 
 #include "arena.h"
 #include "config.h"
 #include "ops_tui.h"
+#include "ui_compose.h"
+#include "lgfx/utility/lgfx_qrcode.h"
 
 namespace vat::ui {
 
@@ -27,23 +31,19 @@ lgfx::LGFX_Sprite* strip() {
 }
 
 void band(Gfx& screen, int y, int height, uint16_t bg, const std::function<void(Gfx& g, int top)>& paint) {
-    lgfx::LGFX_Sprite* s = strip();
-    if (!s || height > kStripHeight) {
-        screen.fillRect(0, y, kWidth, height, bg);
-        paint(screen, y);
+    if (!compose::composing(screen)) {  // on its own: an update of just these rows
+        compose::area({0, y, kWidth, height}, [&](Gfx& g) { band(g, y, height, bg, paint); }, bg);
         return;
     }
-    s->setFont(&cjk::cn12);
-    s->setTextSize(1);
-    s->fillRect(0, 0, kWidth, height, bg);
-    paint(*s, 0);
-    screen.setClipRect(0, y, kWidth, height);  // only `height` rows of the strip
-    s->pushSprite(&screen, 0, y);
-    // The strip is DMA memory: inside startWrite() the push runs on while
-    // this returns, and the next band would repaint the strip under it (each
-    // row showed the next one's text, 2026-11-09).  Wait before reusing it.
-    screen.waitDMA();
-    screen.clearClipRect();
+    if (!compose::visible(screen, y, height)) return;
+    const lgfx::IFont* font = screen.getFont();
+    compose::clip(screen, 0, y, kWidth, height);
+    screen.fillRect(0, y, kWidth, height, bg);
+    screen.setFont(&cjk::cn12);
+    screen.setTextSize(1);
+    paint(screen, y);
+    compose::unclip(screen);
+    screen.setFont(font);
 }
 
 namespace {
@@ -132,33 +132,112 @@ String fit_tail(Gfx& g, const String& text, int max_px) {
     return "…" + text.substring(start);
 }
 
+int measure_text(const String& text, int size) {
+    static std::mutex lock;
+    static lgfx::LGFX_Sprite* ruler = nullptr;  // no pixels: fonts only
+    std::lock_guard<std::mutex> guard(lock);
+    if (!ruler) ruler = new lgfx::LGFX_Sprite();
+    ruler->setFont(&cjk::cn12);
+    ruler->setTextSize(std::clamp(size, 1, 4));
+    return ruler->textWidth(text);
+}
+
+namespace {
+struct QrCode {
+    String text;
+    QRCode code{};
+    std::vector<uint8_t> modules;  // code.modules points here (a move keeps the buffer)
+    bool ok = false;
+};
+
+QrCode encode_qr(const String& data) {
+    QrCode qr;
+    qr.text = data;
+    for (uint8_t version = 1; version <= 40 && !qr.ok; ++version) {
+        qr.modules.assign(lgfx_qrcode_getBufferSize(version), 0);
+        qr.ok = lgfx_qrcode_initText(&qr.code, qr.modules.data(), version, 0, data.c_str()) == 0;
+    }
+    return qr;
+}
+}  // namespace
+
+void draw_qr(Gfx& g, const String& data, int x, int y, int w) {
+    g.fillRect(x, y, w, w, TFT_WHITE);
+    static compose::PerUpdate<QrCode> encoded;  // once for all the bands
+    QrCode& qr = encoded.get(g, [&] { return encode_qr(data); });
+    if (qr.text != data) qr = encode_qr(data);  // a second code in the same frame
+    if (!qr.ok) return;
+    const int size = qr.code.size;
+    const int cell = w / size;
+    if (cell <= 0) return;
+    const int offset = (w - size * cell) / 2;
+    for (int iy = 0; iy < size; ++iy) {
+        const int dy = y + offset + iy * cell;
+        if (!compose::visible(g, dy, cell)) continue;
+        for (int ix = 0; ix < size; ++ix) {
+            if (lgfx_qrcode_getModule(&qr.code, ix, iy)) g.fillRect(x + offset + ix * cell, dy, cell, cell, TFT_BLACK);
+        }
+    }
+}
+
 int qr_panel(Gfx& g, const String& data) {
     const int side = kHeight - 4;
     g.fillRect(0, 0, side + 4, kHeight, TFT_WHITE);
-    g.qrcode(data.c_str(), 2, 2, side, 1);
+    draw_qr(g, data, 2, 2, side);
     return side + 8;
 }
 
-std::vector<String> wrap_text(Gfx& g, const String& text, int width) {
+std::vector<String> wrap(Gfx& g, const String& text, int width, int max_lines) {
     std::vector<String> lines;
+    const int n = text.length();
+    const char* s = text.c_str();
+    const auto full = [&] { return max_lines > 0 && static_cast<int>(lines.size()) > max_lines; };
     int start = 0;
-    while (start <= static_cast<int>(text.length())) {
+    while (start < n && !full()) {
         int end = text.indexOf('\n', start);
-        if (end < 0) end = text.length();
-        String rest = text.substring(start, end);
-        do {
-            int cut_at = rest.length();
-            while (cut_at > 0 && g.textWidth(rest.substring(0, cut_at)) > width) {
-                --cut_at;
-                while (cut_at > 0 && (static_cast<uint8_t>(rest[cut_at]) & 0xC0) == 0x80) --cut_at;
+        if (end < 0) end = n;
+        if (start == end) lines.push_back(String());
+        int line_start = start;
+        int px = 0;
+        for (int i = start; i < end && !full();) {
+            const uint8_t c = s[i];
+            const int len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+            char glyph[5] = {};
+            memcpy(glyph, s + i, std::min(len, end - i));
+            const int w = g.textWidth(glyph);
+            if (px + w > width && i > line_start) {
+                lines.push_back(text.substring(line_start, i));
+                line_start = i;
+                px = 0;
             }
-            if (cut_at == 0) cut_at = rest.length();  // a single glyph wider than the line
-            lines.push_back(rest.substring(0, cut_at));
-            rest = rest.substring(cut_at);
-        } while (!rest.isEmpty());
+            px += w;
+            i += len;
+        }
+        if (line_start < end && !full()) lines.push_back(text.substring(line_start, end));
         start = end + 1;
     }
+    if (full() || (max_lines > 0 && static_cast<int>(lines.size()) == max_lines && start < n)) {
+        lines.resize(max_lines);
+        lines.back() = fit(g, lines.back() + "…", width);
+    }
     return lines;
+}
+
+void footer(Gfx& g, const Footer& f, int span) {
+    band(g, kHeight - kLine, kLine, kBg, [&](Gfx& b, int top) {
+        int right = span - kPad;
+        if (!f.hint.isEmpty()) {
+            b.setTextColor(kMuted, kBg);
+            b.drawRightString(f.hint, right, top);
+            right -= b.textWidth(f.hint) + 8;
+        }
+        b.setTextColor(f.color, kBg);
+        switch (f.align) {
+            case Align::Left: b.drawString(fit_tail(b, f.text, right - kPad), kPad, top); break;
+            case Align::Center: b.drawCentreString(fit(b, f.text, span - 8), span / 2, top); break;
+            case Align::Right: b.drawRightString(fit(b, f.text, right - kPad), right, top); break;
+        }
+    });
 }
 
 bool has_char(const Keyboard_Class::KeysState& state, char c) {

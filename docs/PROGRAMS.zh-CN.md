@@ -78,6 +78,30 @@ return w
 - `write prog://名字/patch`：content 是若干段 `<<<<`（换行）原文（换行）`====`（换行）新文字（换行）`>>>>`。原文必须和程序里的文字完全一致并且只出现一次；找不到或出现多次时报错，程序不改动。改完照常做语法检查和权限确认。
 - `read prog://名字?grep=关键词`：匹配的行，带行号。`read prog://名字?lines=120-160`：这一段原文。
 
+### 2.1.3 画图（gfx）
+
+程序开头写 `-- @uses gfx`（`@uses` 后面只写包名，表示用这个扩展包的 Lua 写法，不需要确认），就能逐帧画：
+
+```lua
+-- @uses gfx
+local x, vx = 12, 6
+for i = 1, 300 do
+  gfx.fillScreen("#101820")
+  gfx.fillCircle(x, 70, 10, "#E8A33D")
+  gfx.drawString("帧 " .. i, 4, 4, {size = 1, color = "white"})
+  gfx.present()          -- 这一帧一次上屏；不调用，屏幕不变
+  x = x + vx
+  if x > 228 or x < 12 then vx = -vx end
+  vat.sleep(33)
+end
+```
+
+- `gfx.<函数名>(参数…)` 与 M5GFX 同名同参，76 个：形状（`fillRect`、`fillSmoothCircle`、`drawWideLine`、`fillGradientRect`、`fillArc`……）、文字（`drawString`、`drawCentreString`、`print`、`println`、`printf`、`setCursor`、`setTextColor`、`setFont`……）、图片与位图（`drawPng/Jpg/Bmp` 读 `/vat/` 下文件、`drawBitmap`、`pushImage`、`qrcode`）、状态与裁剪（`setColor`、`setClipRect`……）、查询（`width`、`textWidth`、`fontHeight`、`getCursorX`、`color565`……立即返回），颜色常量 `gfx.TFT_RED` 这类。全部函数和例子：`read gfx://help`。另有 FeiyuOS 的 `progressBar`、`drawQr`、`rotate`。颜色省略时用 `setColor` 的颜色，画图时给了颜色也会改掉当前颜色（同 M5GFX）；状态在下一帧继续有效。参数不对时报错并指出是哪个参数。一帧最多 64 条，位图、像素和图片合计 32 KB。
+- 不提供：`readPixel`、`floodFill`、`copyRect`、`scroll`、sprite（要整屏缓冲，留给 0.8 独占态），以及 `startWrite`、DMA 这类底层调用。
+- `gfx.present()`：和 `write gfx://frame` 一样过权限判断（屏幕属于本机可撤销，直接放行），把这一帧交给界面；上一帧还没被界面取走时最多等 100 ms，所以画得再快也不会白算。每次运行的第一帧会切到图形页。
+- `gfx.size()` 返回 240、135；`gfx.measure(文字, size)` 返回文字宽度；`gfx.close()` 收起画面。
+- 画面由合成器上屏（`docs/V075_PLAN.zh-CN.md`）：一帧要么全部出现，要么不出现，不会画到一半被看见；没变的条带不推送。实测每帧 `vat.sleep(30)` 约 29 帧/秒，不停顿约 47 帧/秒。
+
 ### 2.4 运行记录：三条全局的流
 
 - `/vat/io/stdin.log`、`stdout.log`、`stderr.log`，所有程序共用。每次运行有一个编号，在流里以一行头开始：`== 11-11 02:00:03 #128 每日备份 来源=触发:每天 结果=失败 耗时=1.2s 内存峰值=18KB ==`。标准输出流每次运行都写头行（它同时是运行记录），另外两条只在有内容时写。

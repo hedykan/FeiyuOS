@@ -37,18 +37,20 @@ constexpr std::size_t kMaxText = 120;
 constexpr int kMinCoord = -240;
 constexpr int kMaxCoord = 480;
 
-enum class Kind : uint8_t {
-    FillScreen, DrawPixel, DrawLine, DrawFastHLine, DrawFastVLine, DrawRect, FillRect, DrawRoundRect,
-    FillRoundRect, DrawCircle, FillCircle, DrawEllipse, FillEllipse, DrawTriangle, FillTriangle, DrawArc,
-    FillArc, DrawBezier, DrawGradientLine, DrawString, DrawQr, DrawImage, ProgressBar, Rotate
-};
+// Call: an M5GFX function of gfx_api (fn, overload, args as gfx_api::check
+// gives them).  The others are FeiyuOS's own: drawString with an options
+// object ({size, color, datum} for this text only), drawQr, drawImage (a
+// canvas's one picture), progressBar and rotate.
+enum class Kind : uint8_t { Call, DrawText, DrawQr, DrawImage, ProgressBar, Rotate };
 
 constexpr uint32_t kMinFrameMs = 33;
 constexpr std::size_t kMaxUpdate = 2048;  // bytes of Lua
 constexpr uint32_t kMaxFrames = 600;
 
 struct Op {
-    Kind kind;
+    Kind kind = Kind::Call;
+    int16_t fn = -1;           // Call: the gfx_api row
+    uint8_t overload = 0;
     std::vector<String> args;  // as written (numbers as text), "{n}" filled in by fill()
     String color = "white";
     String color2;             // DrawGradientLine end, ProgressBar background
@@ -63,6 +65,7 @@ struct Spec {
     String source_args;   // JSON
     uint32_t every_s = 0;
     int images = 0;       // drawImage ops (at most one)
+    std::size_t bytes = 0;  // bitmap and pixel bytes (gfx_api::kMaxBytes)
     uint32_t frame_ms = 0;  // animation: 0 = still
     uint32_t frames = 0;    // 0 = until closed
     int step = 1;           // {t} = frame × step
@@ -72,6 +75,13 @@ struct Spec {
 
 // false: `error` says which op or field is wrong.
 bool parse(const String& json, Spec& out, String& error);
+// One op written as [name, args…] (gfx.* in a program builds one per call);
+// `images` counts the drawImage ops of the frame so far (at most one), `bytes`
+// its bitmap and pixel bytes (gfx_api::kMaxBytes).
+bool parse_one(const cJSON* item, Op& op, int& images, std::size_t& bytes, String& error);
+// A frame for gfx://frame: an array of ops, or an object with "ops"; no
+// source, animation or variables (a program draws each frame itself).
+bool parse_frame(const String& json, std::vector<Op>& out, String& error);
 // Replaces "{n}" in every argument with line n of `lines` and "{n#}" with
 // the first number in it ("" when missing).
 void fill(std::vector<Op>& ops, const std::vector<String>& lines);

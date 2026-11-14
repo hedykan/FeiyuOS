@@ -61,6 +61,7 @@ python3 tools/vat_e2e.py --phases full         # 完整档：设备上跑全部�
 | `standalone_agent.ino` | S1 S5 |
 | `web.*`（Web API） | S7 |
 | `ops_lora.*`、`ops_gps.*`、`packages/lora_package`、`packages/gps_package` | S9 |
+| `ui*`（含 `ui_compose`）、`packages/gfx_package` | S13（`ui*` 同时触发 S4 S6 S10 S11） |
 | `tests/e2e_profiles.example.json` | S3 |
 | `settings_*`、`ops_portal.*`、`web_portal.*`、文档 | 只跑 S0（设置页用例都在 S0） |
 
@@ -83,6 +84,7 @@ python3 tools/vat_e2e.py --phases full         # 完整档：设备上跑全部�
 | S7 多步任务与密钥 | 依赖上一步结果的多步只读任务；逐步确认（每步 Y）、A 全部批准、N 拒绝后不执行；在一次性 Docker SSH 主机（`linuxserver/openssh-server`，2222 端口）上：输入登录密码后装好公钥、之后免密；sudo 正确密码得到 `root`、错误密码明确失败；密钥不出现在任何存储文件（`full` 遍历 `/vat` 下全部文件完整读取；其他档只读输入密码之后新增或大小变了的文件）；终端出现密码提示时切换为掩码输入 |
 | S8 长上下文与联网 | 需要 TF 卡。主机生成 310 KB 日志，问“第 4 个 ERROR 的错误码”：答对，且用 `memory://out/list` 取而不是重跑；完整输出存满 256 KB 并写明截断；清空对话后从归档检索答出；案卷记录、重启后自动带入（`all` 档不重启，清空对话后带入）、关闭；40 KB 窗口下单轮中位数（`all` 档各 2 轮）不超过空窗口的 2 倍；窗口超预算后压缩到 48 KB 内、摘要生成、旧事实仍可回答；联网搜索与读网页；全程最低可用堆 ≥ 40 KB |
 | S9 外设 | 需要 Cap LoRa-1262。GPS：模块有 NMEA 输出（室内不要求定位）。LoRa：状态可读；频点超出 868–923 MHz 被拒绝；未设频点时拒绝开启；未确认天线时拒绝发送；关闭后状态正确。不设置频点、不确认天线、不发射 |
+| S13 画面（0.7.5） | 合成器与 gfx 包（`docs/V075_PLAN.zh-CN.md` T3、T4）：Agent 页静置 5 秒没有整屏重画；切四个页面每次一帧、整帧推送不超过 9 条；页面往返后截图一致（除顶栏和吉祥物角）；`gfx://frame` 的颜色落在画的位置；程序 `-- @uses gfx` 60 帧动画全部上屏、每帧只推变化的条带（记录帧率和单帧最长耗时，不设过线）；画布动画每帧推送不超过 3 条；面板按 source 刷新时没变的条被跳过；旧地址 `ui://canvas` 报错给新写法；代码模式可用 gfx |
 
 需要人在实物上确认的项目（按键手感、真实录音、扬声器、拔掉 USB 用电池运行）见 [人工验收](MANUAL_ACCEPTANCE.zh-CN.md)。
 

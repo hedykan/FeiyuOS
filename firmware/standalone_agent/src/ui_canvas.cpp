@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "gfx_api.h"
 #include "ui_panel.h"
 
 namespace vat::ui_canvas {
@@ -23,28 +24,9 @@ struct Shape {
 
 // Argument shapes follow the M5GFX (LovyanGFX) calls of the same name.
 const Shape kShapes[] = {
-    {"fillScreen", Kind::FillScreen, 0, 1},
-    {"drawPixel", Kind::DrawPixel, 2, 1},
-    {"drawLine", Kind::DrawLine, 4, 1},
-    {"drawFastHLine", Kind::DrawFastHLine, 3, 1},
-    {"drawFastVLine", Kind::DrawFastVLine, 3, 1},
-    {"drawRect", Kind::DrawRect, 4, 1},
-    {"fillRect", Kind::FillRect, 4, 1},
-    {"drawRoundRect", Kind::DrawRoundRect, 5, 1},
-    {"fillRoundRect", Kind::FillRoundRect, 5, 1},
-    {"drawCircle", Kind::DrawCircle, 3, 1},
-    {"fillCircle", Kind::FillCircle, 3, 1},
-    {"drawEllipse", Kind::DrawEllipse, 4, 1},
-    {"fillEllipse", Kind::FillEllipse, 4, 1},
-    {"drawTriangle", Kind::DrawTriangle, 6, 1},
-    {"fillTriangle", Kind::FillTriangle, 6, 1},
-    {"drawArc", Kind::DrawArc, 6, 1},      // x y r0 r1 angle0 angle1
-    {"fillArc", Kind::FillArc, 6, 1},
-    {"drawBezier", Kind::DrawBezier, 6, 1},  // quadratic: x0 y0 x1 y1 x2 y2
-    {"drawGradientLine", Kind::DrawGradientLine, 4, 2},
-    {"drawString", Kind::DrawString, 0, 0},  // text x y {options}
-    {"drawQr", Kind::DrawQr, 0, 0},          // text x y size
-    {"drawImage", Kind::DrawImage, 0, 0},    // path x y
+    {"drawString", Kind::DrawText, 0, 0},      // text x y {options}: otherwise the M5GFX call
+    {"drawQr", Kind::DrawQr, 0, 0},            // text x y size
+    {"drawImage", Kind::DrawImage, 0, 0},      // path x y
     {"progressBar", Kind::ProgressBar, 5, 2},  // x y w h value(0-100) colour [background]
     {"rotate", Kind::Rotate, 3, 0},            // angle cx cy (0 0 0 stops)
 };
@@ -110,19 +92,43 @@ bool parse_op(const cJSON* item, int index, Op& op, Spec& spec, String& error) {
         return false;
     }
     const String name = cJSON_GetArrayItem(item, 0)->valuestring;
+    const int n_args = cJSON_GetArraySize(item) - 1;
     const Shape* shape = nullptr;
     for (const auto& s : kShapes) {
         if (name == s.name) shape = &s;
     }
+    // drawString with an options object is FeiyuOS's; without it, M5GFX's.
+    if (shape && shape->kind == Kind::DrawText && !(n_args >= 4 && cJSON_IsObject(cJSON_GetArrayItem(item, 4)))) shape = nullptr;
     if (!shape) {
-        error = where + "：不支持的指令 " + name;
-        return false;
+        const gfx_api::Fn* fn = gfx_api::find(name);
+        if (!fn) {
+            error = where + "：不支持的指令 " + name + "（函数清单见 read gfx://help）";
+            return false;
+        }
+        if (fn->group == gfx_api::Group::Query) {
+            error = where + "：" + name + " 是查询，只能在程序里用（gfx." + name + "）";
+            return false;
+        }
+        cJSON* args = cJSON_CreateArray();
+        for (int i = 1; i <= n_args; ++i) cJSON_AddItemToArray(args, cJSON_Duplicate(cJSON_GetArrayItem(item, i), true));
+        int overload = 0;
+        String why;
+        const bool ok = gfx_api::check(*fn, args, op.args, overload, spec.bytes, why);
+        cJSON_Delete(args);
+        if (!ok) {
+            error = where + "：" + why;
+            return false;
+        }
+        op.kind = Kind::Call;
+        op.fn = static_cast<int16_t>(gfx_api::index_of(fn));
+        op.overload = static_cast<uint8_t>(overload);
+        return true;
     }
     op.kind = shape->kind;
     const int n = cJSON_GetArraySize(item) - 1;
     const auto arg = [item](int i) { return cJSON_GetArrayItem(item, i + 1); };
     const String at = where + "（" + name + "）";
-    if (op.kind == Kind::DrawString || op.kind == Kind::DrawQr || op.kind == Kind::DrawImage) {
+    if (op.kind == Kind::DrawText || op.kind == Kind::DrawQr || op.kind == Kind::DrawImage) {
         const int needed = op.kind == Kind::DrawQr ? 4 : 3;
         if (n < needed) {
             error = at + "参数不够";
@@ -148,7 +154,7 @@ bool parse_op(const cJSON* item, int index, Op& op, Spec& spec, String& error) {
                 return false;
             }
         }
-        if (op.kind == Kind::DrawString && n >= 4) {
+        if (op.kind == Kind::DrawText && n >= 4) {
             const cJSON* options = arg(3);
             if (!cJSON_IsObject(options)) {
                 error = at + "第 4 个参数要是 {size, color, datum}";
@@ -185,10 +191,6 @@ bool parse_op(const cJSON* item, int index, Op& op, Spec& spec, String& error) {
     if (shape->colors == 0) return true;
     if (!color_arg(arg(shape->numbers), op.color, error, at)) return false;
     if (n > shape->numbers + 1 && !color_arg(arg(shape->numbers + 1), op.color2, error, at)) return false;
-    if (op.kind == Kind::DrawGradientLine && op.color2.isEmpty()) {
-        error = at + "要两个颜色（起点、终点）";
-        return false;
-    }
     return true;
 }
 
@@ -228,6 +230,43 @@ String quote_placeholders(const String& json) {
 }
 
 }  // namespace
+
+bool parse_one(const cJSON* item, Op& op, int& images, std::size_t& bytes, String& error) {
+    Spec counts;
+    counts.images = images;
+    counts.bytes = bytes;
+    op = Op();
+    const bool ok = parse_op(item, 0, op, counts, error);
+    images = counts.images;
+    bytes = counts.bytes;
+    return ok;
+}
+
+bool parse_frame(const String& json, std::vector<Op>& out, String& error) {
+    out.clear();
+    if (json.length() > kMaxJson) {
+        error = "一帧的描述超过 " + String(static_cast<int>(kMaxJson)) + " 字节";
+        return false;
+    }
+    cJSON* root = cJSON_Parse(json.c_str());
+    const cJSON* ops = cJSON_IsArray(root) ? root : cJSON_GetObjectItemCaseSensitive(root, "ops");
+    if (!cJSON_IsArray(ops)) {
+        cJSON_Delete(root);
+        error = "一帧要写成绘制指令数组 [[指令名, 参数…], …]，或 {\"ops\": [...]}";
+        return false;
+    }
+    const int count = cJSON_GetArraySize(ops);
+    bool ok = static_cast<std::size_t>(count) <= kMaxOps;
+    if (!ok) error = "一帧最多 " + String(static_cast<int>(kMaxOps)) + " 条指令";
+    Spec counts;
+    for (int i = 0; ok && i < count; ++i) {
+        Op op;
+        ok = parse_op(cJSON_GetArrayItem(ops, i), i, op, counts, error);
+        if (ok) out.push_back(op);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
 
 bool parse(const String& json, Spec& out, String& error) {
     out = Spec();

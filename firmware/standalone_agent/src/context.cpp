@@ -447,10 +447,16 @@ String search_history(const String& query) {
     int hits = 0;
     for (const auto& name : archive_files()) {
         File file = storage::fs().open("/vat/archive/" + name, FILE_READ);
-        std::vector<String> found;  // newest last within a file
+        // Newest last within a file; only as many as are still wanted (a long
+        // archive matches hundreds of times, each line up to ~1.5 KB).
+        const std::size_t room = 12 - hits;
+        std::vector<String> found;
+        found.reserve(room);
         while (file && file.available()) {
-            const String line = file.readStringUntil('\n');
-            if (matches(line)) found.push_back(line);
+            String line = file.readStringUntil('\n');
+            if (!matches(line)) continue;
+            if (found.size() == room) found.erase(found.begin());
+            found.push_back(std::move(line));
         }
         if (file) file.close();
         for (auto it = found.rbegin(); it != found.rend() && hits < 12; ++it) {

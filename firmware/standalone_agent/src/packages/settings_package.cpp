@@ -21,10 +21,11 @@ namespace {
 constexpr char kUsage[] =
     "设置（settings://）：read settings:// 看设置页各项当前值；write settings://brightness（8–255）、settings://timeout（秒，0 为永不）、"
     "settings://volume（0–100）、settings://context（短、中、长）；write settings://animation content 为 开、减弱 或 关；"
+    "write settings://reasoning content 为 开 或 关（模型先想再答，想法显示在记录详细页）；"
     "write settings://statusbar content 为顶栏要显示的项，按顺序用逗号分隔（时间、电量、信号、WiFi名、内存、蓝牙、后台失败，空表示都不显示）；"
     "write settings://font content 为终端字号 10、12 或 14；"
     "要输入 Key 时 write settings://key/qwen/open（或 deepseek、openrouter、amap）在设备上弹出输入框，由用户在键盘上输入，不要向用户索要 Key；"
-    "write settings://页名/open 打开设置页（wifi keys hosts lora ble statusbar animation font context storage portal webtoken）。";
+    "write settings://页名/open 打开设置页（wifi keys hosts lora ble statusbar animation reasoning font context storage portal webtoken）。";
 
 String trimmed(String text) {
     text.trim();
@@ -78,7 +79,7 @@ class SettingsPackage : public Package {
 public:
     const char* usage() const override { return kUsage; }
     const char* index() const override {
-        return "read settings:// 看各项；write settings://brightness|timeout|volume|context|animation|statusbar|font；打开设置页 write settings://页名/open，Key 输入框 settings://key/提供方/open";
+        return "read settings:// 看各项；write settings://brightness|timeout|volume|context|animation|reasoning|statusbar|font；打开设置页 write settings://页名/open，Key 输入框 settings://key/提供方/open";
     }
 
     const Manifest& manifest() const override {
@@ -111,6 +112,14 @@ public:
         }
         const String value = trimmed(json_str(arguments, "content"));
         if (path == "animation") return ui::settings::on_ui([value] { return set_animation(value); });
+        if (path == "reasoning") {
+            if (value != "开" && value != "关" && value != "on" && value != "off") return "ERROR: 显示思考只能是 开 或 关";
+            const bool on = value == "开" || value == "on";
+            return ui::settings::on_ui([on] {
+                settings_store::set_reasoning(on);
+                return String("显示思考已") + (on ? "打开" : "关闭");
+            });
+        }
         if (path == "statusbar") return ui::settings::on_ui([value] { return set_statusbar(value); });
         if (path == "font") {
             return ui::settings::on_ui([value] {
@@ -122,7 +131,7 @@ public:
             const String page = path == "open" ? String() : path.substring(0, path.length() - 5);
             return ui::settings::on_ui([page] { return ui::settings::show_page(page); });
         }
-        return "ERROR: 不认识 " + target + "（read settings://；write settings://brightness、timeout、volume、context、animation、statusbar、font，打开设置页 settings://页名/open）";
+        return "ERROR: 不认识 " + target + "（read settings://；write settings://brightness、timeout、volume、context、animation、reasoning、statusbar、font，打开设置页 settings://页名/open）";
     }
 };
 

@@ -1,3 +1,4 @@
+#include "ui_compose.h"
 #include "ops_local.h"
 
 #include <M5Cardputer.h>
@@ -121,6 +122,7 @@ String status_json(bool for_model) {
     cJSON_AddNumberToObject(status, "free_heap", ESP.getFreeHeap());
     cJSON_AddNumberToObject(status, "min_free_heap", heap_low_since_boot());
     cJSON_AddNumberToObject(status, "max_block", ESP.getMaxAllocHeap());
+    cJSON_AddItemToObject(status, "display", cJSON_Parse(ui::compose::stats_json().c_str()));
     cJSON_AddNumberToObject(status, "open_sockets", open_sockets());
     cJSON_AddNumberToObject(status, "max_sockets", CONFIG_LWIP_MAX_SOCKETS);
     cJSON_AddNumberToObject(status, "worker_stack_free_min", worker::stack_free_min());

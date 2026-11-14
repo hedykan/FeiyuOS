@@ -148,4 +148,9 @@ String set_animation(int level) {
     return {};
 }
 
+void set_reasoning(bool on) {
+    config::get().reasoning = on;
+    config::save_ui_number("reasoning", on ? 1 : 0);
+}
+
 }  // namespace vat::settings_store

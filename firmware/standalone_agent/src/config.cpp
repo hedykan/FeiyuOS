@@ -98,6 +98,7 @@ String load() {
             // The default up to 0.7.2, saved by every settings change: it gets the item added since.
             if (next.status_items == "time,battery,signal") next.status_items = "time,battery,signal,failed";
             next.animation = constrain(json_int(ui, "animation", next.animation), 0, 2);
+            next.reasoning = json_int(ui, "reasoning", 0) != 0;
         }
         if (cJSON* gps = json_obj(config, "gps")) next.gps_enabled = json_bool(gps, "enabled", true);
         if (cJSON* ble = json_obj(config, "ble")) next.ble.enabled = json_bool(ble, "enabled", false);

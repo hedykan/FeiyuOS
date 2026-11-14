@@ -13,6 +13,8 @@
 #include "lua_vm.h"
 #include "registry.h"
 #include "storage.h"
+#include "gfx_exec.h"
+#include "ui_compose.h"
 #include "ui_kit.h"
 
 namespace vat::ui::overlay {
@@ -70,41 +72,27 @@ void draw_panel(Gfx& g) {
     const int choice_rows = static_cast<int>(current.choices.size());
     const int text_bottom = footer_y - choice_rows * kLine - (choice_rows ? 2 : 0);
     g.setTextColor(kText, kBg);
-    for (const auto& line : current.lines) {
-        for (const auto& part : wrap_text(g, line, kWidth - kPad * 2)) {
-            if (y + kLine > text_bottom) break;
-            g.drawString(part, kPad, y);
-            y += kLine;
+    static compose::PerUpdate<std::vector<String>> wrapped;  // once for all the bands
+    const auto& parts = wrapped.get(g, [&] {
+        std::vector<String> out;
+        for (const auto& line : current.lines) {
+            for (auto& part : wrap(g, line, kWidth - kPad * 2)) out.push_back(std::move(part));
         }
+        return out;
+    });
+    for (const auto& part : parts) {
+        if (y + kLine > text_bottom) break;
+        if (compose::visible(g, y, kLine)) g.drawString(part, kPad, y);
+        y += kLine;
     }
     draw_choices(g);
-    g.setTextColor(kMuted, kBg);
-    g.drawRightString(choice_rows ? "; . 选择  Enter 确定  ` 关闭" : "` 关闭", kWidth - kPad, footer_y);
+    footer(g, {choice_rows ? "; . 选择  Enter 确定  ` 关闭" : "` 关闭"});
 }
 
-uint16_t rgb565(const String& text, uint16_t fallback) {
-    uint32_t rgb;
-    if (!ui_canvas::color(text, rgb)) return fallback;
-    return lgfx::color565((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
-}
-
-textdatum_t datum_of(const String& name) {
-    static const char* const names[] = {"top_left", "top_center", "top_right", "middle_left", "middle_center",
-                                        "middle_right", "bottom_left", "bottom_center", "bottom_right"};
-    static const textdatum_t values[] = {textdatum_t::top_left,    textdatum_t::top_center,    textdatum_t::top_right,
-                                         textdatum_t::middle_left, textdatum_t::middle_center, textdatum_t::middle_right,
-                                         textdatum_t::bottom_left, textdatum_t::bottom_center, textdatum_t::bottom_right};
-    for (int i = 0; i < 9; ++i) {
-        if (name == names[i]) return values[i];
-    }
-    return textdatum_t::top_left;
-}
-
-// Animated canvases draw into an 8-bit frame (32 KB leased from the arena)
-// pushed in one go, so a redraw never shows a blank screen; without the
-// lease they draw straight to the display.
-LGFX_Sprite* frame = nullptr;
-bool frame_refused = false;  // the arena said no for this canvas: draw on screen, do not ask every frame
+// A canvas is composed band by band like everything else (ui_compose): the
+// ops of a frame are prepared once (variables stepped, "{t}" filled) and run
+// for each band.
+std::vector<ui_canvas::Op> frame_ops;
 uint32_t anim_frame = 0;
 // Canvas variables: live values, the parsed update, and its first error
 // (shown in the corner; the update then stops).
@@ -133,204 +121,33 @@ void step_vars(long t) {
 }
 unsigned long anim_last = 0;
 
-void drop_frame() {
-    if (!frame) return;
-    frame->deleteSprite();
-    delete frame;
-    frame = nullptr;
-    arena::give_back("canvas_frame");
-}
-
-bool make_frame() {
-    if (frame) return true;
-    if (!arena::take("canvas_frame", kWidth * kHeight, true)) return false;
-    frame = new LGFX_Sprite(&M5Cardputer.Display);
-    frame->setColorDepth(8);
-    if (!frame->createSprite(kWidth, kHeight)) {
-        delete frame;
-        frame = nullptr;
-        arena::give_back("canvas_frame");
-        return false;
-    }
-    return true;
-}
-
-struct Turn {
-    bool on = false;
-    int angle = 0, cx = 0, cy = 0;
-    void at(int& x, int& y) const {
-        if (on) ui_canvas::rotate_point(angle, cx, cy, x, y);
-    }
-};
-
-void polygon(lgfx::LGFXBase& g, const int* xs, const int* ys, int n, uint16_t c, bool fill) {
-    if (fill) {
-        for (int i = 1; i + 1 < n; ++i) g.fillTriangle(xs[0], ys[0], xs[i], ys[i], xs[i + 1], ys[i + 1], c);
-    } else {
-        for (int i = 0; i < n; ++i) g.drawLine(xs[i], ys[i], xs[(i + 1) % n], ys[(i + 1) % n], c);
-    }
-}
-
-void turned_rect(lgfx::LGFXBase& g, const Turn& t, int x, int y, int w, int h, uint16_t c, bool fill) {
-    int xs[4] = {x, x + w - 1, x + w - 1, x}, ys[4] = {y, y, y + h - 1, y + h - 1};
-    for (int i = 0; i < 4; ++i) t.at(xs[i], ys[i]);
-    polygon(g, xs, ys, 4, c, fill);
-}
-
-void turned_ellipse(lgfx::LGFXBase& g, const Turn& t, int cx, int cy, int rx, int ry, uint16_t c, bool fill) {
-    constexpr int kSteps = 36;
-    int xs[kSteps], ys[kSteps];
-    for (int i = 0; i < kSteps; ++i) {
-        const float a = 6.2831853f * i / kSteps;
-        xs[i] = cx + static_cast<int>(std::lround(rx * std::cos(a)));
-        ys[i] = cy + static_cast<int>(std::lround(ry * std::sin(a)));
-        t.at(xs[i], ys[i]);
-    }
-    polygon(g, xs, ys, kSteps, c, fill);
-}
-
-void draw_canvas_on(lgfx::LGFXBase& g) {
-    using ui_canvas::Kind;
-    std::vector<ui_canvas::Op> ops = current.canvas;
+// This frame's ops: the update run once, its values filled in.
+void prepare_canvas() {
+    frame_ops = current.canvas;
     const long t = static_cast<long>(anim_frame) * current.step;
     if (canvas_script.active()) {
         step_vars(t);
-        ui_canvas::fill_vars(ops, [](const String& name, String& value) { return canvas_script.text(name, value); });
+        ui_canvas::fill_vars(frame_ops, [](const String& name, String& value) { return canvas_script.text(name, value); });
     } else if (current.frame_ms) {
-        ui_canvas::fill_frame(ops, t);
+        ui_canvas::fill_frame(frame_ops, t);
     }
-    g.fillScreen(kBg);
-    Turn turn;
-    for (const auto& op : ops) {
-        int v[8] = {};
-        for (std::size_t i = 0; i < op.args.size() && i < 8; ++i) ui_canvas::number(op.args[i], v[i]);
-        const uint16_t c = rgb565(op.color, kText);
-        switch (op.kind) {
-            case Kind::Rotate:
-                turn.on = v[0] % 360 != 0;
-                turn.angle = v[0];
-                turn.cx = v[1];
-                turn.cy = v[2];
-                break;
-            case Kind::FillScreen: g.fillScreen(c); break;
-            case Kind::DrawPixel: turn.at(v[0], v[1]); g.drawPixel(v[0], v[1], c); break;
-            case Kind::DrawLine: turn.at(v[0], v[1]); turn.at(v[2], v[3]); g.drawLine(v[0], v[1], v[2], v[3], c); break;
-            case Kind::DrawFastHLine:
-                if (turn.on) { int x1 = v[0] + v[2] - 1, y1 = v[1]; turn.at(v[0], v[1]); turn.at(x1, y1); g.drawLine(v[0], v[1], x1, y1, c); }
-                else g.drawFastHLine(v[0], v[1], v[2], c);
-                break;
-            case Kind::DrawFastVLine:
-                if (turn.on) { int x1 = v[0], y1 = v[1] + v[2] - 1; turn.at(v[0], v[1]); turn.at(x1, y1); g.drawLine(v[0], v[1], x1, y1, c); }
-                else g.drawFastVLine(v[0], v[1], v[2], c);
-                break;
-            case Kind::DrawRect:
-            case Kind::DrawRoundRect:
-                if (turn.on) turned_rect(g, turn, v[0], v[1], v[2], v[3], c, false);
-                else if (op.kind == Kind::DrawRect) g.drawRect(v[0], v[1], v[2], v[3], c);
-                else g.drawRoundRect(v[0], v[1], v[2], v[3], v[4], c);
-                break;
-            case Kind::FillRect:
-            case Kind::FillRoundRect:
-                if (turn.on) turned_rect(g, turn, v[0], v[1], v[2], v[3], c, true);
-                else if (op.kind == Kind::FillRect) g.fillRect(v[0], v[1], v[2], v[3], c);
-                else g.fillRoundRect(v[0], v[1], v[2], v[3], v[4], c);
-                break;
-            case Kind::DrawCircle: turn.at(v[0], v[1]); g.drawCircle(v[0], v[1], v[2], c); break;
-            case Kind::FillCircle: turn.at(v[0], v[1]); g.fillCircle(v[0], v[1], v[2], c); break;
-            case Kind::DrawEllipse:
-            case Kind::FillEllipse: {
-                const bool fill = op.kind == Kind::FillEllipse;
-                if (turn.on) turned_ellipse(g, turn, v[0], v[1], v[2], v[3], c, fill);
-                else if (fill) g.fillEllipse(v[0], v[1], v[2], v[3], c);
-                else g.drawEllipse(v[0], v[1], v[2], v[3], c);
-                break;
-            }
-            case Kind::DrawTriangle:
-            case Kind::FillTriangle:
-                turn.at(v[0], v[1]); turn.at(v[2], v[3]); turn.at(v[4], v[5]);
-                if (op.kind == Kind::FillTriangle) g.fillTriangle(v[0], v[1], v[2], v[3], v[4], v[5], c);
-                else g.drawTriangle(v[0], v[1], v[2], v[3], v[4], v[5], c);
-                break;
-            case Kind::DrawArc:
-            case Kind::FillArc: {
-                turn.at(v[0], v[1]);
-                const int extra = turn.on ? turn.angle : 0;  // an arc turns by moving its angles
-                if (op.kind == Kind::FillArc) g.fillArc(v[0], v[1], v[2], v[3], v[4] + extra, v[5] + extra, c);
-                else g.drawArc(v[0], v[1], v[2], v[3], v[4] + extra, v[5] + extra, c);
-                break;
-            }
-            case Kind::DrawBezier: turn.at(v[0], v[1]); turn.at(v[2], v[3]); turn.at(v[4], v[5]); g.drawBezier(v[0], v[1], v[2], v[3], v[4], v[5], c); break;
-            case Kind::DrawGradientLine: turn.at(v[0], v[1]); turn.at(v[2], v[3]); g.drawGradientLine(v[0], v[1], v[2], v[3], c, rgb565(op.color2, c)); break;
-            case Kind::DrawString: {
-                int x = 0, y = 0;
-                ui_canvas::number(op.args[1], x);
-                ui_canvas::number(op.args[2], y);
-                turn.at(x, y);  // text moves with the turn; the glyphs stay upright
-                g.setFont(&cjk::cn12);
-                g.setTextSize(op.size);
-                g.setTextDatum(datum_of(op.datum));
-                g.setTextColor(c);
-                g.drawString(op.args[0], x, y);
-                g.setTextDatum(textdatum_t::top_left);
-                g.setTextSize(1);
-                break;
-            }
-            case Kind::DrawQr: {
-                int x = 0, y = 0, w = 64;
-                ui_canvas::number(op.args[1], x);
-                ui_canvas::number(op.args[2], y);
-                ui_canvas::number(op.args[3], w);
-                turn.at(x, y);
-                g.qrcode(op.args[0].c_str(), x, y, std::clamp(w, 21, kHeight));
-                break;
-            }
-            case Kind::DrawImage: {
-                const auto& b = current.image;
-                int x = current.image_x, y = current.image_y;
-                turn.at(x, y);
-                if (b.size() > 4 && b[0] == 0x89 && b[1] == 'P') g.drawPng(b.data(), b.size(), x, y);
-                else if (b.size() > 3 && b[0] == 0xFF && b[1] == 0xD8) g.drawJpg(b.data(), b.size(), x, y);
-                else if (b.size() > 2 && b[0] == 'B' && b[1] == 'M') g.drawBmp(b.data(), b.size(), x, y);
-                break;
-            }
-            case Kind::ProgressBar: {
-                const int value = std::clamp(v[4], 0, 100);
-                if (turn.on) {
-                    turned_rect(g, turn, v[0], v[1], v[2], v[3], rgb565(op.color2, kSurface), true);
-                    if (value) turned_rect(g, turn, v[0], v[1], v[2] * value / 100, v[3], c, true);
-                } else {
-                    g.fillRect(v[0], v[1], v[2], v[3], rgb565(op.color2, kSurface));
-                    g.fillRect(v[0], v[1], v[2] * value / 100, v[3], c);
-                }
-                break;
-            }
-        }
-    }
+}
+
+void draw_canvas(Gfx& g) {
+    gfx_exec::reset(g);  // every band starts the frame from the same state
+    gfx_exec::Picture picture;
+    if (!current.image.empty()) picture = {&current.image, current.image_x, current.image_y};
+    gfx_exec::run(g, frame_ops, current.blobs, picture);
     if (!update_error.isEmpty()) {  // the update stopped: say why on the canvas
         g.setFont(&cjk::cn12);
+        g.setTextSize(1);
+        g.setTextDatum(textdatum_t::top_left);
         g.setTextColor(kWarn, kBg);
         g.drawString(utf8_head(update_error, 36), 2, kHeight - 14);
     }
 }
 
-// Every canvas is drawn in memory and pushed whole (drawing op by op on the
-// display shows the shapes appear one after another).  A still canvas gives
-// the frame back at once; an animated one keeps it until it closes.
-void draw_canvas(Gfx& g) {
-    if (!frame_refused && make_frame()) {
-        draw_canvas_on(*frame);
-        frame->pushSprite(0, 0);
-        if (!current.frame_ms) drop_frame();
-    } else {
-        frame_refused = true;
-        draw_canvas_on(g);
-    }
-}
-
-void draw_overlay() {
-    auto& g = M5Cardputer.Display;
-    g.startWrite();
-    g.fillScreen(kBg);
+void paint_overlay(Gfx& g) {
     if (current.kind == Overlay::Kind::Canvas) {
         draw_canvas(g);
     } else if (current.kind == Overlay::Kind::Panel) {
@@ -341,15 +158,24 @@ void draw_overlay() {
         static const lgfx::IFont* const fonts_by_size[] = {&cjk::cn12, &cjk::cn14, &cjk::cn12};
         static const uint8_t scales[] = {2, 1, 1};
         static const int heights[] = {26, 16, 14};
-        std::vector<String> lines;
-        int font = 0;
-        for (; font < 3; ++font) {
-            g.setFont(fonts_by_size[font]);
-            g.setTextSize(scales[font]);
-            lines = wrap_text(g, current.text, kWidth - kPad * 2);
-            if (static_cast<int>(lines.size()) * heights[font] <= kHeight - kLine) break;
-        }
-        if (font == 3) font = 2;
+        struct Fitted {
+            int font = 0;
+            std::vector<String> lines;
+        };
+        static compose::PerUpdate<Fitted> fitted;  // the size and the lines, once for all the bands
+        const Fitted& fit_text = fitted.get(g, [&] {
+            Fitted out;
+            for (out.font = 0; out.font < 3; ++out.font) {
+                g.setFont(fonts_by_size[out.font]);
+                g.setTextSize(scales[out.font]);
+                out.lines = wrap(g, current.text, kWidth - kPad * 2);
+                if (static_cast<int>(out.lines.size()) * heights[out.font] <= kHeight - kLine) break;
+            }
+            if (out.font == 3) out.font = 2;
+            return out;
+        });
+        const int font = fit_text.font;
+        const auto& lines = fit_text.lines;
         g.setFont(fonts_by_size[font]);
         g.setTextSize(scales[font]);
         const int shown = std::min<int>(lines.size(), (kHeight - kLine) / heights[font]);
@@ -361,14 +187,13 @@ void draw_overlay() {
         }
         g.setTextSize(1);
         g.setFont(&cjk::cn12);
-        g.setTextColor(kMuted, kBg);
-        g.drawRightString("任意键返回", kWidth - kPad, kHeight - kLine);
+        footer(g, {"任意键返回"});
     } else if (current.kind == Overlay::Kind::Qr) {
         const int x = qr_panel(g, current.text);
         g.setFont(&cjk::cn12);
         g.setTextColor(kText, kBg);
         int y = 4;
-        for (const auto& line : wrap_text(g, current.text, kWidth - x - 2)) {
+        for (const auto& line : wrap(g, current.text, kWidth - x - 2)) {
             if (y > kHeight - kLine * 2) break;
             g.drawString(line, x, y);
             y += kLine;
@@ -376,9 +201,6 @@ void draw_overlay() {
         g.setTextColor(kMuted, kBg);
         g.drawString("任意键返回", x, kHeight - kLine);
     } else if (current.kind == Overlay::Kind::Image) {
-        if (current.image.empty() && !current.image_path.isEmpty()) {
-            storage::read_bytes(current.image_path, current.image, 32768);  // drawn again: from the card
-        }
         const auto& b = current.image;
         const auto datum = textdatum_t::middle_center;
         bool ok = false;
@@ -390,10 +212,20 @@ void draw_overlay() {
             g.setTextColor(kWarn, kBg);
             g.drawCentreString("图片无法解码", kWidth / 2, kHeight / 2 - 6);
         }
-        current.image.clear();  // drawn once; the screen keeps it
+    }
+}
+
+void draw_overlay() {
+    if (current.kind == Overlay::Kind::Canvas) prepare_canvas();
+    if (current.kind == Overlay::Kind::Image && current.image.empty() && !current.image_path.isEmpty()) {
+        storage::read_bytes(current.image_path, current.image, 32768);  // drawn again: from the card
+    }
+    compose::frame(paint_overlay);
+    std::vector<ui_canvas::Op>().swap(frame_ops);  // made again for the next frame
+    if (current.kind == Overlay::Kind::Image) {  // drawn; the screen keeps it
+        current.image.clear();
         current.image.shrink_to_fit();
     }
-    g.endWrite();
     dirty = false;
 }
 
@@ -416,12 +248,10 @@ bool show(Overlay incoming) {
     if (current.kind == Overlay::Kind::Canvas && !current.image.empty()) arena::note("canvas_image", current.image.size());
     else arena::give_back("canvas_image");
     if (!same_panel) {  // a refresh of the same canvas keeps its frame count
-        frame_refused = false;  // a new canvas asks for memory again
         anim_frame = 0;
         anim_last = millis();
         start_vars();
     }
-    if (current.kind != Overlay::Kind::Canvas || !current.frame_ms) drop_frame();
     if (!same_panel) {
         cursor = 0;
         choice_bar.reset();  // a new panel: the highlight starts in place
@@ -434,7 +264,7 @@ bool show(Overlay incoming) {
     return !same_panel;
 }
 
-void suspend() { drop_frame(); }
+void suspend() {}
 
 bool is_panel() { return is_open && current.kind == Overlay::Kind::Panel; }
 
@@ -474,10 +304,8 @@ void draw(bool force) {
         dirty = true;
     }
     if (!dirty && !force && is_open && current.kind == Overlay::Kind::Panel && (choices_dirty || choice_bar.sliding())) {
-        auto& g = M5Cardputer.Display;
-        g.startWrite();
-        draw_choices(g);
-        g.endWrite();
+        const int n = static_cast<int>(current.choices.size());
+        compose::area({0, kHeight - kLine - n * kLine - 1, kWidth, n * kLine}, draw_choices);
         choices_dirty = false;
         return;
     }
@@ -489,7 +317,6 @@ void draw(bool force) {
 
 void dismiss() {
     arena::give_back("canvas_image");
-    drop_frame();
     drop_vars();
     is_open = false;
     current = Overlay();
